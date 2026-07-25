@@ -2,7 +2,7 @@
 name: task-pipeline
 description: 承認済みタスクの自動消化パイプライン。issue トラッカー (アダプタで抽象化) からタスクを読み、ユーザーがまとめて承認したキューを /loop の各イテレーションで 1 件ずつ、固定フェーズ (research → plan → implement → report) で実行する。各フェーズはフレッシュな検証サブエージェントの PASS なしに先へ進まない。`/loop /task-pipeline <tracker> <source>` で回す。
 user-invocable: true
-argument-hint: "<tracker> <source>  例: markdown ./TASKS.md"
+argument-hint: "<tracker> [source]  例: gh / gh owner/repo / markdown ./TASKS.md"
 ---
 
 # task-pipeline — 承認済みタスクの自動消化
@@ -19,7 +19,9 @@ Note: ending the turn while a background executor is working, with the next step
 
 ## 引数と場所
 
-- `$ARGUMENTS`: `<tracker> <source> [finish=none|commit|pr]` (例: `markdown ./TASKS.md finish=commit`)。`/loop` 経由では毎イテレーション同じ引数で再起動される。
+- `$ARGUMENTS`: `<tracker> [source] [finish=none|commit|pr]` (例: `markdown ./TASKS.md finish=commit`、`gh finish=pr`)。`/loop` 経由では毎イテレーション同じ引数で再起動される。
+  - tracker より後ろのトークンは、`finish=` で始まるものが `finish`、それ以外が `source`。
+  - **`source` は省略できる。** その場合はアダプタ起動プロンプトの `source:` を空にして渡し、既定値の解釈はアダプタに委ねる (既定を持たないアダプタはエラーを返す)。state.json の `source` には与えられたまま (省略なら空文字) を記録する。
   - `finish` はタスク完了時のコード変更の扱い。`none` (省略時): working tree に未コミットで残す。`commit`: タスクごとに現在のブランチへコミット。`pr`: タスクごとにブランチを切り、コミット・push して PR を作成。
 - skill dir: `~/.claude/skills/task-pipeline/`
 - アダプタ定義: `~/.claude/skills/task-pipeline/references/adapters/<tracker>.md`。存在しなければ adapters/ を Glob で列挙して提示し、**ループを止めて** (枯渇時フロー手順 2 と同じ) 終了する。

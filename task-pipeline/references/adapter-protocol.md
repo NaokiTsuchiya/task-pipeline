@@ -8,6 +8,7 @@
 
 - トラッカーから「未着手 (open) で、blocked / in_review 扱いでない」タスクを列挙する。
 - 各タスクの本文を `<state dir>/tasks/<id>.md` に書く。frontmatter に最低限 `id`、`title`、トラッカー側の参照 (行・issue 番号・URL 等、mark で使うもの) を含める。
+- 本文の取得が高くつくトラッカーでは、`list` は frontmatter だけのスタブを書き、**本文の書き出しを `mark <id> in_progress` まで遅らせてよい** (タスク開始時に 1 回だけ呼ばれる)。承認されない候補の取得コストを払わずに済む。その場合スタブには、本文がまだ無いときに要求へ到達する手段 (issue の URL 等) を必ず書いておくこと — `mark` の失敗ではパイプラインは止まらないので、スタブのまま executor に渡ることがある。
 - 応答は `{"tasks": [{"id": "...", "title": "..."}]}` の JSON のみ。本文や生データを応答に含めない (オーケストレーターのコンテキストを守るため)。
 - タスクを取得できない事情 (source が無い、認証切れ、API エラー等) は、**空の一覧ではなく** `{"error": "..."}` で返す。
 - `id` は安定かつ一覧内で一意であること: 同じタスクは何度 list しても同じ id になり、異なるタスクが同じ id を持たない。
@@ -22,9 +23,9 @@
 - `blocked` / `in_review` に使う表現は、`list` が安価に除外判定できるものにする (次の list で候補に再登場してはならない)。
 - 応答は `{"ok": true}` または `{"ok": false, "error": "..."}` のみ。
 
-## 新しいトラッカーの追加手順 (Jira / GitHub Issues / Notion)
+## 新しいトラッカーの追加手順 (Jira / Notion など)
 
 1. `references/adapters/<name>.md` を 1 枚書く。内容は「そのトラッカーで list と mark をどう実現するか」だけ。
    - MCP のあるトラッカーでは、サブエージェント内で ToolSearch で該当 MCP ツールを load して呼ぶ、と書く。MCP のツールスキーマはアダプタサブエージェントのコンテキストにしか載らず、オーケストレーターには載らない — これがアダプタをサブエージェントで動かす理由でもある。
-   - 例 (GitHub Issues): list = `search_issues` / `issue_read` で open issue を取得して `tasks/` に書く (id は `gh-<issue番号>`)。mark in_review = `in-review` ラベル付与 + PR URL をコメント (list のクエリでラベルを除外)。mark blocked = `blocked` ラベル付与 (コメントは理由の補足として任意)。mark done = `issue_write` で close (PR の `Fixes #n` による自動 close に任せてもよい)。
+   - MCP を使うアダプタの実例は [adapters/gh.md](adapters/gh.md) (GitHub Issues)。ラベルで in_review / blocked を表し、list でそれを除外する形。「取得エラーを空の一覧と取り違えない」「状態の更新が全置換 API のときは read-modify-write する」など、API 経由のトラッカーで共通して要るものが揃っている。
 2. 以上。SKILL.md、状態スキーマ、executor/verifier に変更は不要。`/task-pipeline <name> <source>` で使える。
