@@ -1,6 +1,6 @@
 ---
 name: task-pipeline
-description: 承認済みタスクの自動消化パイプライン。issue トラッカー (アダプタで抽象化) からタスクを読み、ユーザーがまとめて承認したキューを /loop の各イテレーションで 1 件ずつ、固定フェーズ (research → plan → implement → report) で実行する。各フェーズはフレッシュな検証サブエージェントの PASS なしに先へ進まない。`/loop /task-pipeline <tracker> <source>` で回す。
+description: 承認済みタスクの自動消化パイプライン。issue トラッカー (アダプタで抽象化) からタスクを読み、優先順位を付けた候補からユーザーが 1 件選んで承認したものを、/loop の各イテレーションで固定フェーズ (research → plan → implement → report) で実行する。各フェーズはフレッシュな検証サブエージェントの PASS なしに先へ進まない。`/loop /task-pipeline <tracker> <source>` で回す。
 user-invocable: true
 argument-hint: "<tracker> [source]  例: gh / gh owner/repo / markdown ./TASKS.md"
 ---
@@ -57,6 +57,7 @@ Note: ending the turn while a background executor is working, with the next step
       "review": null
     }
   ],
+  "candidates": [{"id": "t-9z8y", "title": "未承認タスク", "reason": "順位の理由"}],
   "history": ["2026-07-16T09:12Z done t-1a2b3c4d (.task-pipeline/runs/t-1a2b3c4d/report.md)"]
 }
 ```
@@ -66,23 +67,38 @@ Note: ending the turn while a background executor is working, with the next step
 - `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は `finish=pr` のときだけ (回収の判定に使う)。
 - `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
+- `candidates` は未承認タスクを**優先順の並び**で保持するキャッシュ (下記「承認」)。承認のたびにトリアージをやり直さないために置く。
 
 ## 毎イテレーションの手順
 
 0. 必要ツールが遅延ロード状態なら、最初に 1 回の ToolSearch でまとめてロードする (`select:SendMessage` など。ループ停止時は CronList/CronDelete も)。
 1. `state.json` を読む。`review.tip` を持つ in_review タスクがあれば、先にマージの回収 (下記) を行う。その後:
-   - state が無い → セットアップへ。
    - `in_progress` のタスクがある → 飛行中の扱いへ。
    - `approved` のタスクがある → 先頭 1 件をタスク実行へ (**1 イテレーション 1 タスク**)。
-   - どちらも無い → 枯渇時フローへ。
+   - どちらも無い (state が無い場合を含む) → 承認へ。
 2. 処理の節目ごとに state.json を更新し、タスクが in_review / blocked / done になったら進捗を 1〜3 行 (証拠パス付き) で報告する。
 
-## セットアップ (state.json が無いとき)
+## 承認 (approved も in_progress も無いとき)
 
-1. アダプタサブエージェントに `list` を実行させる (プロンプト書式は下記「アダプタの呼び方」)。返るのは `{id, title}` のインデックスだけで、本文は `tasks/<id>.md` に書かれている。
-2. AskUserQuestion (multiSelect、1 問 4 件まで、1 回 4 問まで。溢れたら繰り返す) で、実行してよいタスクを承認してもらう。これがこのパイプラインで唯一ユーザーを待ってよい定常ポイントである。
-3. 承認されたタスクだけを `queue` に入れた state.json を書く。未承認タスクは記録しない (次の承認時に都度 `list` し直す)。
-4. そのまま最初の 1 件をこのイテレーション内で実行する。
+**1 回の承認で通すのは 1 件だけ。** ユーザーに一覧の優先順位を考えさせない — 順位付けはこちらの仕事で、ユーザーの仕事は提示された上位から 1 件を選ぶことだけである。これがこのパイプラインで唯一ユーザーを待ってよい定常ポイントである。
+
+1. アダプタサブエージェントに `list` を実行させる (プロンプト書式は下記「アダプタの呼び方」)。返るのは `{id, title}` のインデックスだけで、本文は `tasks/<id>.md` にある。`{"tasks": []}` なら枯渇時フローへ。
+2. 優先順位を決める。`candidates` に今回の一覧の id がすべて含まれていれば**その並びを再利用する** (一覧から消えた id は落とす)。含まれない id が 1 つでもあれば、トリアージ用サブエージェント (general-purpose、同期) を 1 体起動して順位付けさせる:
+
+   ```
+   You are a triage subagent. Read only; do not modify anything.
+   Rank these tasks by which should be worked on first:
+   <tasks/<id>.md の絶対パスを改行区切りで>
+   A task file may be a stub that points to an external source (URL) instead of holding the body.
+   In that case read that source.
+   Judge by: stated priority, dependencies between tasks (what unblocks the most),
+   size, and risk of doing it later.
+   Return only JSON: {"ranked": [{"id": "...", "reason": "<日本語 40 字以内>"}, ...]}
+   ```
+
+   結果を `candidates` に保存する (`title` は `list` の値を使う)。
+3. AskUserQuestion で **1 件だけ**選んでもらう (単一選択)。`candidates` の上位 4 件を順に並べ、**先頭のラベル末尾に「(推奨)」を付ける**。各選択肢の description には順位の理由と、分かるなら規模・依存を 1 行で書く。**問いは 1 つだけ。追加の質問を重ねない。**
+4. 選ばれた 1 件だけを `queue` に入れて state.json を書き、`candidates` からその id を落とす。そのままこのイテレーション内で実行する。
 
 ## アダプタの呼び方
 
@@ -162,14 +178,13 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 
 ## ペーシングと枯渇
 
-- タスクを in_review / blocked にした時点で `approved` が残っている → /loop dynamic 配下なら ScheduleWakeup 60 秒で次イテレーションへ。
+- タスクを in_review / blocked にしたら → /loop dynamic 配下なら ScheduleWakeup 60 秒で次イテレーションへ (そこで次の 1 件の承認を聞く)。
 - 飛行中にターンを終えるとき → フォールバック 1800 秒 (上記)。
-- `approved` も `in_progress` も無くなったら (枯渇):
+- 承認で `list` が `{"tasks": []}` を返したら (枯渇。**候補そのものが尽きたときだけ**):
   1. マージの回収 (上記) を行ってから、state.json の history と queue を集計し、証拠パス付きの最終報告を書く。レビュー待ち (in_review) は ref (PR URL / コミットハッシュ) 付きで一覧にする — ここがユーザーのレビュー起点になる。回収済み (done) と blocked (理由付き) も一覧にする。
   2. **ループを止める**: dynamic なら ScheduleWakeup `stop: true`。固定間隔 (cron) なら CronList で自ジョブを特定して CronDelete。
-  3. アダプタ `list` で未承認の残タスクを取得し、あれば AskUserQuestion で次の承認を求めてターンを終える。承認されたら queue に追記して `/loop /task-pipeline <同じ引数>` の再実行を案内する。残タスクが無ければ全完了を告げて終わる。
 
-  停止の理由: 承認は対話でしか進まないので、承認済みが無いまま起き続けるのは無意味な wakeup とコンテキスト肥大にしかならない。この停止は「認可された仕事はすべて消化した」という宣言であり、承認の質問で終わることで、戻ってきたユーザーがその場で次を再武装できる。
+  停止の理由: 候補が無いまま起き続けるのは無意味な wakeup とコンテキスト肥大にしかならない。この停止は「トラッカーに残っている仕事はすべて消化した」という宣言である。候補が残っているのにキューが空なだけのときは**止めずに承認を聞く** — ユーザーは 1 件ずつ選ぶので、キューが空になるのは正常な通過点であって終わりではない。
 
 ## 報告規律
 
