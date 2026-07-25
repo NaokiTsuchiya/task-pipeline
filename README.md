@@ -39,7 +39,7 @@ ln -s "$(pwd)/task-pipeline" ~/.claude/skills/task-pipeline
 
 **`source` は省略できる**。省略すると作業対象プロジェクトの `origin` から `owner/repo` を自動で解決するので、GitHub がリモートのリポジトリなら `/loop /task-pipeline gh` だけで動く。明示する場合は `owner/repo` に任意のフィルタを付けた形: `owner/repo?label=ready&label=backend&assignee=@me&milestone=v1.0%20release` (リポジトリ部を省いて `?label=ready` だけでもよい)。空白はパーセントエンコードする (`source` に空白は使えない)。`&` を含むのでシェルに直接打つときはクォートする。読み書きは GitHub MCP 経由。
 
-使うラベルは **`in-review` と `blocked` の 2 つだけ**。多くのリポジトリには既にあるが、無ければ一度だけ作る (MCP にラベル作成ツールが無いため)。チームが別の意味でこの名前を使っているなら `?review_label=needs-review&blocked_label=on-hold` のように逃がせる。
+使うラベルは **`in-review` と `blocked` の 2 つだけ**。リポジトリに無くても初回に自動生成されるので事前準備は要らない (色は既定のグレー)。色と説明を付けたいときだけ先に作っておく。チームが別の意味でこの名前を使っているなら `?review_label=needs-review&blocked_label=on-hold` のように逃がせる。
 
 ```sh
 gh label create in-review -c 1D76DB -d "レビュー待ち"
