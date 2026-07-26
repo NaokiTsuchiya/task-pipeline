@@ -65,7 +65,7 @@ Note: ending the turn while a background executor is working, with the next step
 
 - フェーズ列は **research → plan → implement → report** で固定。`phase`、判定ファイル名、サブエージェントへの指示は必ずこの英語トークンを使う。`finish=commit|pr` のときだけ、report PASS 後に検証対象外の後処理として `phase: finalize` を挟む。
 - パイプラインが自力で到達する終端は `in_review` (レビュー待ち) と `blocked`。**Done (マージ/受け入れ完了) はユーザーの行為である。** パイプラインが done を書くのは、ユーザーのマージを git 履歴で証明できたときの回収 (下記「マージの回収」) だけ。
-- `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は `finish=pr` のときだけ (回収の判定に使う)。
+- `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。
 - `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。
 - `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
@@ -153,7 +153,7 @@ Return only what the adapter file specifies for this operation.
    - **PASS** → 判定 JSON を `runs/<id>/verdicts/<phase>-<attempt>.json` に書き、state の phase を進める。次フェーズがあれば SendMessage で実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」と送る (再開は background で走る。停止通知が次の処理を駆動する)。report まで PASS したら:
      - `finish=none` → そのままレビュー待ち処理へ。
      - `finish=commit|pr` → state の `phase` を `finalize` にし、SendMessage で「report verified PASS. Finalize the task (finish mode: `<mode>`).」を送る。`FINALIZED — <commit hash / PR URL>` の停止通知でレビュー待ち処理へ。`BLOCKED` 停止なら通常どおり即 blocked。finalize は成果物フェーズではないので検証ゲートは無い。
-     - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。`finish=pr` のときは回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクト> rev-parse <branch>`、base は worktree 作成時に控えたブランチ。
+     - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。**タスクブランチにコミットがあれば** (`git -C <プロジェクト> rev-list --count <base>..<branch>` が 1 以上) 回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクト> rev-parse <branch>`、base は worktree 作成時に控えたブランチ。`finish=commit` と `finish=pr` の両方が該当する — worktree を使う以上どちらもタスクブランチにコミットを積むので、回収の条件は finish モードではなくコミットの有無で決まる。**コミットが 0 件のとき (`finish=none`) は tip を入れてはならない**: tip が base と同じコミットを指し、`merge-base --is-ancestor` が真になって「マージ済み」と誤判定し、未コミットの作業ごと worktree が消される。
    - **FAIL** → 判定 JSON を保存し `attempts` を +1。SendMessage で実行エージェントへ required_fixes をそのまま送り、修正・再停止後に **新しい** 検証エージェントで再検証する。
 
 ### worktree
@@ -190,7 +190,7 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 
 ## マージの回収 (レビュー待ち → Done)
 
-`finish=pr` でレビュー待ちにしたタスクは、ユーザーがマージしたかをローカル git 履歴だけで判定できる (gh・リモート不要、マージの手段も問わない)。毎イテレーションの最初と、枯渇時フローの集計前に、`review.tip` を持つ in_review タスクそれぞれについて**プロジェクト側**で (worktree ではない):
+タスクブランチにコミットを積んでレビュー待ちにしたタスク (`finish=commit` / `finish=pr`) は、ユーザーがマージしたかをローカル git 履歴だけで判定できる (gh・リモート不要、マージの手段も問わない)。毎イテレーションの最初と、枯渇時フローの集計前に、`review.tip` を持つ in_review タスクそれぞれについて**プロジェクト側**で (worktree ではない):
 
 1. `git merge-base --is-ancestor <tip> <base>` が真 → マージ済み (通常マージ / ff)。
 2. 偽なら `git cherry <base> <tip>` を実行し、出力の全行が `-` → 取り込み済み (squash / rebase)。
