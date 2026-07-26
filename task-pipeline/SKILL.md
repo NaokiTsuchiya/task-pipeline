@@ -25,10 +25,20 @@ Note: ending the turn while a background executor is working, with the next step
   - `finish` はタスク完了時のコード変更の扱い。`none` (省略時): working tree に未コミットで残す。`commit`: タスクごとに現在のブランチへコミット。`pr`: タスクごとにブランチを切り、コミット・push して PR を作成。
 - skill dir: `~/.claude/skills/task-pipeline/`
 - アダプタ定義: `~/.claude/skills/task-pipeline/references/adapters/<tracker>.md`。存在しなければ adapters/ を Glob で列挙して提示し、**ループを止めて** (枯渇時フロー手順 2 と同じ) 終了する。
-- 状態はカレントプロジェクトの `.task-pipeline/` 配下:
+- **プロジェクトルート**: このパイプラインが「プロジェクト」と呼ぶのは常に**メイン worktree のルート**であって、起動時のカレントディレクトリではない。
+
+  ```
+  git rev-parse --path-format=absolute --git-common-dir
+  ```
+
+  が返すパス (常にメインリポジトリの `.git`。linked worktree から実行しても同じ) の**親ディレクトリ**をプロジェクトルートとする。これにより、ユーザーが別の worktree から `/loop /task-pipeline` を回しても state とタスク worktree は 1 箇所に集約され、その worktree が消えても失われない。このコマンドが失敗する (git リポジトリでない) ときだけ、カレントディレクトリをプロジェクトルートとする。
+
+- 状態はプロジェクトルートの `.task-pipeline/` 配下:
   - `state.json` — 唯一の状態源。**毎イテレーション必ず読み直す**。コンテキスト内の記憶を状態として使わない。
   - `tasks/<id>.md` — タスク本文 (アダプタサブエージェントが書く)
   - `runs/<id>/` — フェーズ成果物と検証判定
+
+  `.task-pipeline/` を新規に作るときは、同時に `<git common dir>/info/exclude` に `/.task-pipeline/` を追記する (未記載のときだけ)。ユーザーが追跡している `.gitignore` は書き換えない。
 
 ## コンテキスト規律 (最重要)
 
@@ -110,7 +120,7 @@ Note: ending the turn while a background executor is working, with the next step
 You are a tracker adapter subagent.
 Read ~/.claude/skills/task-pipeline/references/adapters/<tracker>.md and follow it.
 operation: list | mark <id> <status> [reason]
-source: <source> / state dir: <カレントプロジェクトの .task-pipeline 絶対パス>
+source: <source> / state dir: <プロジェクトルートの .task-pipeline 絶対パス>
 why: <この操作に至った経緯を 1 行、事実だけ>
 Return only what the adapter file specifies for this operation.
 ```
@@ -153,22 +163,24 @@ Return only what the adapter file specifies for this operation.
    - **PASS** → 判定 JSON を `runs/<id>/verdicts/<phase>-<attempt>.json` に書き、state の phase を進める。次フェーズがあれば SendMessage で実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」と送る (再開は background で走る。停止通知が次の処理を駆動する)。report まで PASS したら:
      - `finish=none` → そのままレビュー待ち処理へ。
      - `finish=commit|pr` → state の `phase` を `finalize` にし、SendMessage で「report verified PASS. Finalize the task (finish mode: `<mode>`).」を送る。`FINALIZED — <commit hash / PR URL>` の停止通知でレビュー待ち処理へ。`BLOCKED` 停止なら通常どおり即 blocked。finalize は成果物フェーズではないので検証ゲートは無い。
-     - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。**タスクブランチにコミットがあれば** (`git -C <プロジェクト> rev-list --count <base>..<branch>` が 1 以上) 回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクト> rev-parse <branch>`、base は worktree 作成時に控えたブランチ。`finish=commit` と `finish=pr` の両方が該当する — worktree を使う以上どちらもタスクブランチにコミットを積むので、回収の条件は finish モードではなくコミットの有無で決まる。**コミットが 0 件のとき (`finish=none`) は tip を入れてはならない**: tip が base と同じコミットを指し、`merge-base --is-ancestor` が真になって「マージ済み」と誤判定し、未コミットの作業ごと worktree が消される。
+     - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。**タスクブランチにコミットがあれば** (`git -C <プロジェクトルート> rev-list --count <base>..<branch>` が 1 以上) 回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクトルート> rev-parse <branch>`、base は worktree 作成時に控えたブランチ。`finish=commit` と `finish=pr` の両方が該当する — worktree を使う以上どちらもタスクブランチにコミットを積むので、回収の条件は finish モードではなくコミットの有無で決まる。**コミットが 0 件のとき (`finish=none`) は tip を入れてはならない**: tip が base と同じコミットを指し、`merge-base --is-ancestor` が真になって「マージ済み」と誤判定し、未コミットの作業ごと worktree が消される。
    - **FAIL** → 判定 JSON を保存し `attempts` を +1。SendMessage で実行エージェントへ required_fixes をそのまま送り、修正・再停止後に **新しい** 検証エージェントで再検証する。
 
 ### worktree
 
 タスクは**それぞれ専用の git worktree で実行する**。ユーザーの作業ツリーを触らないので、パイプラインが回っている間もユーザーは同じリポジトリで普通に作業できる。
 
-- 置き場所は `<プロジェクト>/.claude/worktrees/task-pipeline/<id>`、ブランチは `task-pipeline/<id>`。作成はタスク実行手順 2 で、実行エージェントを起動する**前**に行う:
+- 置き場所は `<プロジェクトルート>/.claude/worktrees/task-pipeline/<id>`、ブランチは `task-pipeline/<id>`。作成はタスク実行手順 2 で、実行エージェントを起動する**前**に行う:
 
   ```
-  git -C <プロジェクト> worktree add -b task-pipeline/<id> .claude/worktrees/task-pipeline/<id> HEAD
+  git -C <プロジェクトルート> worktree add -b task-pipeline/<id> .claude/worktrees/task-pipeline/<id> HEAD
   ```
+
+  **必ずプロジェクトルート (メイン worktree) を基準にする。** 起動時のカレントディレクトリが別の worktree だったとしても、そこの下に作ってはならない — その worktree が `git worktree remove` されるときにタスクの作業ごと消える (または削除が失敗する)。分岐元の `HEAD` もプロジェクトルートのものになる。
 
 - 同じブランチを 2 つの worktree で同時にチェックアウトできないという git の制約上、**worktree を使う以上どのタスクも必ず自分のブランチを持つ**。したがって `finish=commit` は「現在のブランチ」ではなく `task-pipeline/<id>` へのコミットになり、`finish=none` の未コミット変更も worktree 側に残る。どちらの場合も、レビュー待ちの報告に worktree のパスとブランチ名を必ず書く。
-- 作成に成功したら state.json のそのタスクに `"worktree": "<絶対パス>"` を記録する。`review` の `base` には、worktree を作った時点でのプロジェクト側のブランチ (`git -C <プロジェクト> rev-parse --abbrev-ref HEAD`) を入れる。
-- **作れなかったとき**: プロジェクトが git リポジトリでない、またはブランチ名が既に使われている等で失敗したら、worktree 無しでプロジェクト直下を target project にして続行する (`worktree` は null のまま)。この場合の `finish=commit` は従来どおり現在のブランチへのコミットになる。理由を history に残す。
+- 作成に成功したら state.json のそのタスクに `"worktree": "<絶対パス>"` を記録する。`review` の `base` には、worktree を作った時点でのプロジェクト側のブランチ (`git -C <プロジェクトルート> rev-parse --abbrev-ref HEAD`) を入れる。
+- **作れなかったとき**: プロジェクトが git リポジトリでない、またはブランチ名が既に使われている等で失敗したら、worktree 無しでプロジェクトルートを target project にして続行する (`worktree` は null のまま)。この場合の `finish=commit` は従来どおり現在のブランチへのコミットになる。理由を history に残す。
 - **削除するのは done を回収したときだけ** (下記「マージの回収」)。in_review や blocked では消さない — `finish=none` の未コミット変更や blocked の途中成果物は worktree にしか無く、消すと失われるため。
 
 ### 検証ゲートの絶対規則
@@ -201,8 +213,8 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 done にしたタスクに `worktree` があれば、ここで片付ける (作業はマージ済みなので失うものが無い唯一の地点):
 
 ```
-git -C <プロジェクト> worktree remove <worktree パス>
-git -C <プロジェクト> branch -d task-pipeline/<id>
+git -C <プロジェクトルート> worktree remove <worktree パス>
+git -C <プロジェクトルート> branch -d task-pipeline/<id>
 ```
 
 削除に失敗しても (未コミット変更が残っている等) タスクは done のままにし、パスを添えて報告するだけにする。**強制削除 (`--force`) はしない。**

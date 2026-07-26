@@ -34,7 +34,7 @@ ln -s "$(pwd)/task-pipeline" ~/.claude/skills/task-pipeline
 - **タスクはそれぞれ専用の git worktree (`.claude/worktrees/task-pipeline/<id>`、ブランチ `task-pipeline/<id>`) で実行される**ので、動いている間もあなたは同じリポジトリで普通に作業できる。worktree が消えるのはマージを回収して Done にしたときだけで、レビュー待ちや blocked では残る (未コミットの変更や途中成果物を失わないため)。**`finish=none` は worktree が自動で消えることが無い** — コミットが無いのでマージのしようがなく、回収の対象にならない。不要になったら手で消すこと。
 - タスク実行の成功終端は「レビュー待ち (in_review)」で、Done (マージ/受け入れ完了) にするのはユーザーの判断。コード変更の扱いは `finish` 引数で選ぶ。省略時 (`none`) は worktree に未コミットで残す。`commit` は report の検証 PASS 後にタスクブランチへコミット。`pr` はさらに push して PR を作る (リモートと `gh` 認証が前提。push/PR は権限プロンプトを通る)。**同じブランチを 2 つの worktree に同時にチェックアウトできないため、`commit` でも現在のブランチではなくタスクブランチへのコミットになる。**
 - ループが止まるのは**トラッカーの候補が尽きたとき**だけで、そこで実績の最終報告を出す。1 件終わっただけでは止まらない。
-- 状態は作業対象プロジェクトの `.task-pipeline/` に置かれる (`state.json`、タスク本文、フェーズ成果物、検証判定)。
+- 状態は**メイン worktree のルート**の `.task-pipeline/` に置かれる (`state.json`、タスク本文、フェーズ成果物、検証判定)。基準は起動時のカレントディレクトリではなくメイン worktree なので、あなたが別の worktree から `/loop` を回しても state は 1 箇所に集約され、その worktree を消しても失われない。タスク用の worktree も同じくメイン worktree の下に作られる。`.task-pipeline/` は初回作成時に `.git/info/exclude` へ登録される (追跡下の `.gitignore` は変更しない)。
 
 ### gh (GitHub Issues)
 
