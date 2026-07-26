@@ -11,12 +11,11 @@
 
 ## インストール
 
-skill ディレクトリを `~/.claude/skills/` に symlink する:
-
 ```sh
-ln -s "$(pwd)/task-pipeline" ~/.claude/skills/task-pipeline
-ln -s "$(pwd)/task-prep" ~/.claude/skills/task-prep
+sh ./install.sh
 ```
+
+SKILL.md を持つ skill ディレクトリがすべて `~/.claude/skills/` へ symlink される。skill を追加したときも同じコマンドを再実行するだけでよい (冪等。既存の無関係なエントリは上書きせず警告して残す)。リンク先は第 1 引数または環境変数 `SKILLS_DIR` で変更できる (例: `sh ./install.sh /path/to/dir`)。
 
 ## task-pipeline の使い方
 
