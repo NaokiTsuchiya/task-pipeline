@@ -111,9 +111,13 @@ You are a tracker adapter subagent.
 Read ~/.claude/skills/task-pipeline/references/adapters/<tracker>.md and follow it.
 operation: list | mark <id> <status> [reason]
 source: <source> / state dir: <カレントプロジェクトの .task-pipeline 絶対パス>
+why: <この操作に至った経緯を 1 行、事実だけ>
 Return only what the adapter file specifies for this operation.
 ```
 
+- `why` には、その操作が何に由来するかを事実として書く。例: `user approved this task for execution` (in_progress) / `pipeline finished the work; report verified PASS` (in_review) / `verification failed 3 times` (blocked) / `the user's merge was proven in git history` (done) / `queue is empty; fetching candidates for the user to approve` (list)。
+  - トラッカーへの `mark` は外部システムへの副作用であり、**実行するサブエージェント自身のコンテキストに根拠が無いと、監視から見て無断の操作になる** (issue の close などで実際に警告が出る)。オーケストレーターは根拠を持っているので、渡すだけでよい。
+  - **事実でないことを書いてはならない。** 書けるだけの根拠が無いなら、そもそもその `mark` を呼ぶべきではない。
 - `list` が `{"error": ...}` を返したら (トラッカー到達不能・認証切れ等)、**空の一覧と混同しない**。エラー内容を報告してループを止め (枯渇時フロー手順 2 と同じ)、終了する。
 - `mark` が `{"ok": false}` を返したら history に記録して続行する (state.json が正。トラッカーとのずれは次の報告に含める)。
 
