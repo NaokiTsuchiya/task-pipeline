@@ -87,7 +87,8 @@
 
 1. `source` を `list` と同じ規則でパースしてリポジトリを得る (フィルタ部は無視する。空なら同じくカレントリポジトリから解決する)。`id` から `gh-` を外して issue 番号を得る。`gh-<数字>` の形でなければ `{"ok": false, "error": "id の形式が不正です: <id>"}`。
 2. `issue_read(method: "get")` で現在の labels と assignees を読む。ラベルは名前の配列で返ることもオブジェクトの配列で返ることもあるので、名前だけを取り出して使う。
-3. 新しいラベル集合 = **現在のラベル − 状態ラベル 2 つ + 目的のラベル**。`in_progress` / `done` / **ref が PR URL の `in_review`** は足さない (2 つとも外すだけ)。`issue_write(method: "update", owner, repo, issue_number, labels: <新しい集合>)` を呼ぶ。`labels` は**追加ではなく全置換**なので、必ず現在の集合から計算すること。指定しなかったフィールドは変更されない。集合が現在と同じなら `labels` は送らなくてよい。
+3. 新しいラベル集合 = **現在のラベル − 状態ラベル 2 つ + 目的のラベル**。`in_progress` / `done` / **ref が PR URL の `in_review`** は足さない (2 つとも外すだけ)。
+   - **既に目的の状態になっているなら書き込まない。** ラベル集合が現在と同じで、assignee の追加も不要で、`done` なら既に close 済み — この場合 `issue_write` を呼ばずに `{"ok": true}` を返す (コメント投稿など下記の追加操作も、既に行われているなら繰り返さない)。PR のマージで issue が自動 close された後の `mark done` がこれに当たる。**外部システムへの書き込みは、状態を実際に変えるときだけ行う。**`issue_write(method: "update", owner, repo, issue_number, labels: <新しい集合>)` を呼ぶ。`labels` は**追加ではなく全置換**なので、必ず現在の集合から計算すること。指定しなかったフィールドは変更されない。集合が現在と同じなら `labels` は送らなくてよい。
 4. status ごとの追加操作:
    - `in_progress`: `get_me` の `login` を現在の assignees に足して、同じ `issue_write` の `assignees` に渡す (これも全置換)。すでに入っていれば何もしない。アサインできない権限のリポジトリでは無視されるが、それで失敗扱いにしない。**加えて、下記「タスク本文の書き出し」を行う。**
    - `in_review` で **ref が PR URL のとき**: ラベルは付けず (状態ラベルは 2 つとも外したまま)、代わりに **PR を issue に紐付ける**。URL 末尾から PR 番号を取り、`pull_request_read(method: "get")` で本文を読み、`Fixes #<issue番号>` が無ければ本文の末尾に空行を挟んで足し、`update_pull_request(pullNumber, body: <新しい本文>)` で書き戻す。既に入っていれば何もしない。**コメントは投稿しない** — 紐付けが issue のタイムラインに出るので重複になる。
