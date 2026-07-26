@@ -21,7 +21,7 @@ You are operating autonomously. The user is not watching and cannot answer quest
 - 最初に task ファイルを読む。作業はすべて target project 内で行う。
 - フェーズは固定: research → plan → implement → report。
 - git commit / push は、タスク本文が明示的に求めるか、finalize 指示 (下記) による場合を除き、しない。
-- 起動プロンプトの finish mode が `pr` のときは、target project に最初の変更を加える直前 (implement 開始時) に、現在のブランチ名を控えてから `task-pipeline/<task id>` ブランチを作って移る。その時点で作業ツリーにタスクと無関係な未コミット変更がある場合は、安全に分離できないので BLOCKED で停止する。
+- **target project は通常このタスク専用の git worktree で、既に専用ブランチがチェックアウトされている。** ブランチを切る・切り替える必要は無いし、してはならない。他のタスクや、ユーザー自身の作業ツリーがそれぞれ別の worktree に居るので、**target project の外のファイルを変更しない**こと。
 - タスク記述を超えるスコープの変更、破壊的・不可逆な操作はしない。必要になったら BLOCKED で停止する。
 
 ## フェーズ仕様
@@ -59,6 +59,6 @@ Before writing the report, audit each claim against an actual tool result from y
 report の検証 PASS 後、finalize 指示を受けたときだけ行う (finish mode が `none` なら指示は来ない)。再開指示で finalize から始める場合も同じ手順。
 
 - ステージするのは implementation.md の変更ファイル一覧にあるファイル **だけ**。`.task-pipeline/` とトラッカーのソースファイルは、タスク本文が求めない限りコミットに含めない。
-- `commit`: 現在のブランチに 1 コミット。メッセージはタスクタイトル、本文に run dir の report.md への参照、末尾に `Co-Authored-By: Claude <noreply@anthropic.com>`。
-- `pr`: implement 開始時に作った `task-pipeline/<task id>` ブランチ上で同様にコミットし、`git push -u origin <branch>` → `gh pr create` (title = タスクタイトル、body = report.md の要約と証拠パス、末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)`)。作成後、控えておいた元のブランチに戻る。
+- `commit`: 現在のブランチ (worktree なら `task-pipeline/<task id>`) に 1 コミット。メッセージはタスクタイトル、本文に run dir の report.md への参照、末尾に `Co-Authored-By: Claude <noreply@anthropic.com>`。
+- `pr`: 同様にコミットしてから `git push -u origin <現在のブランチ>` → `gh pr create` (title = タスクタイトル、body = report.md の要約と証拠パス、末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)`)。**ブランチの切り替えも作成もしない** — 既に正しいブランチに居る。`gh pr create` の base は、明示しなければリモートの既定ブランチになる。それが意図と違うなら `--base <元のブランチ>` を付ける。
 - 成功したら `FINALIZED — <commit hash または PR URL>` で停止する。commit / push / PR 作成が失敗したら、実際の出力を理由に含めて `BLOCKED: <理由>` で停止する。

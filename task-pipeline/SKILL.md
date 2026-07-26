@@ -54,6 +54,7 @@ Note: ending the turn while a background executor is working, with the next step
       "attempts": 0,
       "executor": null,
       "blocked_reason": null,
+      "worktree": null,
       "review": null
     }
   ],
@@ -65,6 +66,7 @@ Note: ending the turn while a background executor is working, with the next step
 - フェーズ列は **research → plan → implement → report** で固定。`phase`、判定ファイル名、サブエージェントへの指示は必ずこの英語トークンを使う。`finish=commit|pr` のときだけ、report PASS 後に検証対象外の後処理として `phase: finalize` を挟む。
 - パイプラインが自力で到達する終端は `in_review` (レビュー待ち) と `blocked`。**Done (マージ/受け入れ完了) はユーザーの行為である。** パイプラインが done を書くのは、ユーザーのマージを git 履歴で証明できたときの回収 (下記「マージの回収」) だけ。
 - `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は `finish=pr` のときだけ (回収の判定に使う)。
+- `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。
 - `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
 - `candidates` は未承認タスクを**優先順の並び**で保持するキャッシュ (下記「承認」)。承認のたびにトリアージをやり直さないために置く。
@@ -118,36 +120,52 @@ Return only what the adapter file specifies for this operation.
 ## タスク実行
 
 1. state.json で対象タスクを `status: in_progress`, `phase: research`, `attempts: 0` に更新し、`runs/<id>/` を作る。アダプタで `mark <id> in_progress` する。
-2. 実行エージェントを **background で 1 体** 起動する (subagent_type: general-purpose)。プロンプトはこの 5 行のみ:
+2. **タスク専用の worktree を作る** (下記「worktree」)。作れなかった場合はそこに書いたとおりに扱う。
+3. 実行エージェントを **background で 1 体** 起動する (subagent_type: general-purpose)。プロンプトはこの 5 行のみ:
 
    ```
    You are the long-lived executor for exactly one task.
    Read ~/.claude/skills/task-pipeline/references/executor.md and follow it.
-   task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <cwd>
+   task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス>
    finish mode: <none|commit|pr>
    Begin with phase "research".
    ```
 
    agentId を state.json の `executor` に記録する。
-3. **以降、このタスクの進行は実行エージェントの停止通知だけが駆動する。** 通知待ちでターンを終えるときは、/loop dynamic 配下ならフォールバックの ScheduleWakeup (1800 秒、同じ prompt) を予約しておく (実行が沈黙したままでもループが死なないように)。稼働中の実行エージェントに作業指示を送ってはならない。
-4. 実行エージェントはフェーズを 1 つ終えるごとに成果物を run dir に書き、`PHASE <name> DONE — <成果物パス>` または `BLOCKED: <理由>` の 1 行で停止する。停止通知を受けたら:
+4. **以降、このタスクの進行は実行エージェントの停止通知だけが駆動する。** 通知待ちでターンを終えるときは、/loop dynamic 配下ならフォールバックの ScheduleWakeup (1800 秒、同じ prompt) を予約しておく (実行が沈黙したままでもループが死なないように)。稼働中の実行エージェントに作業指示を送ってはならない。
+5. 実行エージェントはフェーズを 1 つ終えるごとに成果物を run dir に書き、`PHASE <name> DONE — <成果物パス>` または `BLOCKED: <理由>` の 1 行で停止する。停止通知を受けたら:
    - `BLOCKED` → 即座にタスクを blocked にする (リトライしない)。state 更新、アダプタで `mark <id> blocked <理由>`、次のタスクは次イテレーションに回す。
    - `DONE` で、`<name>` が state.json の `phase` と一致 → 検証ゲートへ。
    - `DONE` で、`<name>` が state.json の `phase` と不一致 (プロトコル行の重複再送など) → 無視する。
-5. **検証ゲート**: フレッシュな検証エージェントを **毎回新規に** 同期起動する (subagent_type: general-purpose):
+6. **検証ゲート**: フレッシュな検証エージェントを **毎回新規に** 同期起動する (subagent_type: general-purpose):
 
    ```
    You are a fresh, independent verifier.
    Read ~/.claude/skills/task-pipeline/references/verifier.md and follow it.
-   phase: <phase> / task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <cwd>
+   phase: <phase> / task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス>
    Return only the verdict JSON.
    ```
 
    - **PASS** → 判定 JSON を `runs/<id>/verdicts/<phase>-<attempt>.json` に書き、state の phase を進める。次フェーズがあれば SendMessage で実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」と送る (再開は background で走る。停止通知が次の処理を駆動する)。report まで PASS したら:
      - `finish=none` → そのままレビュー待ち処理へ。
      - `finish=commit|pr` → state の `phase` を `finalize` にし、SendMessage で「report verified PASS. Finalize the task (finish mode: `<mode>`).」を送る。`FINALIZED — <commit hash / PR URL>` の停止通知でレビュー待ち処理へ。`BLOCKED` 停止なら通常どおり即 blocked。finalize は成果物フェーズではないので検証ゲートは無い。
-     - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告。`finish=pr` のときは回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git rev-parse <branch>`、base = `git rev-parse --abbrev-ref HEAD` (finalize 後は元ブランチに戻っている)。
+     - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。`finish=pr` のときは回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクト> rev-parse <branch>`、base は worktree 作成時に控えたブランチ。
    - **FAIL** → 判定 JSON を保存し `attempts` を +1。SendMessage で実行エージェントへ required_fixes をそのまま送り、修正・再停止後に **新しい** 検証エージェントで再検証する。
+
+### worktree
+
+タスクは**それぞれ専用の git worktree で実行する**。ユーザーの作業ツリーを触らないので、パイプラインが回っている間もユーザーは同じリポジトリで普通に作業できる。
+
+- 置き場所は `<プロジェクト>/.claude/worktrees/task-pipeline/<id>`、ブランチは `task-pipeline/<id>`。作成はタスク実行手順 2 で、実行エージェントを起動する**前**に行う:
+
+  ```
+  git -C <プロジェクト> worktree add -b task-pipeline/<id> .claude/worktrees/task-pipeline/<id> HEAD
+  ```
+
+- 同じブランチを 2 つの worktree で同時にチェックアウトできないという git の制約上、**worktree を使う以上どのタスクも必ず自分のブランチを持つ**。したがって `finish=commit` は「現在のブランチ」ではなく `task-pipeline/<id>` へのコミットになり、`finish=none` の未コミット変更も worktree 側に残る。どちらの場合も、レビュー待ちの報告に worktree のパスとブランチ名を必ず書く。
+- 作成に成功したら state.json のそのタスクに `"worktree": "<絶対パス>"` を記録する。`review` の `base` には、worktree を作った時点でのプロジェクト側のブランチ (`git -C <プロジェクト> rev-parse --abbrev-ref HEAD`) を入れる。
+- **作れなかったとき**: プロジェクトが git リポジトリでない、またはブランチ名が既に使われている等で失敗したら、worktree 無しでプロジェクト直下を target project にして続行する (`worktree` は null のまま)。この場合の `finish=commit` は従来どおり現在のブランチへのコミットになる。理由を history に残す。
+- **削除するのは done を回収したときだけ** (下記「マージの回収」)。in_review や blocked では消さない — `finish=none` の未コミット変更や blocked の途中成果物は worktree にしか無く、消すと失われるため。
 
 ### 検証ゲートの絶対規則
 
@@ -168,13 +186,22 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 
 ## マージの回収 (レビュー待ち → Done)
 
-`finish=pr` でレビュー待ちにしたタスクは、ユーザーがマージしたかをローカル git 履歴だけで判定できる (gh・リモート不要、マージの手段も問わない)。毎イテレーションの最初と、枯渇時フローの集計前に、`review.tip` を持つ in_review タスクそれぞれについて target project で:
+`finish=pr` でレビュー待ちにしたタスクは、ユーザーがマージしたかをローカル git 履歴だけで判定できる (gh・リモート不要、マージの手段も問わない)。毎イテレーションの最初と、枯渇時フローの集計前に、`review.tip` を持つ in_review タスクそれぞれについて**プロジェクト側**で (worktree ではない):
 
 1. `git merge-base --is-ancestor <tip> <base>` が真 → マージ済み (通常マージ / ff)。
 2. 偽なら `git cherry <base> <tip>` を実行し、出力の全行が `-` → 取り込み済み (squash / rebase)。
 3. どちらでもない → まだレビュー中。何もしない。
 
 マージ済みと**証明できた**タスクだけ、アダプタで `mark <id> done`、state の status を done に更新、history に追記する。判定できないもの (squash 時にコンフリクト解消でパッチが変わった等) は In Review に残る — ユーザーが手で Done へ移せばよい。証明なしに done へ落とすことは決してしない。
+
+done にしたタスクに `worktree` があれば、ここで片付ける (作業はマージ済みなので失うものが無い唯一の地点):
+
+```
+git -C <プロジェクト> worktree remove <worktree パス>
+git -C <プロジェクト> branch -d task-pipeline/<id>
+```
+
+削除に失敗しても (未コミット変更が残っている等) タスクは done のままにし、パスを添えて報告するだけにする。**強制削除 (`--force`) はしない。**
 
 ## ペーシングと枯渇
 
