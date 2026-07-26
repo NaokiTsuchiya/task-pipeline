@@ -7,6 +7,7 @@
 | skill | 内容 |
 |---|---|
 | [task-pipeline](task-pipeline/SKILL.md) | issue トラッカーの承認済みタスクを `/loop` で自動消化するパイプライン |
+| [task-prep](task-prep/SKILL.md) | 要望を task-pipeline が消化できる issue 群に変える準備 skill (分解・深掘り・依存整理) |
 
 ## インストール
 
@@ -14,6 +15,7 @@ skill ディレクトリを `~/.claude/skills/` に symlink する:
 
 ```sh
 ln -s "$(pwd)/task-pipeline" ~/.claude/skills/task-pipeline
+ln -s "$(pwd)/task-prep" ~/.claude/skills/task-prep
 ```
 
 ## task-pipeline の使い方
@@ -61,3 +63,19 @@ markdown バックログは「リストファイル (順序と状態) + 1 タス
 - `/loop` は同一セッションで prompt を毎回そのまま再送する (dynamic は ScheduleWakeup、固定間隔はセッションスコープ cron)。会話コンテキストはイテレーションごとに蓄積するため、状態は `.task-pipeline/state.json` に置いて毎回読み直し、メインコンテキストには判定 JSON などの小さな構造化結果しか載せない。skill 本文も毎回再注入されるので SKILL.md は薄く、詳細指示はサブエージェントが自分で references/ を読む。
 - 実行サブエージェントはタスクにつき 1 体で、フェーズごとに停止 → オーケストレーターが検証 → SendMessage で再開、という形で全フェーズを同じコンテキストのまま通す (完了済みエージェントの SendMessage 再開で文脈が維持されることは実機確認済み)。
 - 検証サブエージェントはフェーズごと・試行ごとに毎回新規。検証の起動と合否判定をオーケストレーター側に置くことで、実行エージェントが自分の検証を招集・採点できない構造にしている。
+
+## task-prep の使い方
+
+task-pipeline の**上流**。ぼんやりした要望を、実コードの調査に基づいて分解し、検証可能な受け入れ条件付きの issue 群にしてトラッカーへ書き込む。verifier の最終ゲートは issue 本文の要求を最終状態に直接照合するので、issue の書き方がパイプラインの成否をほぼ決める — その「書く仕事」を肩代わりするのがこの skill。
+
+```
+/task-prep gh 認証まわりを直したい            # 要望 → 調査 → 分解 → 承認 → issue 作成
+/task-prep gh #42                             # 既存 issue 1 件を検証可能なところまで深掘り
+/task-prep gh                                 # 入力なし: 依存が解決した issue の昇格と状況報告だけ
+/task-prep markdown ./backlog/TASKS.md ログを整えたい
+```
+
+- **書き込む前に必ず承認を取る** (結果セットと書き込み先リポジトリを提示してから)。人間にしか答えられない不明点は勝手に埋めず、質問として上げるか `未確定:` として issue に残す (未確定が残る issue は候補にならない)。
+- **依存関係**: issue 本文の `依存: #N` 行で表現する。task-pipeline は依存を知らないので、「依存が解けていない issue は候補に見えない」ことを準備側で保証する — 依存がすべて Done になるまで ready にしない。依存の解決 = 依存 issue が**完了として** close (Done) されること (「やらない」= not planned で閉じた依存は解決にならず、従属 issue の扱いを確認される)。`finish=pr` のマージ分は、次にパイプラインを起動したときのマージ回収で close される (手で close してもよい)。close 後に `/task-prep` を叩けば従属 issue が ready に昇格する。
+- **接続**: gh は `ready` ラベルがゲート。パイプラインは **`/loop /task-pipeline gh ?label=ready`** で起動する (ready の付いた issue だけが候補になる)。フィルタなしの `/loop /task-pipeline gh` では未準備・依存待ちの issue も候補に入ってしまうので、task-prep で管理するリポジトリでは必ず `?label=ready` を付けること。markdown はリスト掲載がゲートなので `/loop /task-pipeline markdown <list>` のままでよい (ready でないタスクはそもそもリストに載らない)。task-pipeline 側に変更は不要。
+- gh で使うラベルは `ready` (準備完了) と `pending-deps` (深掘り済み・依存待ち) の 2 つ。事前作成は不要 (最初の付与時に GitHub が生成する)。裏返すと ready を 1 件も付けたことがないうちは `?label=ready` 起動が「ラベルがありません」エラーで止まる — 準備が終わってから起動する。
