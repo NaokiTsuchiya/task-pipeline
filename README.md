@@ -47,7 +47,11 @@ gh label create in-review -c 1D76DB -d "レビュー待ち"
 gh label create blocked   -c B60205 -d "進行不能"
 ```
 
-候補になるのは「open で、この 2 ラベルのどちらも付いていない issue」で、実行順は issue 番号の昇順。着手すると自分にアサインされ（着手中のラベルは付けない — セッションが落ちたとき候補に戻れなくなるため）、作業を終えると `in-review` が付いて PR / コミットの参照がコメントされる。**Done はあなたが issue を close したとき** (`finish=pr` ならマージをローカル git 履歴から検知して自動で close する)。ラベルを手で外せば次の起動で候補に戻る。詳細は [adapters/gh.md](task-pipeline/references/adapters/gh.md)。
+候補になるのは「open で、この 2 ラベルのどちらも付いておらず、PR も紐付いていない issue」で、実行順は issue 番号の昇順。着手すると自分にアサインされる（着手中のラベルは付けない — セッションが落ちたとき候補に戻れなくなるため）。
+
+作業を終えたときの表現は 2 通り。**`finish=pr` なら PR 本文に `Fixes #<番号>` が入って issue に紐付き、ラベルは付かない** — 紐付いた PR は issue のタイムラインに出るのでラベルは重複でしかなく、しかもマージした瞬間に issue が自動 close されて Done になる。PR が無いとき (`finish=none` / `commit`) だけ `in-review` ラベルと参照コメントが付く。
+
+**Done はあなたが issue を close したとき**（PR 経由なら自動、それ以外はマージをローカル git 履歴から検知して close する）。候補に戻したいときは、ラベルなら手で外す、PR 紐付けなら PR 本文の `Fixes #<番号>` を消す。詳細は [adapters/gh.md](task-pipeline/references/adapters/gh.md)。
 
 ### markdown (ローカルバックログ)
 
