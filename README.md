@@ -95,6 +95,6 @@ task-pipeline の**上流**。ぼんやりした要望を、実コードの調�
 ```
 
 - **書き込む前に必ず承認を取る** (結果セットと書き込み先リポジトリを提示してから)。人間にしか答えられない不明点は勝手に埋めず、質問として上げるか `未確定:` として issue に残す (未確定が残る issue は候補にならない)。
-- **依存関係**: issue 本文の `依存: #N` 行で表現する。task-pipeline は依存を知らないので、「依存が解けていない issue は候補に見えない」ことを準備側で保証する — 依存がすべて Done になるまで ready にしない。依存の解決 = 依存 issue が**完了として** close (Done) されること (「やらない」= not planned で閉じた依存は解決にならず、従属 issue の扱いを確認される)。`finish=pr` のマージ分は、次にパイプラインを起動したときのマージ回収で close される (手で close してもよい)。close 後に `/task-prep` を叩けば従属 issue が ready に昇格する。
+- **依存関係**: issue 本文の `依存: #N` 行で表現する。task-pipeline は依存を知らないので、「依存が解けていない issue は候補に見えない」ことを準備側で保証する — 依存がすべて Done になるまで ready にしない。依存の解決 = 依存 issue が**完了として** close (Done) されること (「やらない」= not planned で閉じた依存は解決にならず、従属 issue の扱いを確認される)。`finish=pr` なら PR が `Fixes #N` で issue に紐付くので、マージした瞬間に issue は自動で close される (PR の無い `finish=none|commit` はパイプラインのマージ回収か手動 close)。close 後に `/task-prep` を叩けば従属 issue が ready に昇格する。
 - **接続**: gh は `ready` ラベルがゲート。パイプラインは **`/loop /task-pipeline gh ?label=ready`** で起動する (ready の付いた issue だけが候補になる)。フィルタなしの `/loop /task-pipeline gh` では未準備・依存待ちの issue も候補に入ってしまうので、task-prep で管理するリポジトリでは必ず `?label=ready` を付けること。markdown はリスト掲載がゲートなので `/loop /task-pipeline markdown <list>` のままでよい (ready でないタスクはそもそもリストに載らない)。task-pipeline 側に変更は不要。
 - gh で使うラベルは `ready` (準備完了) と `pending-deps` (深掘り済み・依存待ち) の 2 つ。事前作成は不要 (最初の付与時に GitHub が生成する)。裏返すと ready を 1 件も付けたことがないうちは `?label=ready` 起動が「ラベルがありません」エラーで止まる — 準備が終わってから起動する。

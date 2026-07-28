@@ -4,4 +4,6 @@
 
 ## In Review
 
-- [ ] skill-install-script
+## Done
+
+- [x] skill-install-script
