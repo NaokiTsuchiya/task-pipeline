@@ -7,7 +7,7 @@
 ## `source` の書式
 
 ```
-[owner/repo | .][?label=<値>&label=<値>&assignee=<値>&milestone=<値>&review_label=<名前>&blocked_label=<名前>]
+[owner/repo | .][?label=<値>&label=<値>&milestone=<値>&review_label=<名前>&blocked_label=<名前>]
 ```
 
 | 例 | 意味 |
@@ -18,16 +18,17 @@
 | `?label=ready` | カレントリポジトリの `ready` ラベルが付いたもの |
 | `.?label=ready` | 同上 |
 | `.?label=ready&label=backend` | 両方のラベルが付いたもの (AND) |
-| `owner/repo?assignee=@me` | 自分にアサインされたもの |
 | `owner/repo?milestone=v1.0%20release` | マイルストーン指定 (空白は `%20`) |
 | `?blocked_label=on-hold` | blocked を表すラベルを `blocked` から変更 |
+
+**`assignee` フィルタは無い。** 候補の定義が「assignee が付いていない」こと (下記「状態の表現」) なので、assignee で候補を絞る操作はそもそも成立しない (常に 0 件になる)。`?assignee=...` を渡すと未対応キーとして `{"error": "未対応のキー: assignee"}` になる。
 
 パース規則:
 
 1. 最初の `?` でリポジトリ部とクエリ部に分ける。`?` が無ければリポジトリ部のみ。
 2. クエリ部を `&` で分割し、各要素を最初の `=` で key / value に分ける。value は**パーセントデコードする** (`source` は位置引数なので空白を含められない)。
 3. key は次のみ。それ以外は `{"error": "未対応のキー: <key>"}`。
-   - 候補の絞り込み: `label` (複数回書ける。AND) / `assignee` / `milestone`
+   - 候補の絞り込み: `label` (複数回書ける。AND) / `milestone`
    - 状態ラベルの上書き: `review_label` (既定 `in-review`) / `blocked_label` (既定 `blocked`)。それぞれ 1 回だけ。
 4. リポジトリ部が `.` か空 (`source` 全体が空の場合を含む) なら、**state dir の親ディレクトリ**で `git remote get-url origin` を実行し、`github.com` の URL から `owner/repo` を取り出す。SSH 形式 (`git@github.com:owner/repo.git`) と HTTPS 形式 (`https://github.com/owner/repo.git`) の両方を受け付け、末尾の `.git` は落とす。起動プロンプトは対象プロジェクトのパスを渡してこないので、カレントディレクトリに依存させないこと。
    - リモートが無い / origin が GitHub でない / git リポジトリでない場合は `{"error": "カレントリポジトリを解決できません (<理由>)。source に owner/repo を指定してください"}`。
@@ -39,7 +40,7 @@
 
 | 状態 | GitHub 側の表現 |
 |---|---|
-| 未着手 (候補) | open で、状態ラベルがどちらも付いておらず、**PR も紐付いていない** |
+| 未着手 (候補) | open で、状態ラベルがどちらも付いておらず、**assignee が付いておらず**、**PR も紐付いていない** |
 | `in_progress` | 実行者を assignee に追加 (状態ラベルは付けない) |
 | `in_review` (ref が PR URL) | **PR 本文に `Fixes #<番号>` を入れて issue に紐付ける。ラベルは付けない** |
 | `in_review` (それ以外) | ラベル `in-review` + 参照をコメント |
@@ -47,10 +48,10 @@
 | `done` | issue を close (`state_reason: completed`) + 状態ラベルを外す |
 
 - **PR があるならラベルは要らない。** 紐付いた PR は issue のタイムラインに出るので `in-review` ラベルは同じことを二重に言っているだけになる。さらに紐付けておけば、**マージした瞬間に issue が自動 close されて done になる** (パイプラインのマージ回収と衝突しない。`mark done` は冪等)。ラベルを使うのは PR が無いとき (`finish=none` / `finish=commit`) だけ。
-- **`in_progress` にラベルを使わないのは、それが除外に使えないから。** セッションが落ちて `state.json` を失ったとき、着手途中だった issue は候補に戻れないと消えてしまう。除外に使わないラベルは assignee と同じことを二重に書いているだけなので置かない。
+- **`in_progress` にはラベルではなく assignee を使う。** GitHub 側の issue 状態 (assignee) を正とすることで、同じ `source` に対して複数のセッション/エージェントが同時に `task-pipeline` を回しても、他のセッションが着手済みの issue を `list` の候補から除外できる (`list` の `no:assignee` フィルタ、下記)。トレードオフとして、セッションが落ちて `state.json` を失ったときの自動リカバリは無い — 着手途中だった issue は assignee が付いたままなので候補に戻らない。復帰は下記の通り手動 (assignee を外す) で行う。
 - 2 つの状態ラベルは相互排他に保つ。`mark` は目的のラベルを入れ、もう一方を外す (`in_progress` と `done` は両方外す)。手で両方付いても次の `mark` で収束する。
-- 復帰: 状態ラベルを手で外せば次の `list` で候補に戻る。close 済みなら reopen すれば戻る。**PR で紐付いている場合は、PR を閉じるだけでは戻らない** — PR 本文の `Fixes #<番号>` を消す (または PR ごと消す) 必要がある。
-- assignee は `in_progress` で足すだけで、以降の `mark` では触らない (誰が実行したかの記録として残す)。
+- 復帰: 候補に戻すには **状態ラベルと assignee の両方**を外す必要がある (`in_progress` に一度でもなった issue は assignee が付いたままなので、ラベルだけ外しても `no:assignee` に引っかかって候補に戻らない)。close 済みなら reopen も要る。**PR で紐付いている場合は、PR を閉じるだけでは戻らない** — PR 本文の `Fixes #<番号>` を消す (または PR ごと消す) 必要がある (これに加えて assignee も外す)。
+- assignee は `in_progress` で足す。**`list` の除外判定にも使われる** (誰かが assignee なら候補から外れる) ので、以降の `mark` では触らない — `in_review` / `blocked` に進んでも assignee は付いたままにする (誰が着手したかの記録であり、二度と未着手扱いにしないためのマーカーでもある)。他人が別の理由でその issue に自分自身を assignee にした場合も、パイプラインからは「着手済み」に見えて候補から外れる — これは意図した挙動 (GitHub 上で assignee が付いている = 誰かが着手中、という解釈をパイプラインもそのまま採用する)。
 - 既定名 `in-review` / `blocked` は多くのリポジトリに既にあり、意味も揃っている (人が `blocked` を付けた issue をパイプラインが拾わないのは正しい)。**ただしパイプラインはこの 2 つを付け外しする。** チームが別の意味で運用しているラベルなら、`review_label` / `blocked_label` で衝突しない名前に逃がすこと。
 - **ラベルは事前に作らなくてよい。** リポジトリに存在しないラベルを `issue_write` で付けると GitHub 側が自動生成する (色は既定のグレー `ededed`、説明なし。実測確認済み)。色や説明を付けたいときだけ手で作っておく。
 
@@ -58,11 +59,11 @@
 
 1. `source` をパースしてリポジトリと各フィルタを得る。
 2. `label` フィルタがあれば、値ごとに `get_label` で存在を確認する。無ければ `{"error": "ラベルがありません: <名前>"}`。**存在しないラベルで絞ると GitHub はエラーではなく 0 件を返し、それはオーケストレーターに「全タスク完了」と解釈されてループが止まる。**
-3. `search_issues(owner, repo, query: "is:open -linked:pr -label:\"<review_label>\" -label:\"<blocked_label>\" <絞り込みフィルタ>", sort: "created", order: "asc", perPage: 100)` で取得する。
+3. `search_issues(owner, repo, query: "is:open no:assignee -linked:pr -label:\"<review_label>\" -label:\"<blocked_label>\" <絞り込みフィルタ>", sort: "created", order: "asc", perPage: 100)` で取得する。**`no:assignee` は他セッション/他エージェントが `mark in_progress` 済み (assignee 追加済み) の issue を候補から除く役割。** 落とすと同じ issue を複数のパイプラインが同時に着手してしまう。
    - **`list_issues` は使わない。** 紐付いた PR の有無は `linked:pr` でしか判定できず (GraphQL 側にこのフィルタは無い)、これを落とすとレビュー中の issue が候補に再登場して二重実行になる。
-   - 検索インデックスには遅延がある。**残った issue それぞれについて `issue_read(method: "get_labels")` で現在のラベルを読み直し、状態ラベルが付いていれば落とす。** ただし PR 紐付けの遅延はこれでは潰せないので、直前に `in_review` にした issue が 1 度だけ候補に現れることがある (オーケストレーター側が state.json で弾く)。
+   - 検索インデックスには遅延がある。**残った issue それぞれについて `issue_read(method: "get")` で現在のラベルと assignees を読み直し、状態ラベルが付いているか assignee が 1 人以上いれば落とす。** ただし PR 紐付けの遅延はこれでは潰せないので、直前に `in_review` にした issue が 1 度だけ候補に現れることがある (オーケストレーター側が state.json で弾く)。同様に、直前に他セッションが `mark in_progress` した issue も検索インデックスの遅延で 1 度だけ現れうるが、この再読み込みで大半は潰せる。
 4. 件数のガード。ヒット数が 200 を超えたら列挙せず `{"error": "候補が多すぎます (<N> 件)。source にフィルタを付けて絞ってください"}`。除外後の候補が **20 を超えた場合**も同じエラーを返す。`search_issues` のレスポンスは 1 件あたり数千トークンと冗長で、承認 UI も溢れるため。
-5. 候補が 0 件で、かつ絞り込みフィルタが 1 つでも指定されていた場合は、**同じクエリから `is:open` と状態ラベルの除外を外してもう一度検索する。それも 0 件ならフィルタの値が誤っている可能性が高いので `{"error": "フィルタに一致する issue がありません。label / assignee / milestone の値を確認してください"}` を返す。** 1 件以上あれば本当に枯渇しているので `{"tasks": []}` を返す。
+5. 候補が 0 件で、かつ絞り込みフィルタが 1 つでも指定されていた場合は、**同じクエリから `is:open` / `no:assignee` / 状態ラベルの除外を外してもう一度検索する。それも 0 件ならフィルタの値が誤っている可能性が高いので `{"error": "フィルタに一致する issue がありません。label / milestone の値を確認してください"}` を返す。** 1 件以上あれば本当に枯渇しているので `{"tasks": []}` を返す。
 6. 候補を issue 番号の昇順に並べる (= 実行順)。
 7. 各候補について `<state dir>/tasks/gh-<番号>.md` を **スタブとして** 書く。**この時点では本文もコメントも書かない** (下記「タスク本文の書き出しを遅らせる理由」):
 
