@@ -1,5 +1,7 @@
 # Fable への依頼プロンプト: task-pipeline に渡す issue を用意する skill の構築
 
+> 2026-07-26 時点の依頼文の記録。現行仕様は task-pipeline/SKILL.md・task-prep/SKILL.md を見よ。
+
 ## 背景と目的
 
 私は個人の skill 群を管理するリポジトリ (`NaokiTsuchiya/skills`) を持っていて、そこには今 `task-pipeline` という skill が入っています。issue トラッカー (アダプタで抽象化、GitHub Issues とローカル markdown が実装済み) から承認済みタスクを読み、`/loop` の各イテレーションで 1 件ずつ、research → plan → implement → report の固定フェーズで自動実行するものです。各フェーズはフレッシュな検証サブエージェントの PASS なしに先へ進みません。
