@@ -12,7 +12,7 @@ You are operating autonomously. The user is not watching and cannot answer quest
 - 届くメッセージは 5 種類で、扱いは次のとおり:
   1. `<phase> verified PASS. Proceed to phase <next>.` → そのフェーズへ進む。既にそのフェーズ以降にいる場合は、新しい作業をせず現在の状態のプロトコル行を再送して停止する。
   2. 修正指示 (required_fixes) → 同じフェーズの成果物と (implement / pr_fix なら) 実装を修正し、同じ形式で停止する。
-  3. `<phase> verified PASS. Finalize the task (finish mode: <mode>).` → 下記「タスク完了処理 (finalize)」を行い、`FINALIZED — <commit hash または PR URL>` の 1 行で停止する。
+  3. `<phase> verified PASS. Finalize the task (finish mode: <mode>, base: <branch>).` (`base:` は無いこともある) → 下記「タスク完了処理 (finalize)」を行い、`FINALIZED — <commit hash または PR URL>` の 1 行で停止する。
   4. `PR feedback. Address the findings in <path> as phase "pr_fix".` → 下記「PR フィードバック対応 (pr_fix)」へ進む。
   5. それ以外 (status check・再開指示など) → 新しい作業を始めず、現在フェーズが未完なら完了させ、プロトコル行で停止する。
 - **どのメッセージを受けても、明示的な verified-PASS 指示なしに次のフェーズへ進んではならない。**
@@ -79,7 +79,7 @@ report または pr_fix の検証 PASS 後、finalize 指示を受けたとき�
 
 - ステージするのは直前フェーズの成果物 (implementation.md / pr-fix-<n>.md) の変更ファイル一覧にあるファイル **だけ**。`.task-pipeline/` とトラッカーのソースファイルは、タスク本文が求めない限りコミットに含めない。
 - `commit`: 現在のブランチ (worktree なら `task-pipeline/<task id>`) に 1 コミット。メッセージはタスクタイトル、本文に run dir の report.md への参照、末尾に `Co-Authored-By: Claude <noreply@anthropic.com>`。
-- `pr`: 同様にコミットしてから `git push -u origin <現在のブランチ>` → `gh pr create` (title = タスクタイトル、body = report.md の要約と証拠パス、末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)`)。**ブランチの切り替えも作成もしない** — 既に正しいブランチに居る。`gh pr create` の base は、明示しなければリモートの既定ブランチになる。それが意図と違うなら `--base <元のブランチ>` を付ける。
+- `pr`: 同様にコミットしてから `git push -u origin <現在のブランチ>` → `gh pr create` (title = タスクタイトル、body = report.md の要約と証拠パス、末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)`)。**ブランチの切り替えも作成もしない** — 既に正しいブランチに居る。`gh pr create` には、finalize 指示に `base:` が付いていれば `--base <その値>` を付ける。無ければリモートの既定ブランチのままでよい — 分岐元を自分で推測しない。
 - `pr` で **このブランチに既に PR がある場合** (pr_fix 後の finalize) は、`gh pr create` を呼ばない。コミットメッセージは `PR フィードバック対応: <対応内容の要約>` とし、push した後に `gh pr comment <PR URL> --body <対応の要約>` を 1 回だけ投稿する (指摘ごとに対応 / 非対応と理由を数行。レビュアーが再確認する起点になる)。**本文の末尾に `<!-- task-pipeline:pr-fix -->` を必ず入れる** — 次の追従がこのコメントを自分の投稿だと見分けて、指摘と取り違えないための目印である。返す URL は既存の PR URL。
 - `gh` が認証まわりで即失敗する (`interactive IO not available` 等) ときは、**まずエイリアスを疑う**。`gh` がパスワードマネージャのプラグイン等にエイリアスされていると、非対話セッションでは承認プロンプトを出せずに失敗する一方、実体のバイナリは認証済みで動くことがある。`which -a gh | grep '^/' | head -1` で実体のパスを取り、それで 1 回やり直してから諦めること。
 - 成功したら `FINALIZED — <commit hash または PR URL>` で停止する。commit / push / PR 作成が失敗したら、実際の出力を理由に含めて `BLOCKED: <理由>` で停止する。

@@ -65,6 +65,7 @@ Note: ending the turn while a background executor is working, with the next step
       "executor": null,
       "blocked_reason": null,
       "worktree": null,
+      "base": null,
       "review": null
     }
   ],
@@ -78,7 +79,7 @@ Note: ending the turn while a background executor is working, with the next step
 - パイプラインが自力で到達する終端は `in_review` (レビュー待ち) と `blocked`。**Done (マージ/受け入れ完了) はユーザーの行為である。** パイプラインが done を書くのは、ユーザーのマージを git 履歴で証明できたときの回収 (下記「マージの回収」) だけ。
 - `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。`ref` が PR URL のときは追従用に `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "checked_at": null, "note": null}` も併せて置く (`proc` は変化を待つバックグラウンドプロセスの id)。
 - `watch_idle` は候補が枯渇した後、どの PR にも動きが無いまま watch プロセスが空振りした連続回数 (下記「ペーシングと枯渇」)。
-- `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。
+- `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。`base` は worktree を作った時点のプロジェクト側ブランチ (下記。worktree が無ければ null)。
 - `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
 - `candidates` は未承認タスクを**優先順の並び**で保持するキャッシュ (下記「承認」)。承認のたびにトリアージをやり直さないために置く。
@@ -169,8 +170,8 @@ Return only what the adapter file specifies for this operation.
 
    - **PASS** → 判定 JSON を `runs/<id>/verdicts/<phase>-<attempt>.json` に書き、state の phase を進める。次フェーズがあれば SendMessage で実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」と送る (再開は background で走る。停止通知が次の処理を駆動する)。report まで PASS したら:
      - `finish=none` → そのままレビュー待ち処理へ。
-     - `finish=commit|pr` → state の `phase` を `finalize` にし、SendMessage で「`<phase>` verified PASS. Finalize the task (finish mode: `<mode>`).」を送る (`<phase>` は直前に PASS したフェーズ = `report` または `pr_fix`)。`FINALIZED — <commit hash / PR URL>` の停止通知でレビュー待ち処理へ。`BLOCKED` 停止なら通常どおり即 blocked。finalize は成果物フェーズではないので検証ゲートは無い。
-     - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。**タスクブランチにコミットがあれば** (`git -C <プロジェクトルート> rev-list --count <base>..<branch>` が 1 以上) 回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクトルート> rev-parse <branch>`、base は worktree 作成時に控えたブランチ。`finish=commit` と `finish=pr` の両方が該当する — worktree を使う以上どちらもタスクブランチにコミットを積むので、回収の条件は finish モードではなくコミットの有無で決まる。**コミットが 0 件のとき (`finish=none`) は tip を入れてはならない**: tip が base と同じコミットを指し、`merge-base --is-ancestor` が真になって「マージ済み」と誤判定し、未コミットの作業ごと worktree が消される。最後に、ref が PR URL なら `review.watch` を初期化する (これで追従の対象になる)。
+     - `finish=commit|pr` → state の `phase` を `finalize` にし、SendMessage で「`<phase>` verified PASS. Finalize the task (finish mode: `<mode>`, base: `<タスクの base>`).」を送る (`<phase>` は直前に PASS したフェーズ = `report` または `pr_fix`。`base` が null なら `base:` は省く)。`FINALIZED — <commit hash / PR URL>` の停止通知でレビュー待ち処理へ。`BLOCKED` 停止なら通常どおり即 blocked。finalize は成果物フェーズではないので検証ゲートは無い。
+     - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。**タスクブランチにコミットがあれば** (`git -C <プロジェクトルート> rev-list --count <base>..<branch>` が 1 以上) 回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクトルート> rev-parse <branch>`、base はタスクの `base` フィールドの値 (worktree 作成時に記録済み)。`finish=commit` と `finish=pr` の両方が該当する — worktree を使う以上どちらもタスクブランチにコミットを積むので、回収の条件は finish モードではなくコミットの有無で決まる。**コミットが 0 件のとき (`finish=none`) は tip を入れてはならない**: tip が base と同じコミットを指し、`merge-base --is-ancestor` が真になって「マージ済み」と誤判定し、未コミットの作業ごと worktree が消される。最後に、ref が PR URL なら `review.watch` を初期化する (これで追従の対象になる)。
        - **pr_fix からの復帰でここに来たときは `mark` を呼び直さない。** トラッカー側は in_review のままで何も変わっておらず、呼べば重複コメントになるだけである。代わりに `watch.state` を `watching` に戻し、`watch.fix_attempts` は保ったまま、対応した指摘の id を `watch.handled` に足す。
    - **FAIL** → 判定 JSON を保存し `attempts` を +1。SendMessage で実行エージェントへ required_fixes をそのまま送り、修正・再停止後に **新しい** 検証エージェントで再検証する。
 
@@ -187,7 +188,7 @@ Return only what the adapter file specifies for this operation.
   **必ずプロジェクトルート (メイン worktree) を基準にする。** 起動時のカレントディレクトリが別の worktree だったとしても、そこの下に作ってはならない — その worktree が `git worktree remove` されるときにタスクの作業ごと消える (または削除が失敗する)。分岐元の `HEAD` もプロジェクトルートのものになる。
 
 - 同じブランチを 2 つの worktree で同時にチェックアウトできないという git の制約上、**worktree を使う以上どのタスクも必ず自分のブランチを持つ**。したがって `finish=commit` は「現在のブランチ」ではなく `task-pipeline/<id>` へのコミットになり、`finish=none` の未コミット変更も worktree 側に残る。どちらの場合も、レビュー待ちの報告に worktree のパスとブランチ名を必ず書く。
-- 作成に成功したら state.json のそのタスクに `"worktree": "<絶対パス>"` を記録する。`review` の `base` には、worktree を作った時点でのプロジェクト側のブランチ (`git -C <プロジェクトルート> rev-parse --abbrev-ref HEAD`) を入れる。
+- 作成に成功したら state.json のそのタスクに `"worktree": "<絶対パス>"` と、worktree を作った時点でのプロジェクト側のブランチ (`git -C <プロジェクトルート> rev-parse --abbrev-ref HEAD`) を `"base"` として記録する。in_review になったとき `review.base` にはこのタスクの `base` を移す — in_review 時に rev-parse し直してはならない (ユーザーが途中でブランチを切り替えていると誤った base を拾い、マージ回収の誤判定に直結する)。
 - **作れなかったとき**: 失敗理由で扱いが分かれる。
   - **プロジェクトが git リポジトリでない** → worktree 無しでプロジェクトルートを target project にして続行する (`worktree` は null のまま)。この場合の `finish=commit` は従来どおり現在のブランチへのコミットになる。理由を history に残す。
   - **ブランチ `task-pipeline/<id>` が既に存在する等、それ以外の失敗** → 続行しない。ブランチ既存は別セッションの二重着手か前回実行の残骸の最有力な兆候であり、プロジェクトルートで続行すると上の「ユーザーの作業ツリーを触らない」保証が破れる。タスクを blocked にする (state 更新、アダプタで `mark <id> blocked <理由>`。理由には git の実エラー出力を含める)。残骸が原因なら、ユーザーがその worktree とブランチを消せば、blocked を外した次の承認で再実行できる。
