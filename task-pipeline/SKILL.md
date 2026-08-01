@@ -245,6 +245,15 @@ Return only what the adapter file specifies for this operation.
      - `finish=none` → そのままレビュー待ち処理へ。
      - `finish=commit|pr` → state の `phase` を `finalize` にし、SendMessage で「`<phase>` verified PASS. Finalize the task (finish mode: `<mode>`, base: `<タスクの base>`).」を送る (`<phase>` は直前に PASS したフェーズ = `report` または `pr_fix`。`base` が null なら `base:` は省く)。`FINALIZED — <commit hash / PR URL>` の停止通知でレビュー待ち処理へ。`BLOCKED` 停止なら通常どおり即 blocked。finalize は成果物フェーズではないので検証ゲートは無い。
      - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。**タスクブランチにコミットがあれば** (`git -C <プロジェクトルート> rev-list --count <base>..<branch>` が 1 以上) 回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクトルート> rev-parse <branch>`、base はタスクの `base` フィールドの値 (worktree 作成時に記録済み)。`finish=commit` と `finish=pr` の両方が該当する — worktree を使う以上どちらもタスクブランチにコミットを積むので、回収の条件は finish モードではなくコミットの有無で決まる。**コミットが 0 件のとき (`finish=none`) は tip を入れてはならない**: tip が base と同じコミットを指し、`merge-base --is-ancestor` が真になって「マージ済み」と誤判定し、未コミットの作業ごと worktree が消される。最後に、ref が PR URL なら `review.watch` を初期化して watch プロセスを起動し、`session` は自分のまま残す (これで追従の対象になる)。**初期化のとき、そのタスクに既存の `watch.handled` があれば引き継ぐ** — 復帰したタスクを流し直したときに、前回対応済みのレビュー指摘が新しい findings として再浮上しないようにするため (他のフィールドは既定値でよい)。**PR URL でなければ揮発資源がもう無いので `session` を null に戻す** — 追従の要らないタスクを自分のセッションに紐づけたままにすると、そのセッションが死んでいる間はマージの回収が他セッションから見て手出し不可になる。
+       - **レビュー待ちにしたら、ユーザーに通知を 1 本送る** (`PushNotification`, `status: "proactive"`)。**パイプラインが人を待ち始める唯一の地点**で、無人運転では次に人が見に来るまでがそのまま滞留時間になるため (実測: 2026-08-01 の 5 本は PR 作成からマージまで 3.8〜10.2 分だったが、これはユーザーが張り付いていた場合の値である)。文面は 200 字未満・1 行・markdown 無しで、**行動できる情報を先に置く**:
+
+         ```
+         <id> レビュー待ち: <PR URL> — <タイトルを 40 字程度で>
+         ```
+
+         - 送るのは **PR / コミットができた最初の 1 回だけ**。`pr_fix` からの復帰 (下の行) では送らない — 指摘に対応して押し直したことは watch 側の追従で見えており、往復のたびに鳴らすと通知の価値が落ちる。
+         - **ツールが無い環境では何もしない。** 送れなかったことを失敗として扱わず、フェーズも止めない (通知は成果物ではない)。ユーザーが端末の前にいるときは重複なので送られないことがあるが、それも正常である。
+         - 通知に載せるのは id・URL・タイトルだけにする。**CI の状態や検証の結果は書かない** — この時点では CI が回り始めてすらいないことがあり、通知は取り消せない。
        - **pr_fix からの復帰でここに来たときは `mark` を呼び直さない。** トラッカー側は in_review のままで何も変わっておらず、呼べば重複コメントになるだけである。代わりに `watch.state` を `watching` に戻し、`watch.fix_attempts` は保ったまま、対応した指摘の id を `watch.handled` に足す。
    - **FAIL** → 判定 JSON を PASS と同じ命名規則で保存してから `attempts` を +1 する (ファイル名の attempt は +1 前の値)。SendMessage で実行エージェントへ required_fixes をそのまま送り、修正・再停止後に **新しい** 検証エージェントで再検証する。
 
