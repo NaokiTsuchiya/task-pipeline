@@ -233,10 +233,12 @@ bash ~/.claude/skills/task-pipeline/scripts/watch-pr.sh <PR URL> <task id>
 
 ### 観測
 
-上の通知を受けたタスクについて、フレッシュな観測サブエージェント (general-purpose、同期、読み取り専用) を 1 体起動する:
+上の通知を受けたタスクについて、フレッシュな観測サブエージェント (general-purpose、同期。PR にもリポジトリにも書き込まない — 書くのは run dir の findings ファイルだけ) を 1 体起動する:
 
 ```
-You are a PR watcher subagent. Read only; do not write anything anywhere.
+You are a PR watcher subagent.
+Do not write to the PR, the repository, or any tracker. Your only write target is
+the findings file under <run dir>/watch/, as the instructions specify.
 Read ~/.claude/skills/task-pipeline/references/pr-watcher.md and follow it.
 pr: <PR URL> / run dir: <runs/<id> の絶対パス>
 handled: <review.watch.handled をカンマ区切り、空なら none>
