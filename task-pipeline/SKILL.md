@@ -1,6 +1,6 @@
 ---
 name: task-pipeline
-description: 承認済みタスクの自動消化パイプライン。issue トラッカー (アダプタで抽象化) からタスクを読み、優先順位を付けた候補からユーザーが 1 件選んで承認したものを、/loop の各イテレーションで固定フェーズ (research → plan → implement → report) で実行する。各フェーズはフレッシュな検証サブエージェントの PASS なしに先へ進まない。`finish=pr` なら作成した PR の CI とレビューコメントを追従し、自動で修正して押し直す。`/loop /task-pipeline <tracker> <source>` で回す。
+description: 承認済みタスクの自動消化パイプライン。issue トラッカー (アダプタで抽象化) からタスクを読み、優先順位を付けた候補からユーザーが 1 件選んで承認したものを、/loop の各イテレーションで固定フェーズ (research → plan → implement → report。gate 宣言のあるタスクは research+plan に統合) で実行する。各フェーズはフレッシュな検証サブエージェントの PASS なしに先へ進まない。`finish=pr` なら作成した PR の CI とレビューコメントを追従し、自動で修正して押し直す。`/loop /task-pipeline <tracker> <source>` で回す。
 user-invocable: true
 argument-hint: "<tracker> [source]  例: gh / gh owner/repo / markdown ./TASKS.md"
 ---
@@ -64,6 +64,7 @@ Note: ending the turn while a background executor is working, with the next step
       "id": "t-1a2b3c4d",
       "title": "タスクのタイトル",
       "status": "approved | in_progress | in_review | done | blocked",
+      "gate": "full",
       "phase": null,
       "attempts": 0,
       "executor": null,
@@ -81,7 +82,7 @@ Note: ending the turn while a background executor is working, with the next step
 }
 ```
 
-- フェーズ列は **research → plan → implement → report** で固定。`phase`、判定ファイル名、サブエージェントへの指示は必ずこの英語トークンを使う。`finish=commit|pr` のときだけ、report PASS 後に検証対象外の後処理として `phase: finalize` を挟む。`finish=pr` では、in_review になった後に `phase: pr_fix` (検証ゲートあり) → `finalize` が何度か追加で回ることがある (下記「PR の追従」)。
+- フェーズ列はタスクの `gate` により 2 形態ある。`full` (既定): **research → plan → implement → report**。`light`: **research+plan → implement → report** (research と plan を 1 フェーズに統合し、検証ゲートも 1 回になる)。`gate` はタスク実行手順 1 で、タスク本文の宣言行から機械的に判定する — **宣言が無い・判定できないタスクは常に `full`** で、一度決めたら以降変えない。宣言の妥当性は統合ゲートの verifier が再判定する (verifier.md の research+plan 節) — 覆されても gate とフェーズ列は巻き戻さず、full 相当の要求が統合ゲートでそのまま課される。`phase`、判定ファイル名 (`verdicts/<phase>-<attempt>.json`)、サブエージェントへの指示は必ずこれらの英語トークンを使う (統合フェーズは `research+plan` の 1 トークン)。`finish=commit|pr` のときだけ、report PASS 後に検証対象外の後処理として `phase: finalize` を挟む。`finish=pr` では、in_review になった後に `phase: pr_fix` (検証ゲートあり) → `finalize` が何度か追加で回ることがある (下記「PR の追従」)。
 - パイプラインが自力で到達する終端は `in_review` (レビュー待ち) と `blocked`。**Done (マージ/受け入れ完了) はユーザーの行為である。** パイプラインが done を書くのは、ユーザーのマージを git 履歴で証明できたときの回収 (下記「マージの回収」) だけ。
 - `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。`ref` が PR URL のときは追従用に `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "sig": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "idle": 0, "checked_at": null, "note": null}` も併せて置く (`proc` は変化を待つバックグラウンドプロセスの id)。
 - `watch.idle` は、**その PR の** watch プロセスが timeout (6 時間動きなし) で空振りした連続回数。候補が枯渇した後だけ数える (下記「ペーシングと枯渇」)。PR ごとに持つのは、複数 PR の timeout を単一カウンタで合算すると「4 回 = 丸 1 日」の等式が壊れ、N 本監視で約 6 時間後に追従を打ち切ってしまうため。
@@ -158,7 +159,7 @@ Return only what the adapter file specifies for this operation.
 
 ## タスク実行
 
-1. state.json で対象タスクを `status: in_progress`, `phase: research`, `attempts: 0` に更新し、`runs/<id>/` を作る。アダプタで `mark <id> in_progress` する。この `mark` が `{"ok": false}` で**着手済みの兆候** (already assigned / already in progress) を返したら実行しない: タスクを queue から外して history に記録し、次のイテレーションへ進む (別のセッションか人が着手している — トラッカー側を正とする)。それ以外の `mark` 失敗は下記「アダプタの呼び方」のとおり続行する。
+1. state.json で対象タスクを `status: in_progress`, `phase: research`, `attempts: 0` に更新し、`runs/<id>/` を作る。アダプタで `mark <id> in_progress` する。この `mark` が `{"ok": false}` で**着手済みの兆候** (already assigned / already in progress) を返したら実行しない: タスクを queue から外して history に記録し、次のイテレーションへ進む (別のセッションか人が着手している — トラッカー側を正とする)。それ以外の `mark` 失敗は下記「アダプタの呼び方」のとおり続行する。`mark` の後、タスクの `gate` を判定する: `grep -Fq '<!-- task-pipeline:gate=light -->' <tasks/<id>.md の絶対パス>` の**終了コードだけ**を見る (本文を Read しない — この機械判定はコンテキスト規律を破らない)。ヒットしたらそのタスクを `gate: "light"`, `phase: "research+plan"` に更新する。ヒットしない・ファイルが無い・grep が実行できないときは何もしない — **既定は full** で、light はこの 1 経路でしか選ばれない。gh アダプタはタスク本文を `mark in_progress` の時点で書くので、この判定を `mark` より前に行ってはならない (スタブに宣言は無いので、必ず full に落ちてしまう)。
 2. **タスク専用の worktree を作る** (下記「worktree」)。作れなかった場合はそこに書いたとおりに扱う。
 3. 実行エージェントを **background で 1 体** 起動する (subagent_type: general-purpose)。プロンプトはこの 5 行のみ:
 
@@ -167,10 +168,10 @@ Return only what the adapter file specifies for this operation.
    Read ~/.claude/skills/task-pipeline/references/executor.md and follow it.
    task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス>
    finish mode: <none|commit|pr>
-   Begin with phase "research".
+   Begin with phase "<phase>".
    ```
 
-   agentId を state.json の `executor` に、現在時刻を `executor_last_event_at` に記録する。
+   `<phase>` は state.json のそのタスクの現在値 (`research` または `research+plan`)。agentId を state.json の `executor` に、現在時刻を `executor_last_event_at` に記録する。
 4. **以降、このタスクの進行は実行エージェントの停止通知だけが駆動する。** 通知待ちでターンを終えるときは、/loop dynamic 配下ならフォールバックの ScheduleWakeup (1800 秒、同じ prompt) を予約しておく (実行が沈黙したままでもループが死なないように)。稼働中の実行エージェントに作業指示を送ってはならない。
 5. 実行エージェントはフェーズを 1 つ終えるごとに成果物を run dir に書き、`PHASE <name> DONE — <成果物パス>` または `BLOCKED: <理由>` の 1 行で停止する。停止通知を受けたら (このとき `executor_last_event_at` を更新する):
    - 送り元の agentId が state.json の `executor` と一致しない通知は無視する (`executor_last_event_at` も更新しない)。引き継ぎで executor を替えた後に、旧 executor の遅れた通知が届くことがある。

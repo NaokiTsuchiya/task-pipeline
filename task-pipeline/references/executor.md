@@ -20,7 +20,7 @@ You are operating autonomously. The user is not watching and cannot answer quest
 ## 進め方
 
 - 最初に task ファイルを読む。作業はすべて target project 内で行う。
-- フェーズは固定: research → plan → implement → report。`finish=pr` のときは、PR を出した後にレビュー/CI への追随として `pr_fix` が何度か追加で来ることがある (下記)。
+- フェーズは固定: research → plan → implement → report。ただし起動・再開メッセージの phase が `research+plan` のときは、research と plan を統合フェーズ 1 回で行う (下記「research+plan」)。統合は指示されたときだけで、自分では選ばない。`finish=pr` のときは、PR を出した後にレビュー/CI への追随として `pr_fix` が何度か追加で来ることがある (下記)。
 - git commit / push は、タスク本文が明示的に求めるか、finalize 指示 (下記) による場合を除き、しない。
 - **target project は通常このタスク専用の git worktree で、既に専用ブランチがチェックアウトされている。** ブランチを切る・切り替える必要は無いし、してはならない。他のタスクや、ユーザー自身の作業ツリーがそれぞれ別の worktree に居るので、**target project の外のファイルを変更しない**こと。
 - タスク記述を超えるスコープの変更、破壊的・不可逆な操作はしない。必要になったら BLOCKED で停止する。ただし**変更する挙動をテストで固定する厚みはスコープ超過ではない** — タスク本文の要求はテストの下限であって上限ではない。厚みは plan の受け入れ条件に載せたうえで実装する (plan フェーズの「テスト網羅の最低ライン」。implement の required_fixes 対応では implementation.md、pr_fix では pr-fix-<n>.md への記載でよい — どちらも plan 記載と同等に扱い、plan.md は書き換えない)。
@@ -49,6 +49,14 @@ You are operating autonomously. The user is not watching and cannot answer quest
   - **エントリポイントごとの確認**: 変更した判定に外から到達する経路 (公開 API、CLI、HTTP 等 — research で洗い出したもの。research に無ければここで洗い出す) それぞれについて、最低 1 ケースは実際にその経路を通すテストを置く。複数の経路が同じ判定を同じ形で通り、経路固有の観測結果 (exit code、エラー表示等) に差が無いなら、代表 1 経路 + 残りの理由付き除外でよい。
   - **除外の明示**: 網羅しないと決めたクラス・経路は、理由とともに plan に書く。テスト基盤の不足を理由にするときは、その経路を最小限で通す方法 (例: プロセス起動 1 本のテスト) では足りない理由も書く。
 - 検証手順 — そのまま実行できるコマンド列
+
+### research+plan → `<run dir>/research.md` + `<run dir>/plan.md` (統合フェーズ)
+
+起動・再開メッセージの phase が `research+plan` のときだけ。上の research と plan をこの順で両方行い、成果物 2 本を書いて **1 回で停止する**: `PHASE research+plan DONE — <research.md の絶対パス>, <plan.md の絶対パス>`。
+
+- 各成果物の内容・水準は上の各節と同じ。統合されるのは停止と検証の回数であって、成果物への要求ではない。
+- タスク本文の gate 宣言 (`<!-- task-pipeline:gate=light -->`) は検証ゲートが再判定する。宣言に頼らず、「テスト網羅の最低ライン」のトリガー判定は通常どおり自分でも行う — 割り当てを変える変更だと分かったら、最低ラインを plan.md に含める (宣言の誤りを成果物の薄さで引き継がない)。
+- 修正指示 (required_fixes) は research.md / plan.md の両方に及びうる。同じ統合フェーズとして直し、同じ形式で停止する。
 
 ### implement → `<run dir>/implementation.md` + target project への実変更
 
