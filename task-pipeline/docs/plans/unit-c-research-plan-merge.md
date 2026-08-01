@@ -20,6 +20,7 @@
 ## 変更対象と設計上の決定点 (セッションが根拠付きで決めてよい)
 
 - **宣言の書式**: task-prep が issue 本文に埋め、アダプタ経由で `tasks/<id>.md` に生き残る形にする (gh は issue 本文を、markdown はアイテムファイルを転記するので、本文中のマーカー行 — 例 `<!-- task-pipeline:gate=light -->` — が両アダプタで機能する)。frontmatter はアダプタが生成するので使わない。
+  - **この決定は 2026-08-01 に覆した。** 「アダプタが生成する」ことは欠点ではなく利点だった — 本文の転記は LLM が散文を書き写す経路で、実運用初日にマーカー行が 3 件中 2 件落ちた。現行は gh がラベル `gate-light`、markdown が本文マーカーを正とし、アダプタが frontmatter の `gate: light` に転写する (`../gate-declaration-2026-08.md`)。
 - **task-prep 側の変更**: 宣言を付けてよい条件 (上記 2 軸) を task-prep の指示に追記する。**注意: 元のレビューの変更境界は task-pipeline/ 配下だけだったが、P11 は task-prep/ への追記を含む** — ユーザーは P11 を承認済みなので進めてよいが、task-prep 側の差分は最小 (宣言条件の 1 節) に留める。
 - **統合時のフェーズ列**: `research+plan → implement → report` (ゲート 3 回)。state.json の `phase` トークン、verdict ファイル名、executor への指示すべてに現れるので、SKILL.md のフェーズ列固定の記述 (スキーマ節) を「タスクの gate 宣言により 2 形態」に改める。成果物はファイル 2 本 (research.md + plan.md) を 1 停止で書く形が、verifier.md の既存合格条件を最大限流用できて安い — 1 本に統合するなら verifier.md の書き換え範囲が広がることと引き換えの根拠を書くこと。
 - **verifier の統合ゲート仕様**: research 節 + plan 節の合成 + 宣言の再判定 (リスク軸は「テスト網羅の最低ライン」のトリガー判定を流用)。覆した場合の required_fixes は「full で research からやり直す」ではなく「不足している research/plan の中身」を指す (フェーズ機械を巻き戻すより往復が少ない)。

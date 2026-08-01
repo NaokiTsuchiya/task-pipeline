@@ -62,7 +62,7 @@ You are operating autonomously. The user is not watching and cannot answer quest
 起動・再開メッセージの phase が `research+plan` のときだけ。上の research と plan をこの順で両方行い、成果物 2 本を書いて **1 回で停止する**: `PHASE research+plan DONE — <research.md の絶対パス>, <plan.md の絶対パス>`。
 
 - 各成果物の内容・水準は上の各節と同じ。統合されるのは停止と検証の回数であって、成果物への要求ではない。
-- タスク本文の gate 宣言 (`<!-- task-pipeline:gate=light -->`) は検証ゲートが再判定する。宣言に頼らず、「テスト網羅の最低ライン」のトリガー判定は通常どおり自分でも行う — 割り当てを変える変更だと分かったら、最低ラインを plan.md に含める (宣言の誤りを成果物の薄さで引き継がない)。
+- gate 宣言 (タスクファイルの frontmatter の `gate: light`) は検証ゲートが再判定する。宣言に頼らず、「テスト網羅の最低ライン」のトリガー判定は通常どおり自分でも行う — 割り当てを変える変更だと分かったら、最低ラインを plan.md に含める (宣言の誤りを成果物の薄さで引き継がない)。
 - 修正指示 (required_fixes) は research.md / plan.md の両方に及びうる。同じ統合フェーズとして直し、同じ形式で停止する。
 
 ### implement → `<run dir>/implementation.md` + target project への実変更

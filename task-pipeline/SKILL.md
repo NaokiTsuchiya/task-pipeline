@@ -84,7 +84,7 @@ Note: ending the turn while a background executor is working, with the next step
 }
 ```
 
-- フェーズ列はタスクの `gate` により 2 形態ある。`full` (既定): **research → plan → implement → report**。`light`: **research+plan → implement → report** (research と plan を 1 フェーズに統合し、検証ゲートも 1 回になる)。`gate` はタスク実行手順 1 で、タスク本文の宣言行から機械的に判定する — **宣言が無い・判定できないタスクは常に `full`** で、一度決めたら以降変えない。宣言の妥当性は統合ゲートの verifier が再判定する (verifier.md の research+plan 節) — 覆されても gate とフェーズ列は巻き戻さず、full 相当の要求が統合ゲートでそのまま課される。`phase`、判定ファイル名 (`verdicts/<phase>-<attempt>.json`)、サブエージェントへの指示は必ずこれらの英語トークンを使う (統合フェーズは `research+plan` の 1 トークン)。`finish=commit|pr` のときだけ、report PASS 後に検証対象外の後処理として `phase: finalize` を挟む。`finish=pr` では、in_review になった後に `phase: pr_fix` (検証ゲートあり) → `finalize` が何度か追加で回ることがある (下記「PR の追従」)。
+- フェーズ列はタスクの `gate` により 2 形態ある。`full` (既定): **research → plan → implement → report**。`light`: **research+plan → implement → report** (research と plan を 1 フェーズに統合し、検証ゲートも 1 回になる)。`gate` はタスク実行手順 1 で、タスクファイルの frontmatter から機械的に判定する — **宣言が無い・判定できないタスクは常に `full`** で、一度決めたら以降変えない。宣言の妥当性は統合ゲートの verifier が再判定する (verifier.md の research+plan 節) — 覆されても gate とフェーズ列は巻き戻さず、full 相当の要求が統合ゲートでそのまま課される。`phase`、判定ファイル名 (`verdicts/<phase>-<attempt>.json`)、サブエージェントへの指示は必ずこれらの英語トークンを使う (統合フェーズは `research+plan` の 1 トークン)。`finish=commit|pr` のときだけ、report PASS 後に検証対象外の後処理として `phase: finalize` を挟む。`finish=pr` では、in_review になった後に `phase: pr_fix` (検証ゲートあり) → `finalize` が何度か追加で回ることがある (下記「PR の追従」)。
 - パイプラインが自力で到達する終端は `in_review` (レビュー待ち) と `blocked`。**Done (マージ/受け入れ完了) はユーザーの行為である。** パイプラインが done を書くのは、ユーザーのマージを git 履歴で証明できたときの回収 (下記「マージの回収」) だけ。
 - `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。`ref` が PR URL のときは追従用に `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "sig": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "idle": 0, "checked_at": null, "note": null}` も併せて置く (`proc` は変化を待つバックグラウンドプロセスの id)。
 - `watch.idle` は、**その PR の** watch プロセスが timeout (6 時間動きなし) で空振りした連続回数。候補が枯渇した後だけ数える (下記「ペーシングと枯渇」)。PR ごとに持つのは、複数 PR の timeout を単一カウンタで合算すると「4 回 = 丸 1 日」の等式が壊れ、N 本監視で約 6 時間後に追従を打ち切ってしまうため。
@@ -203,10 +203,14 @@ Return only what the adapter file specifies for this operation.
 1. state.json で対象タスクを `status: in_progress`, `phase: research`, `attempts: 0`, `session: <自分の id>` に更新し、`runs/<id>/` を作る (`session` をここで主張するのは、worktree 作成と実行エージェント起動の間に他セッションがこのエントリを所有者なしと読むのを防ぐため)。アダプタで `mark <id> in_progress` する。この `mark` が `{"ok": false}` で**着手済みの兆候** (already assigned / already in progress) を返したら実行しない: タスクを queue から外して history に記録し、次のイテレーションへ進む (別のセッションか人が着手している — トラッカー側を正とする)。それ以外の `mark` 失敗は下記「アダプタの呼び方」のとおり続行する。`mark` の後、タスクの `gate` を判定する:
 
    ```
-   sed -n '/^## コメント$/q;p' <tasks/<id>.md の絶対パス> | grep -Fxq '<!-- task-pipeline:gate=light -->'
+   sed -n '2,/^---$/p' <tasks/<id>.md の絶対パス> | grep -Fxq 'gate: light'
    ```
 
-   この**終了コードだけ**を見る (本文を Read しない — この機械判定はコンテキスト規律を破らない)。行全体一致 (`-x`) は本文が文中でマーカーに言及しただけの誤検出を、`## コメント` 手前での打ち切りはトラッカーのコメント転記にマーカーが書かれた場合の誤検出を防ぐ (コードブロック内の引用行は残る誤検出源だが、統合ゲートの宣言再判定が受け止めるので、light 側に倒れても品質は破れない)。ヒットしたらそのタスクを `gate: "light"`, `phase: "research+plan"` に更新する。ヒットしない・ファイルが無い・コマンドが実行できないときは何もしない — **既定は full** で、light はこの 1 経路でしか選ばれない。gh アダプタはタスク本文を `mark in_progress` の時点で書くので、この判定を `mark` より前に行ってはならない (スタブに宣言は無いので、必ず full に落ちてしまう)。同じ理由で、`mark` が失敗したまま続行した場合は本文が未取得のことがあり、宣言のあるタスクでも判定が空振りして full に落ちる — これは安全側の意図した降格である。
+   この**終了コードだけ**を見る (本文を Read しない — この機械判定はコンテキスト規律を破らない)。見るのは **frontmatter だけ**である: frontmatter はアダプタが構造データから生成する領域なので、散文の転記では落ちない。**宣言の正はトラッカー側にあり、frontmatter はその転写である** (gh: ラベル `gate-light`、markdown: アイテムファイル本文のマーカー行)。タスクファイルを書くたびにこの行を入れるのは各アダプタの責任で、判定側はトラッカーを問わずこの 1 行だけを見る。行全体一致 (`-x`) と frontmatter への限定により、本文が文中で `gate: light` に言及しただけでは発火しない (frontmatter が閉じていないタスクファイルでは本文まで走査が伸びうるが、統合ゲートの宣言再判定が受け止めるので、light 側に倒れても品質は破れない)。
+
+   ヒットしたらそのタスクを `gate: "light"`, `phase: "research+plan"` に更新する。ヒットしない・ファイルが無い・コマンドが実行できないときは何もしない — **既定は full** で、light はこの 1 経路でしか選ばれない。gh アダプタはタスクファイルを `mark in_progress` の時点で書き直すので、この判定を `mark` より前に行ってはならない (スタブに `gate:` 行は無いので、必ず full に落ちてしまう)。同じ理由で、`mark` が失敗したまま続行した場合は宣言のあるタスクでも判定が空振りして full に落ちる — これは安全側の意図した降格である。
+
+   `mark in_progress` の応答に `gate_declared` が含まれていて、**この grep の結果と食い違ったら両方の値を history に書く**。トラッカー側に宣言があるのにタスクファイルへ落ちなかった (= アダプタの書き出しが宣言を落とした) ことを観測可能にするための突き合わせで、降格自体は安全側なので実行は止めない。この照合が無かった頃、本文末尾のマーカー行を判定に使う設計で実際に 2/3 の宣言が静かに失われている (`docs/gate-declaration-2026-08.md`)。
 2. **タスク専用の worktree を作る** (下記「worktree」)。作れなかった場合はそこに書いたとおりに扱う。
 3. 実行エージェントを **background で 1 体** 起動する (subagent_type: general-purpose)。プロンプトはこの 5 行のみ:
 
