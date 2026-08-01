@@ -188,7 +188,9 @@ Return only what the adapter file specifies for this operation.
 
 - 同じブランチを 2 つの worktree で同時にチェックアウトできないという git の制約上、**worktree を使う以上どのタスクも必ず自分のブランチを持つ**。したがって `finish=commit` は「現在のブランチ」ではなく `task-pipeline/<id>` へのコミットになり、`finish=none` の未コミット変更も worktree 側に残る。どちらの場合も、レビュー待ちの報告に worktree のパスとブランチ名を必ず書く。
 - 作成に成功したら state.json のそのタスクに `"worktree": "<絶対パス>"` を記録する。`review` の `base` には、worktree を作った時点でのプロジェクト側のブランチ (`git -C <プロジェクトルート> rev-parse --abbrev-ref HEAD`) を入れる。
-- **作れなかったとき**: プロジェクトが git リポジトリでない、またはブランチ名が既に使われている等で失敗したら、worktree 無しでプロジェクトルートを target project にして続行する (`worktree` は null のまま)。この場合の `finish=commit` は従来どおり現在のブランチへのコミットになる。理由を history に残す。
+- **作れなかったとき**: 失敗理由で扱いが分かれる。
+  - **プロジェクトが git リポジトリでない** → worktree 無しでプロジェクトルートを target project にして続行する (`worktree` は null のまま)。この場合の `finish=commit` は従来どおり現在のブランチへのコミットになる。理由を history に残す。
+  - **ブランチ `task-pipeline/<id>` が既に存在する等、それ以外の失敗** → 続行しない。ブランチ既存は別セッションの二重着手か前回実行の残骸の最有力な兆候であり、プロジェクトルートで続行すると上の「ユーザーの作業ツリーを触らない」保証が破れる。タスクを blocked にする (state 更新、アダプタで `mark <id> blocked <理由>`。理由には git の実エラー出力を含める)。残骸が原因なら、ユーザーがその worktree とブランチを消せば、blocked を外した次の承認で再実行できる。
 - **削除するのは done を回収したときだけ** (下記「マージの回収」)。in_review や blocked では消さない — `finish=none` の未コミット変更や blocked の途中成果物は worktree にしか無く、消すと失われるため。
 
 ### 検証ゲートの絶対規則
