@@ -29,4 +29,16 @@
 - **依存チェック**: 本文の `依存:` 行にある各 `#N` を `issue_read (method: get)` で読み、closed **かつ `state_reason` が `completed`** のときだけ解決済み。`not_planned` で閉じられた依存は解決ではない (SKILL.md の昇格の規則どおり、従属 issue ごとユーザーに上げる)。
 - **昇格スキャン**: `list_issues (state: OPEN, labels: ["pending-deps"])` → 各 issue の本文から `依存:` を読み、全依存が解決済み (上記の判定) かつ本文に `未確定:` が無いものだけ、ラベルを `pending-deps` から `ready` に入れ替える (全置換規則で)。
 
+## 依存はネイティブ機能を使わない
+
+**依存の正は本文の `依存:` 行だけである。GitHub ネイティブの依存関係 (issue の "Mark as blocked by" / blocking) は task-prep も task-pipeline も読まない。** 人が GitHub の UI でネイティブ依存だけを張っても `ready` ラベルは外れないので、パイプラインはその issue をそのまま着手する。依存は必ず `依存:` 行で書くこと (ネイティブ側にも張るのは自由だが、それは人が見るための表示であって、機械はそちらを見ない)。
+
+読まない理由 (2026-08 時点):
+
+- **GitHub MCP に読み書きの口が無い。** `issue_read` の method は `get` / `get_comments` / `get_sub_issues` / `get_parent` / `get_labels` のみで、依存関係を返さない。REST (`/issues/{n}/dependencies/blocked_by`) と gh CLI (`--blocked-by`) にはあるが、gh CLI はこの環境では使えない (上記「読み書きは GitHub MCP で行う」)。
+- **検索修飾子が無い。** 公式の検索/フィルタ docs に `is:blocked` 系は無く、`search_issues` に投げても素通りする (エラーにならず 0 件)。task-pipeline の `list` は 1 回の検索クエリで候補を確定させる設計なので、依存はゲートに使えない — ゲートに使えるのは `ready` ラベルだけである。
+- **`not_planned` を区別できない。** ネイティブ依存は「閉じたら解けた」であり、上記「依存チェック」の `state_reason: completed` だけを解決とみなす規則を表現できない。
+
+なお **sub-issue (`sub_issue_write` / `get_sub_issues` / `get_parent`) は MCP で使える**が、これは分解の親子関係であって依存 (順序) ではない。依存の表現には使わない。
+
 ドラフトはカレントプロジェクトの `.task-prep/drafts/<slug>.md` に置く。issue 作成後はトラッカーが正であり、ドラフトは残骸 (コミットしない)。
