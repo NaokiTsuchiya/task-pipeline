@@ -68,6 +68,7 @@ Note: ending the turn while a background executor is working, with the next step
       "attempts": 0,
       "executor": null,
       "executor_last_event_at": null,
+      "takeover_at": null,
       "blocked_reason": null,
       "worktree": null,
       "base": null,
@@ -85,9 +86,18 @@ Note: ending the turn while a background executor is working, with the next step
 - `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。`ref` が PR URL のときは追従用に `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "checked_at": null, "note": null}` も併せて置く (`proc` は変化を待つバックグラウンドプロセスの id)。
 - `watch_idle` は候補が枯渇した後、どの PR にも動きが無いまま watch プロセスが空振りした連続回数 (下記「ペーシングと枯渇」)。
 - `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。`base` は worktree を作った時点のプロジェクト側ブランチ (下記。worktree が無ければ null)。
-- `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。`executor_last_event_at` はその実行エージェントに関する最後のイベントの時刻 (UTC) — 更新するのは、その executor を起動したとき・その executor へ SendMessage したとき・その executor の停止通知を処理したときの 3 つだけ。**実行エージェントの生存判定はこのフィールドで行う。** トップレベルの `updated_at` は無関係なタスクの追従処理でも動くので、生存判定に使ってはならない (使うと、PR にレビュー活動が続く限り沈黙した executor が検出されない)。
+- `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。`executor_last_event_at` はその実行エージェントに関する最後のイベントの時刻 (UTC) — 更新するのは、その executor を起動したとき・その executor へ SendMessage したとき・その executor の停止通知を処理したときの 3 つだけ。**実行エージェントの生存判定はこのフィールドで行う。** トップレベルの `updated_at` は無関係なタスクの追従処理でも動くので、生存判定に使ってはならない (使うと、PR にレビュー活動が続く限り沈黙した executor が検出されない)。`takeover_at` は SendMessage 失敗後の引き継ぎ待ちの開始時刻 (下記「飛行中の扱い」。通常は null)。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
 - `candidates` は未承認タスクを**優先順の並び**で保持するキャッシュ (下記「承認」)。承認のたびにトリアージをやり直さないために置く。
+
+## state.json の書き込み手順 (排他)
+
+同じリポジトリに複数のセッションがパイプラインを向けると、state.json は共有される (プロジェクトルート基準で 1 箇所に集約されるため)。書き込みは必ず次の手順で行う。読むだけなら不要:
+
+1. `.task-pipeline/lock` を `mkdir` で作る (既存なら失敗するので、これが排他になる)。作れなければ 10 秒待って再試行し、3 回失敗したらこのイテレーションでは書かない (書き込みを伴う処理は次の wakeup に回す)。lock の作成時刻が 10 分より古いときだけは、保持者が死んだとみなして削除し、取り直してよい。
+2. lock を取ってから state.json を**読み直し**、自分の変更をその最新内容に適用する。イテレーション冒頭に読んだ内容をそのまま書き戻してはならない — 間に入った他セッションの書き込みを巻き戻してしまう。読み直した内容が自分の判断の前提を覆している場合 (例: これから着手しようとしたタスクが既に別セッションで in_progress になっている) は、書かずにその処理自体を破棄する。
+3. 一時ファイル (`state.json.tmp` 等) に全文を書いてから `mv` で `state.json` に置き換える (部分書き込みを防ぐ)。
+4. `.task-pipeline/lock` を削除する。
 
 ## 毎イテレーションの手順
 
@@ -214,7 +224,7 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 
 - そのタスクの `executor_last_event_at` が 90 分以内 → 実行エージェントは稼働中とみなす。**何も送らない**。/loop dynamic 配下ならフォールバック (1800 秒) を予約し直してターンを終える。固定間隔 cron 配下なら何も予約せず終える。
 - そのタスクの `executor_last_event_at` が 90 分より古い → 実行エージェントに SendMessage で「Status check: finish your current phase per protocol and stop with your protocol line. Do not advance phases without an explicit verified-PASS message.」を送り、`executor_last_event_at` を現在時刻に更新して state.json を書く (ping の繰り返しを防ぐ)。
-  - 送信がエラーになる (エージェントが存在しない = セッションが変わった) → タスク実行の手順 3 の形式で新しい実行エージェントを起動する。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは、対応する findings ファイルのパスも添える)。
+  - 送信がエラーになった → **即座に再起動しない。** agentId はセッション内でしか有効でないため、送信エラーは executor が死んだことの証明にならない — 別セッションが起動した executor が生きている可能性がある。タスクに `takeover_at: <現在時刻>` を記録してこのイテレーションを終える。以降のイテレーションで、`takeover_at` から 30 分以上経ってなお `executor_last_event_at` が動いていなければ、所有セッションは居ないと判断して `takeover_at` を消し、タスク実行の手順 3 の形式で新しい実行エージェントを起動する。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは、対応する findings ファイルのパスも添える)。`executor_last_event_at` が動いていたら (所有セッションが生きて処理した)、`takeover_at` を消して手を引く。
   - 送信できたら、その後の停止通知が通常どおり検証ゲートを駆動する。
 
 ## PR の追従 (finish=pr)
@@ -269,7 +279,7 @@ Return only the watch JSON.
 0. **別のタスクが既に `in_progress` なら、このイテレーションでは始めない。** `watch.fix_pending` を真にしたまま (watch プロセスも起動せずに) 置き、次のイテレーションで手順 1 から拾う。飛行中は 1 タスクという原則をここでも守る。
 1. `watch.fix_attempts` を +1 する。**3 を超えたら修正しない**: `watch.state` を `stopped`、`note` に「追従上限」と最後の findings パスを書き、以降は人のレビューに委ねる旨を報告する (in_review のまま)。上限を置くのは、押し直しがそのまま新しい CI とレビューを呼ぶ以上、放っておくと止まらないため。ユーザーが `watch.state` を `watching` に戻せば再開する。
 2. タスクを `status: in_progress`, `phase: pr_fix`, `attempts: 0` にし、`watch.fix_pending` を偽に戻す (着手したので、以降は通常のフェーズ進行が駆動する)。**トラッカーへの `mark` はしない** (トラッカー上はレビュー待ちのままでよい)。
-3. 実行エージェントへ SendMessage:「PR feedback. Address the findings in `<findings ファイルの絶対パス>` as phase "pr_fix".」送信できなければ (セッションが変わっている)、タスク実行の手順 3 と同じ形で新しい実行エージェントを起動し、Begin 行を「Begin with phase "pr_fix". Address the findings in `<パス>`.」に変える。
+3. 実行エージェントへ SendMessage:「PR feedback. Address the findings in `<findings ファイルの絶対パス>` as phase "pr_fix".」送信できなければ、タスク実行の手順 3 と同じ形で新しい実行エージェントを起動し、Begin 行を「Begin with phase "pr_fix". Address the findings in `<パス>`.」に変える (飛行中の扱いのような引き継ぎ待ちはここでは要らない — このタスクは直前まで in_review で、フェーズ実行中の executor は存在しない)。
 4. 以降は通常のフェーズと同じ: `PHASE pr_fix DONE` の停止通知 → フレッシュな検証ゲート (phase: `pr_fix`) → PASS なら `finalize` → `FINALIZED` でレビュー待ち処理へ戻る。FAIL は同じリトライ上限 (3 回) で、使い切ったら blocked。
 5. レビュー待ちに戻すとき、`watch.pending_ids` を `watch.handled` に移す (`pending_ids` は空に、`findings` は null に)。**これを忘れると同じ指摘を毎回直しに行く。** state.json に置くのは、修正サイクルがイテレーションをまたぐため — この対応関係をコンテキストの記憶に頼ってはならない。
 
