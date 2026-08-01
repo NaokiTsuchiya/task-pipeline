@@ -2,7 +2,7 @@
 #
 # task-pipeline: PR に変化が起きるまでブロックする。
 #
-#   usage: watch-pr.sh <pr-url> <task-id> [interval-sec] [max-sec]
+#   usage: watch-pr.sh <pr-url> <task-id> [interval-sec] [max-sec] [prev-signature]
 #
 # オーケストレーターがバックグラウンドで起動し、終了通知で次のイテレーションが動く。
 # 待つ処理をここに押し込むのは、待っている間モデルを起こさないため — ポーリングするのは
@@ -28,7 +28,7 @@ interval=${3:-60}
 max=${4:-21600}
 
 if [ -z "$url" ] || [ -z "$task" ]; then
-  echo "usage: watch-pr.sh <pr-url> <task-id> [interval-sec] [max-sec]" >&2
+  echo "usage: watch-pr.sh <pr-url> <task-id> [interval-sec] [max-sec] [prev-signature]" >&2
   exit 4
 fi
 
@@ -70,10 +70,15 @@ signature() {
     --jq "$jq_signature" 2>/dev/null
 }
 
-base=$(signature)
+# 第 5 引数で前回の署名を渡されたら、それを基準にする。プロセスが死んでいた間に
+# 起きた変化を次の比較で「changed」として拾うため (張り直しで取り落とさない)。
+base=${5:-}
 if [ -z "$base" ]; then
-  echo "PR-WATCH $task error PR の状態を取得できません: $url" >&2
-  exit 3
+  base=$(signature)
+  if [ -z "$base" ]; then
+    echo "PR-WATCH $task error PR の状態を取得できません: $url" >&2
+    exit 3
+  fi
 fi
 
 elapsed=0
