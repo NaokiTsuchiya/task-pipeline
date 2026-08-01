@@ -3,6 +3,7 @@
 # task-pipeline: PR に変化が起きるまでブロックする。
 #
 #   usage: watch-pr.sh <pr-url> <task-id> [interval-sec] [max-sec] [prev-signature]
+#   env:   TASK_PIPELINE_HEARTBEAT=<path>  … 1 周ごとに touch するセッション生存印
 #
 # オーケストレーターがバックグラウンドで起動し、終了通知で次のイテレーションが動く。
 # 待つ処理をここに押し込むのは、待っている間モデルを起こさないため — ポーリングするのは
@@ -81,11 +82,26 @@ if [ -z "$base" ]; then
   fi
 fi
 
+# このプロセスはオーケストレーターのセッションと共に死ぬ揮発資源なので、生きている間は
+# セッションの生存印を打ち直す。in_review で待っている間はオーケストレーター自身が
+# 回らない (/loop 無しなら停止通知まで一度も起きない) ため、これが無いとセッションが
+# 生きているのに死んだと判定され、別セッションが同じ PR に 2 本目の watch を張る。
+heartbeat() {
+  if [ -n "${TASK_PIPELINE_HEARTBEAT:-}" ]; then
+    mkdir -p "$(dirname "$TASK_PIPELINE_HEARTBEAT")" 2>/dev/null
+    touch "$TASK_PIPELINE_HEARTBEAT" 2>/dev/null
+  fi
+  return 0
+}
+
+heartbeat
+
 elapsed=0
 failures=0
 while [ "$elapsed" -lt "$max" ]; do
   sleep "$interval"
   elapsed=$((elapsed + interval))
+  heartbeat
 
   current=$(signature)
   if [ -z "$current" ]; then

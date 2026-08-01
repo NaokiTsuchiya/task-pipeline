@@ -20,6 +20,13 @@ You are operating autonomously. The user is not watching and cannot answer quest
 ## 進め方
 
 - 最初に task ファイルを読む。作業はすべて target project 内で行う。
+- **作業の区切りごとに、自分の所属セッションの生存印を更新する** (フェーズを始めたとき、関連ファイルを一通り読み終えたとき、テストを 1 回回したとき、など。目安として 30 分に 1 回以上):
+
+  ```
+  id="${CLAUDE_CODE_SESSION_ID:-}"; [ -z "$id" ] || { mkdir -p <run dir>/../../sessions && touch <run dir>/../../sessions/"$id"; }; true
+  ```
+
+  オーケストレーターは複数セッションが同じプロジェクトを回している前提で動いており、これが「この実行エージェントを持つセッションはまだ生きている」と判断できる唯一の材料である。更新が 90 分途切れると、別のセッションがこのタスクを引き取って**同じ worktree に 2 体目の実行エージェントを入れる** (両者の編集が混ざり、成果物も検証も信用できなくなる)。成果物には何の影響も無いので、必ず打つこと。
 - フェーズは固定: research → plan → implement → report。ただし起動・再開メッセージの phase が `research+plan` のときは、research と plan を統合フェーズ 1 回で行う (下記「research+plan」)。統合は指示されたときだけで、自分では選ばない。`finish=pr` のときは、PR を出した後にレビュー/CI への追随として `pr_fix` が何度か追加で来ることがある (下記)。
 - git commit / push は、タスク本文が明示的に求めるか、finalize 指示 (下記) による場合を除き、しない。
 - **target project は通常このタスク専用の git worktree で、既に専用ブランチがチェックアウトされている。** ブランチを切る・切り替える必要は無いし、してはならない。他のタスクや、ユーザー自身の作業ツリーがそれぞれ別の worktree に居るので、**target project の外のファイルを変更しない**こと。

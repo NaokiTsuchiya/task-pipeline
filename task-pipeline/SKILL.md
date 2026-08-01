@@ -41,6 +41,7 @@ Note: ending the turn while a background executor is working, with the next step
   - `state.json` — 唯一の状態源。**毎イテレーション必ず読み直す**。コンテキスト内の記憶を状態として使わない。
   - `tasks/<id>.md` — タスク本文 (アダプタサブエージェントが書く)
   - `runs/<id>/` — フェーズ成果物と検証判定
+  - `sessions/<session id>` — パイプラインを回しているセッションの heartbeat (下記「セッションの所有権」)
 
   `.task-pipeline/` を新規に作るときは、同時に `<git common dir>/info/exclude` に `/.task-pipeline/` を追記する (未記載のときだけ)。ユーザーが追跡している `.gitignore` は書き換えない。
 
@@ -67,6 +68,7 @@ Note: ending the turn while a background executor is working, with the next step
       "gate": "full",
       "phase": null,
       "attempts": 0,
+      "session": null,
       "executor": null,
       "executor_last_event_at": null,
       "takeover_at": null,
@@ -77,7 +79,7 @@ Note: ending the turn while a background executor is working, with the next step
     }
   ],
   "candidates": [{"id": "t-9z8y", "title": "未承認タスク", "reason": "順位の理由"}],
-  "relisted": [],
+  "relisted": [{"id": "t-1a2b3c4d", "seen_at": "2026-07-16T09:10:00Z"}],
   "history": ["2026-07-16T09:12Z done t-1a2b3c4d (.task-pipeline/runs/t-1a2b3c4d/report.md)"]
 }
 ```
@@ -87,10 +89,10 @@ Note: ending the turn while a background executor is working, with the next step
 - `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。`ref` が PR URL のときは追従用に `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "sig": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "idle": 0, "checked_at": null, "note": null}` も併せて置く (`proc` は変化を待つバックグラウンドプロセスの id)。
 - `watch.idle` は、**その PR の** watch プロセスが timeout (6 時間動きなし) で空振りした連続回数。候補が枯渇した後だけ数える (下記「ペーシングと枯渇」)。PR ごとに持つのは、複数 PR の timeout を単一カウンタで合算すると「4 回 = 丸 1 日」の等式が壊れ、N 本監視で約 6 時間後に追従を打ち切ってしまうため。
 - `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。`base` は worktree を作った時点のプロジェクト側ブランチ (下記。worktree が無ければ null)。
-- `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。`executor_last_event_at` はその実行エージェントに関する最後のイベントの時刻 (UTC) — 更新するのは、その executor を起動したとき・その executor へ SendMessage が**成功**したとき・その executor の停止通知を処理したときの 3 つだけ (失敗した送信で動かすと、他セッションから executor が生きているように見えてしまう)。**実行エージェントの生存判定はこのフィールドで行う。** トップレベルの `updated_at` は無関係なタスクの追従処理でも動くので、生存判定に使ってはならない (使うと、PR にレビュー活動が続く限り沈黙した executor が検出されない)。`takeover_at` は SendMessage 失敗後の引き継ぎ待ちの開始時刻 (下記「飛行中の扱い」。通常は null)。
+- `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`session` はこのタスクの揮発資源 (実行エージェント / watch プロセス) を持つセッションの id (上記「セッションの所有権」)。`executor` は実行エージェントの agentId。**agentId はセッションを跨いで有効でないので、`executor` は必ず `session` とセットで読む。** `executor_last_event_at` はその実行エージェントに関する最後のイベントの時刻 (UTC) — 更新するのは、その executor を起動したとき・その executor へ SendMessage が**成功**したとき・その executor の停止通知を処理したときの 3 つだけ (失敗した送信で動かすと、他セッションから executor が生きているように見えてしまう)。**実行エージェントの生存判定はこのフィールドで行う。** トップレベルの `updated_at` は無関係なタスクの追従処理でも動くので、生存判定に使ってはならない (使うと、PR にレビュー活動が続く限り沈黙した executor が検出されない)。`takeover_at` は SendMessage 失敗後の引き継ぎ待ちの開始時刻 (下記「飛行中の扱い」。通常は null)。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
 - `candidates` は未承認タスクを**優先順の並び**で保持するキャッシュ (下記「承認」)。承認のたびにトリアージをやり直さないために置く。
-- `relisted` は、queue で `in_review` / `blocked` / `done` なのに `list` に再登場した id の控え (承認手順 1 の反映遅延ガード。2 回連続の再登場はユーザーの復帰操作とみなす)。
+- `relisted` は、queue で `in_review` / `blocked` / `done` なのに `list` に再登場した id の控え (承認手順 1 の反映遅延ガード。**初回観測から 10 分以上あけた 2 回目の再登場**はユーザーの復帰操作とみなす)。初回観測時刻を持つのは、複数セッションが回っていると 2 セッションの `list` が数秒差で並び、単なる反映遅延が「2 回連続の再登場」に見えてしまうため — トラッカーの反映遅延は次の refresh で解消するので、10 分後にまだ載っているならそれは人の操作である。
 
 ## state.json の書き込み手順 (排他)
 
@@ -101,20 +103,59 @@ Note: ending the turn while a background executor is working, with the next step
 3. 一時ファイル (`state.json.tmp` 等) に全文を書いてから `mv` で `state.json` に置き換える (部分書き込みを防ぐ)。
 4. `.task-pipeline/lock` を削除する。
 
+## セッションの所有権 (複数セッションの並行実行)
+
+同じプロジェクトに複数のセッションがパイプラインを向けることがある (1 つ目のセッションが 1 件流している最中に、2 つ目を `/loop` で起動する等)。state.json は共有されるが、**実行エージェントの agentId も watch のバックグラウンドプロセスも、それを起動したセッションの中でしか有効でない**。他セッションが起動した実行エージェントには SendMessage が届かず、その停止通知も自分には来ない。
+
+所有者を記録しないと後発セッションは他セッションのタスクを自分の飛行中タスクと誤認し、**永遠に届かない停止通知を待ち続けたうえ、やがて同じ worktree に 2 体目の実行エージェントを起動する** (飛行中の扱いの SendMessage 失敗 → 引き継ぎ経路がそのまま発火するため)。watch プロセスも同様に二重化する。
+
+これを避けるため、**揮発資源を持つタスクには所有セッションを記録し、他セッション所有のタスクには一切触らない**。タスクはそれぞれ専用 worktree で走るのでコードは分離されており、**他セッションがタスクを実行中であること自体は、自分が別のタスクを進める妨げにならない** — 「1 タスクずつ」の原則は 1 セッションあたりの話である。
+
+- **自分のセッション id と生存セッション一覧**は、イテレーション冒頭に 1 回の Bash でまとめて取る (自分の heartbeat の更新も兼ねる。lock は不要 — 触るのは自分のファイルと、丸 1 日以上前の残骸だけ):
+
+  ```
+  id="$CLAUDE_CODE_SESSION_ID"; d=<.task-pipeline の絶対パス>/sessions
+  mkdir -p "$d" && { [ -z "$id" ] || touch "$d/$id"; }
+  find "$d" -type f -mmin +1440 -delete
+  echo "self=$id"; find "$d" -type f -mmin -90 -exec basename {} \;
+  ```
+
+  返るファイル名の一覧が**生きているセッション**である。`CLAUDE_CODE_SESSION_ID` が空の環境では `session` を書けないので所有を主張できない (`session` は null のまま)。それでも安全側に倒れるのは、下の「引き取り」が所有権だけでは発火しないためである。
+
+- **`session` の意味は「このタスクについて、そのセッションにしか無い揮発資源 (実行エージェント / watch プロセス) が今ある」**。書き換える契機は次の 4 つだけ:
+  - 実行エージェントを起動した / 引き継いだとき → 自分の id
+  - watch プロセスを起動したとき → 自分の id
+  - 揮発資源が無くなったとき (blocked / done / watch を持たない in_review / `watch.state` が `stopped` / 修正サイクルの見送りで watch も張らないとき) → null
+  - **ループを止めるとき** → 自分が起動した watch プロセスを**止めてから**、そのタスクの `session` と `watch.proc` を null にする。止める判断に至るのは候補が枯渇したときとアダプタが使えないときだけで、そこに自分の飛行中タスクは無い (手順 1 の分岐上、飛行中なら `list` に到達しない)。手放さないと、他のセッションはその PR に最大 90 分手を出せない。
+- **これ以外に、ターンの終わりで所有を手放すことはしない。** 揮発資源が生きているかどうかは heartbeat が語る: 実行エージェントも watch プロセスも作業のたびに `sessions/<id>` を打ち直すので、**セッションが生きて仕事をしている限り所有は自然に維持され、セッションごと落ちれば 90 分で自然に失効する**。手放す規則を増やすほど、「死んだと申告したのに実は生きている」経路が増える。
+- **固定間隔 cron 配下は劣化モードである。** 毎イテレーションが別セッションなので、前のイテレーションが起動した実行エージェントと watch プロセスは (そのセッションが落ちれば) 道連れになり、次のイテレーションからは「生きている他セッションのタスク」に見える。失効を待つぶん、1 フェーズ進めるのに最大 90 分 + 引き継ぎ 30 分かかり、watch も張り直しが最大 90 分遅れる。**タスク実行を回すなら dynamic な `/loop` を使う** — 同じセッションが再開するので所有が途切れず、停止通知がそのままフェーズを駆動する。
+- **`session` が自分以外で、その id が生存一覧にあるタスクには触らない。** SendMessage も、watch の張り直しも、マージの回収も、state.json のそのエントリの書き換えもしない。承認の候補計算では従来どおり除外されたままにする (他セッションが実行中なので二重着手になる)。報告には「`<id>` は別セッションが実行中」と 1 行添えるだけにする。
+- **それ以外のタスク (`session` が自分 / null / 生存一覧に無い id) は自分の担当**である。ただし**所有者の不在は、揮発資源が死んだことの証明にはならない** — 生存一覧は各セッションがイテレーション冒頭に打つ heartbeat の時刻でしかなく、`/loop` を付けずに起動されたセッションは実行エージェントの停止通知が来るまで一度も回らないので、**長いフェーズの間じゅう生きたまま一覧から落ちる**。したがって**引き取りは所有権だけでは発火させず、下記「飛行中の扱い」の判定と AND を取る**。所有権が短くするのは待ち時間ではなく、「他セッションのものに手を出さない」範囲だけである。
+- **`watch.proc` も agentId と同じくセッションを跨いで有効でない。** 自分が起動したのでない `watch.proc` は**止めようとせず、null に落とすだけ**にする (他セッションの id に対する停止操作は何を止めるか保証がない)。
+
 ## 毎イテレーションの手順
 
-0. 必要ツールが遅延ロード状態なら、最初に 1 回の ToolSearch でまとめてロードする (`select:SendMessage` など。ループ停止時は CronList/CronDelete も)。
-1. `state.json` を読む。in_review のタスクがあれば、先に追従を済ませる: `review.watch.state` が `watching` のタスクは PR の追従 (下記。watch プロセスの生存確認と、届いている通知の処理)、`review.tip` を持つタスクはマージの回収 (下記)。その後:
+0. 必要ツールが遅延ロード状態なら、最初に 1 回の ToolSearch でまとめてロードする (`select:SendMessage` など。ループ停止時は CronList/CronDelete も)。続けて、自分のセッション id と生存セッション一覧を取る (上記「セッションの所有権」の 1 コマンド)。
+1. `state.json` を読む。**`session` が自分以外で、かつその id が生存一覧にあるタスクは、以下のすべての判断から除外する** (上記「セッションの所有権」。生存一覧に無い id のタスクは除外しない — それを除外すると、死んだセッションのタスクを誰も引き取れなくなる)。残ったタスクのうち in_review のものがあれば、先に追従を済ませる: `review.watch.state` が `watching` のタスクは PR の追従 (下記。watch プロセスの生存確認と、届いている通知の処理)、`review.tip` を持つタスクはマージの回収 (下記)。その後:
    - `in_progress` のタスクがある → 飛行中の扱いへ。
-   - `approved` のタスクがある → 先頭 1 件をタスク実行へ (**1 イテレーション 1 タスク**)。
+   - `approved` のタスクがある → 先頭 1 件をタスク実行へ (**1 セッション 1 タスク**。他セッションが別のタスクを実行中でも、自分の飛行中タスクが無いなら進めてよい)。
    - どちらも無い (state が無い場合を含む) → 承認へ。
+
+   **飛行中の上限**: 新しいタスクの実行を始める前 (approved の着手・承認のどちらでも) に、**除外した (= 生きている他セッションが実行中の) in_progress タスクが 2 件以上あるなら始めない。** 1 行報告し、dynamic なら ScheduleWakeup 1800 秒を予約してこのイテレーションを終える (予約しないと、他セッションが片付いてもこのセッションが二度と起きない)。プロジェクト全体で飛行中を 2 件までに抑える — 並行実行を認めるのは人がレビューできる本数までで、所有が失効しないまま増え続ける状況 (毎イテレーションが別セッションになる cron など) で着手だけが積み上がるのも防ぐ。**pr_fix はこの上限の対象外** — 新しい着手ではなく、既に出した PR を仕上げる作業だからである。
 2. 処理の節目ごとに state.json を更新し、タスクが in_review / blocked / done になったら進捗を 1〜3 行 (証拠パス付き) で報告する。
 
 ## 承認 (approved も in_progress も無いとき)
 
 **1 回の承認で通すのは 1 件だけ。** ユーザーに一覧の優先順位を考えさせない — 順位付けはこちらの仕事で、ユーザーの仕事は提示された上位から 1 件を選ぶことだけである。これがこのパイプラインで唯一ユーザーを待ってよい定常ポイントである。
 
-1. アダプタサブエージェントに `list` を実行させる (プロンプト書式は下記「アダプタの呼び方」)。返るのは `{id, title}` のインデックスだけで、本文は `tasks/<id>.md` にある。**`queue` に `approved` / `in_progress` で載っている id は常に候補から除く** (実行中・実行待ちのタスク)。`in_review` / `blocked` / `done` で載っている id が一覧に混ざっていた場合は 2 段階で扱う: その id が `relisted` に**無ければ**、候補から除いて `relisted` に足す — トラッカー側の除外の反映に遅延があるトラッカーでは、直前に片付けたタスクが 1 度だけ再登場することがあるため。**既に `relisted` に有れば** (2 回連続の再登場)、遅延ではなくユーザーがトラッカー側で復帰させたものなので、queue のそのエントリを落として通常の候補として扱い、`relisted` からも消す (in_review だったタスクは `review` / `watch` ごと落とし、watch プロセスが生きていれば止める)。今回の一覧に現れなかった id は `relisted` から消す。`{"tasks": []}` なら枯渇時フローへ。**除いた結果 0 件になっただけなら枯渇ではない** — その除外は relisted ガードによるもので、復帰かどうかの判定が次の list に持ち越されている。dynamic なら ScheduleWakeup 60 秒で次イテレーションへ (ここでループを止めると、ユーザーの復帰操作が 2 回目の list を迎えられない。トラッカーの反映遅延なら次の list で消えて `{"tasks": []}` になる)。
+1. アダプタサブエージェントに `list` を実行させる (プロンプト書式は下記「アダプタの呼び方」)。返るのは `{id, title}` のインデックスだけで、本文は `tasks/<id>.md` にある。**`queue` に `approved` / `in_progress` で載っている id は常に候補から除く** (実行中・実行待ちのタスク)。`in_review` / `blocked` / `done` で載っている id が一覧に混ざっていた場合、**その id は常に候補から除いたうえで**、次のように扱う (**ただし生きている他セッションが所有しているタスクは対象外** — 除いたままにして `relisted` にも足さない。相手が追従中の PR を持つタスクを、こちらの観測で承認へ差し戻さないため):
+   - `relisted` に無い → `{"id": ..., "seen_at": <現在時刻>}` を足す。トラッカー側の除外の反映に遅延があるトラッカーでは、直前に片付けたタスクが 1 度だけ再登場することがあるため。
+   - `relisted` に有り、`seen_at` から 10 分未満 → 何もしない (別セッションの `list` と数秒差で並んだだけかもしれず、まだ判定できない)。
+   - `relisted` に有り、`seen_at` から 10 分以上 → 遅延ではなくユーザーがトラッカー側で復帰させたものなので、そのエントリを `status: approved` に戻して (`phase` / `attempts` / `session` / `executor` / `executor_last_event_at` / `takeover_at` / `blocked_reason` は初期値に、**`worktree` / `base` / `review` はそのまま残す**)、`relisted` から消す。watch プロセスが**自分の起動したもので**生きていれば止め、`watch.proc` は null にする。
+     - **`worktree` / `base` / `review` を残すのは、worktree もブランチも PR も done の回収まで消さないためである。** 捨てると、(a) 再実行が既存ブランチにぶつかって残骸を再利用することになるのに `base` が分岐元とずれ、レビュー待ちの回収判定が前回のコミットを今回の成果として数える、(b) `watch.handled` が消えて**対応済みのレビュー指摘が全部新しい findings として再浮上する**。
+     - 復帰したタスクは承認 UI に出さず、そのまま approved として扱う — **ユーザーがトラッカー側で戻した操作そのものが承認である**。復帰させたら**この承認フローはそこで終える** (手順 2〜4 に進まない)。下の `relisted` の掃除だけ済ませて、このイテレーションでそのタスクの実行に入る。同時に複数が復帰していたら 1 件だけ実行し、残りは approved のまま次のイテレーションに回す。
+
+   今回の一覧に現れなかった id は `relisted` から消す。`{"tasks": []}` なら枯渇時フローへ。**除いた結果 0 件になっただけなら枯渇ではない** — その除外は relisted ガードによるもので、復帰かどうかの判定が次の list に持ち越されている。dynamic なら ScheduleWakeup 1800 秒で次イテレーションへ (`seen_at` から 10 分以上あける必要があるので、ここだけは 60 秒ではない。10 分ちょうどに寄せず 30 分あけるのは、その間もトラッカーに残っていることを復帰の根拠にするためで、反映遅延を復帰と誤判定すると in_review のタスクが既存 PR の上で丸ごと再実行される。ここでループを止めると、ユーザーの復帰操作が 2 回目の list を迎えられない。トラッカーの反映遅延なら次の list で消えて `{"tasks": []}` になる)。
 2. 優先順位を決める。`candidates` に今回の一覧の id がすべて含まれていれば**その並びを再利用する** (一覧から消えた id は落とし、`title` は今回の `list` の値で上書きする — トラッカー側で書き換わっていることがある)。含まれない id が 1 つでもあれば、トリアージ用サブエージェント (general-purpose、同期) を 1 体起動して順位付けさせる:
 
    ```
@@ -133,7 +174,7 @@ Note: ending the turn while a background executor is working, with the next step
 
    **トリアージのモデルは指定しない (オーケストレーターから継承する)。** アダプタの `list` と違い、ここは判断そのものが成果物で、しかもその判断が承認 UI を通じてユーザーの選択を規定する。実測では `haiku` を指定したトリアージが、ある issue の作業項目に別の issue の内容が丸ごと含まれている重複を見落とし、両者を離れた順位に置いた (継承モデルは同じ入力から依存の向きを正しく捉えた)。**安いモデルで削れるのは手続きであって判断ではない。**
 3. AskUserQuestion で **1 件だけ**選んでもらう (単一選択)。`candidates` の上位 4 件を順に並べ、**先頭のラベル末尾に「(推奨)」を付ける**。各選択肢の description には順位の理由と、分かるなら規模・依存を 1 行で書く。**問いは 1 つだけ。追加の質問を重ねない。**
-4. 選ばれた 1 件だけを `status: approved` (他フィールドはスキーマの初期値) で `queue` に入れて state.json を書き、`candidates` からその id を落とす。そのままこのイテレーション内で実行する。
+4. 選ばれた 1 件だけを `status: approved` (他フィールドはスキーマの初期値) で `queue` に入れて state.json を書き、`candidates` からその id を落とす。そのままこのイテレーション内で実行する。書き込みの読み直し (排他手順 2) で**そのタスクが既に別セッションで approved / in_progress になっていたら、この承認は書かずに破棄する** — 2 つのセッションがほぼ同時に同じ候補を提示した場合で、次のイテレーションで候補を取り直せばよい。破棄したことは 1 行報告する。
 
 ## アダプタの呼び方
 
@@ -159,7 +200,7 @@ Return only what the adapter file specifies for this operation.
 
 ## タスク実行
 
-1. state.json で対象タスクを `status: in_progress`, `phase: research`, `attempts: 0` に更新し、`runs/<id>/` を作る。アダプタで `mark <id> in_progress` する。この `mark` が `{"ok": false}` で**着手済みの兆候** (already assigned / already in progress) を返したら実行しない: タスクを queue から外して history に記録し、次のイテレーションへ進む (別のセッションか人が着手している — トラッカー側を正とする)。それ以外の `mark` 失敗は下記「アダプタの呼び方」のとおり続行する。`mark` の後、タスクの `gate` を判定する:
+1. state.json で対象タスクを `status: in_progress`, `phase: research`, `attempts: 0`, `session: <自分の id>` に更新し、`runs/<id>/` を作る (`session` をここで主張するのは、worktree 作成と実行エージェント起動の間に他セッションがこのエントリを所有者なしと読むのを防ぐため)。アダプタで `mark <id> in_progress` する。この `mark` が `{"ok": false}` で**着手済みの兆候** (already assigned / already in progress) を返したら実行しない: タスクを queue から外して history に記録し、次のイテレーションへ進む (別のセッションか人が着手している — トラッカー側を正とする)。それ以外の `mark` 失敗は下記「アダプタの呼び方」のとおり続行する。`mark` の後、タスクの `gate` を判定する:
 
    ```
    sed -n '/^## コメント$/q;p' <tasks/<id>.md の絶対パス> | grep -Fxq '<!-- task-pipeline:gate=light -->'
@@ -177,11 +218,11 @@ Return only what the adapter file specifies for this operation.
    Begin with phase "<phase>".
    ```
 
-   `<phase>` は state.json のそのタスクの現在値 (`research` または `research+plan`)。agentId を state.json の `executor` に、現在時刻を `executor_last_event_at` に記録する。
+   `<phase>` は state.json のそのタスクの現在値 (`research` または `research+plan`)。agentId を state.json の `executor` に、現在時刻を `executor_last_event_at` に、自分のセッション id を `session` に記録する (3 つは必ず同時に書く — `session` の無い `executor` は他セッションから引き継ぎ可否を判定できない)。
 4. **以降、このタスクの進行は実行エージェントの停止通知だけが駆動する。** 通知待ちでターンを終えるときは、/loop dynamic 配下ならフォールバックの ScheduleWakeup (1800 秒、同じ prompt) を予約しておく (実行が沈黙したままでもループが死なないように)。稼働中の実行エージェントに作業指示を送ってはならない。
 5. 実行エージェントはフェーズを 1 つ終えるごとに成果物を run dir に書き、`PHASE <name> DONE — <成果物パス>` または `BLOCKED: <理由>` の 1 行で停止する。停止通知を受けたら (このとき `executor_last_event_at` を更新する):
    - 送り元の agentId が state.json の `executor` と一致しない通知は無視する (`executor_last_event_at` も更新しない)。引き継ぎで executor を替えた後に、旧 executor の遅れた通知が届くことがある。
-   - `BLOCKED` → 即座にタスクを blocked にする (リトライしない)。state 更新、アダプタで `mark <id> blocked <理由>`、次のタスクは次イテレーションに回す。
+   - `BLOCKED` → 即座にタスクを blocked にする (リトライしない)。state 更新 (`session` は null に戻す — 実行エージェントはもう居ない)、アダプタで `mark <id> blocked <理由>`、次のタスクは次イテレーションに回す。
    - `DONE` で、`<name>` が state.json の `phase` と一致 → 検証ゲートへ。
    - `DONE` で、`<name>` が state.json の `phase` と不一致 (プロトコル行の重複再送など) → 無視する。
 6. **検証ゲート**: フレッシュな検証エージェントを **毎回新規に** 同期起動する (subagent_type: `task-pipeline-verifier`):
@@ -198,7 +239,7 @@ Return only what the adapter file specifies for this operation.
    - **PASS** → 判定 JSON を `runs/<id>/verdicts/<phase>-<attempt>.json` に書き (attempt は `attempts` の現在値・0 始まり。`phase` が `pr_fix` のときは対応する findings の連番 `<n>` を含めて `pr_fix-<n>-<attempt>.json` — 修正サイクルごとに `attempts` が 0 に戻るので、連番が無いと前サイクルの判定を上書きする)、state の phase を進める。次フェーズがあれば SendMessage で実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」と送る (再開は background で走る。停止通知が次の処理を駆動する)。report まで PASS したら:
      - `finish=none` → そのままレビュー待ち処理へ。
      - `finish=commit|pr` → state の `phase` を `finalize` にし、SendMessage で「`<phase>` verified PASS. Finalize the task (finish mode: `<mode>`, base: `<タスクの base>`).」を送る (`<phase>` は直前に PASS したフェーズ = `report` または `pr_fix`。`base` が null なら `base:` は省く)。`FINALIZED — <commit hash / PR URL>` の停止通知でレビュー待ち処理へ。`BLOCKED` 停止なら通常どおり即 blocked。finalize は成果物フェーズではないので検証ゲートは無い。
-     - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。**タスクブランチにコミットがあれば** (`git -C <プロジェクトルート> rev-list --count <base>..<branch>` が 1 以上) 回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクトルート> rev-parse <branch>`、base はタスクの `base` フィールドの値 (worktree 作成時に記録済み)。`finish=commit` と `finish=pr` の両方が該当する — worktree を使う以上どちらもタスクブランチにコミットを積むので、回収の条件は finish モードではなくコミットの有無で決まる。**コミットが 0 件のとき (`finish=none`) は tip を入れてはならない**: tip が base と同じコミットを指し、`merge-base --is-ancestor` が真になって「マージ済み」と誤判定し、未コミットの作業ごと worktree が消される。最後に、ref が PR URL なら `review.watch` を初期化する (これで追従の対象になる)。
+     - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。**タスクブランチにコミットがあれば** (`git -C <プロジェクトルート> rev-list --count <base>..<branch>` が 1 以上) 回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクトルート> rev-parse <branch>`、base はタスクの `base` フィールドの値 (worktree 作成時に記録済み)。`finish=commit` と `finish=pr` の両方が該当する — worktree を使う以上どちらもタスクブランチにコミットを積むので、回収の条件は finish モードではなくコミットの有無で決まる。**コミットが 0 件のとき (`finish=none`) は tip を入れてはならない**: tip が base と同じコミットを指し、`merge-base --is-ancestor` が真になって「マージ済み」と誤判定し、未コミットの作業ごと worktree が消される。最後に、ref が PR URL なら `review.watch` を初期化して watch プロセスを起動し、`session` は自分のまま残す (これで追従の対象になる)。**初期化のとき、そのタスクに既存の `watch.handled` があれば引き継ぐ** — 復帰したタスクを流し直したときに、前回対応済みのレビュー指摘が新しい findings として再浮上しないようにするため (他のフィールドは既定値でよい)。**PR URL でなければ揮発資源がもう無いので `session` を null に戻す** — 追従の要らないタスクを自分のセッションに紐づけたままにすると、そのセッションが死んでいる間はマージの回収が他セッションから見て手出し不可になる。
        - **pr_fix からの復帰でここに来たときは `mark` を呼び直さない。** トラッカー側は in_review のままで何も変わっておらず、呼べば重複コメントになるだけである。代わりに `watch.state` を `watching` に戻し、`watch.fix_attempts` は保ったまま、対応した指摘の id を `watch.handled` に足す。
    - **FAIL** → 判定 JSON を PASS と同じ命名規則で保存してから `attempts` を +1 する (ファイル名の attempt は +1 前の値)。SendMessage で実行エージェントへ required_fixes をそのまま送り、修正・再停止後に **新しい** 検証エージェントで再検証する。
 
@@ -218,7 +259,8 @@ Return only what the adapter file specifies for this operation.
 - 作成に成功したら state.json のそのタスクに `"worktree": "<絶対パス>"` と、worktree を作った時点でのプロジェクト側のブランチ (`git -C <プロジェクトルート> rev-parse --abbrev-ref HEAD`) を `"base"` として記録する。in_review になったとき `review.base` にはこのタスクの `base` を移す — in_review 時に rev-parse し直してはならない (ユーザーが途中でブランチを切り替えていると誤った base を拾い、マージ回収の誤判定に直結する)。
 - **作れなかったとき**: 失敗理由で扱いが分かれる。
   - **プロジェクトが git リポジトリでない** → worktree 無しでプロジェクトルートを target project にして続行する (`worktree` は null のまま)。git が無い以上 `finish=commit|pr` は成立せず finalize が BLOCKED になるので、この経路は実質 `finish=none` 専用である。理由を history に残す。
-  - **ブランチ `task-pipeline/<id>` が既に存在する等、それ以外の失敗** → 続行しない。ブランチ既存は別セッションの二重着手か前回実行の残骸の最有力な兆候であり、プロジェクトルートで続行すると上の「ユーザーの作業ツリーを触らない」保証が破れる。タスクを blocked にする (state 更新、アダプタで `mark <id> blocked <理由>`。理由には git の実エラー出力を含める)。残骸が原因なら、ユーザーがその worktree とブランチを消してトラッカー側の blocked 表現を外せば、承認手順 1 の復帰規則で候補に戻る。
+  - **ブランチ `task-pipeline/<id>` が既に存在する** → **前回実行の残骸なので、既存のものを再利用する。** ここに来た時点で二重着手ではない: 生きた他セッションが実行中のタスクなら queue に in_progress で載っていて承認の候補から除かれており、そもそもこのタスクを着手していない。`git -C <プロジェクトルート> worktree list` に `.claude/worktrees/task-pipeline/<id>` があればそのパスを `worktree` として使い、無ければブランチ作成なしで張り直す (`git -C <プロジェクトルート> worktree add .claude/worktrees/task-pipeline/<id> task-pipeline/<id>`)。`base` は**タスクに残っていれば必ずそれを使う** (復帰したタスクは残している)。無いときだけ現在のプロジェクト側ブランチを記録する — 分岐元とずれた base は、マージ回収で前回のコミットを今回の成果と数える誤判定に直結する。再利用したことと、そのブランチに既存のコミットや未コミット変更があるかを history に残して報告する (前回の途中成果が混ざる可能性を人が見られるように)。**再利用が要るのは、blocked や in_review のタスクをユーザーがトラッカー側で復帰させたときである** — worktree とブランチは done の回収まで消さないので、復帰したタスクは必ずここを通る。ここで blocked に落とすと、宣言してある復帰経路が手作業の掃除なしには機能しない。
+  - **それ以外の失敗** → 続行しない。プロジェクトルートで続行すると上の「ユーザーの作業ツリーを触らない」保証が破れる。タスクを blocked にする (state 更新、アダプタで `mark <id> blocked <理由>`。理由には git の実エラー出力を含める)。
 - **削除するのは done を回収したときだけ** (下記「マージの回収」)。in_review や blocked では消さない — `finish=none` の未コミット変更や blocked の途中成果物は worktree にしか無く、消すと失われるため。
 
 ### 検証ゲートの絶対規則
@@ -227,17 +269,22 @@ Return only what the adapter file specifies for this operation.
 
 ### リトライ上限
 
-1 フェーズにつき検証は最大 3 回 (初回 + リトライ 2 回)。3 回目も FAIL ならタスクを blocked にする: state 更新 (`blocked_reason` に最後の FAIL 理由)、アダプタで `mark <id> blocked <理由>`、成果物と判定はそのまま残す。**ループは止めず**、次のタスクを次イテレーションで進める。
+1 フェーズにつき検証は最大 3 回 (初回 + リトライ 2 回)。3 回目も FAIL ならタスクを blocked にする: state 更新 (`blocked_reason` に最後の FAIL 理由、`session` は null に戻す)、アダプタで `mark <id> blocked <理由>`、成果物と判定はそのまま残す。**ループは止めず**、次のタスクを次イテレーションで進める。
 
 ## 飛行中の扱い (in_progress タスクがあるとき)
 
 wakeup がタスクの飛行中に来るのは正常である (フォールバック、または固定間隔 cron)。仕事は停止通知が運んでくるので、原則することは無い:
 
+- **自分が実行エージェントを起動するのは、このセッションに飛行中タスクが 1 件も無いときだけ** (どの引き取り経路でも共通。1 セッション 1 タスク)。既に 1 件動かしているなら、他に引き取れるタスクがあっても次のイテレーションに回す。
+- **`worktree` が null のまま引き取ることになったら、先にタスク実行の手順 2 (worktree 作成) をやり直す。** in_progress を書いてから worktree を作るまでの間にセッションが落ちると、この状態が残る — 気づかずに手順 3 だけ再実行すると、target project がプロジェクトルート (ユーザーの作業ツリー) になってしまう。
+- **対象は、`session` が自分か null か、所有セッションが生存一覧に無いタスクだけ。** 生きている他セッションが所有する in_progress タスクは、ここでの判断対象そのものから外れている (毎イテレーションの手順 1 で除外済み) — Status check も送らず、`takeover_at` も書かず、そのタスクのためにフォールバックを予約もしない。自分の飛行中タスクが他に無ければ、**飛行中の上限 (手順 1) を満たす限り** approved / 承認へ進んでよい。
+- **`session` が自分以外で、その id が生存一覧に無い場合** (所有セッションが死んで heartbeat が失効した) → **自分の飛行中タスクが既にあるなら引き取らない** (1 セッション 1 タスク。そのまま次のイテレーションに回す)。無いなら以下の通常の判定に進むが、`executor` への SendMessage は**試さずに失敗と同じ扱いにする** (他セッションの agentId には届かないので、送信の成否は生死の情報にならない)。**沈黙判定 (90 分) を飛ばしてはならない** — 所有セッションが一覧から落ちていることは、その実行エージェントが死んだ証明にならないためである。
+- **二重起動を最後に食い止めているのは、実行エージェント自身が打つ heartbeat である。** 実行エージェントはサブエージェントなので所属セッションの `CLAUDE_CODE_SESSION_ID` を継ぐ。executor.md は作業の区切りごとに `sessions/<id>` を touch するよう指示しており、そのため**実行エージェントが動いている限り、所有セッションは state.json を一度も書かなくても生存一覧に残る** (`/loop` を付けずに起動されたセッションは、停止通知が来るまで一度も回らないので、これが無いと生きたまま一覧から落ちる)。したがって上の「生きている他セッションのタスクには触らない」が、長いフェーズの最中も効く。
 - **`takeover_at` が非 null なら、まずこれを評価する** (Status check の再送も `takeover_at` の再記録もしない):
   - `executor_last_event_at` が `takeover_at` より後に動いている → 所有セッションが生きて処理した。`takeover_at` を消して手を引く (以降は通常の扱い)。
-  - 動いておらず、`takeover_at` から 30 分以上経った → 所有セッションは居ない。`takeover_at` を消し、タスク実行の手順 3 の形式で新しい実行エージェントを起動する。起動の前に、`phase` が `research` で run dir に成果物が 1 つも無ければ、手順 1 の gate 判定をやり直す (gate 判定とその反映の間でセッションが死ぬと、宣言のあるタスクが full のまま固まるため。判定はマーカー行の機械照合なので、何度やっても同じ結果になる)。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは対応する findings ファイルのパスを、`finalize` のときは `finish mode: <mode>, base: <タスクの base>` を添える — finalize の再開でも base が渡らないと PR が既定ブランチに向く)。
+  - 動いておらず、`takeover_at` から 30 分以上経った → 所有セッションは居ない。`takeover_at` を消し、タスク実行の手順 3 の形式で新しい実行エージェントを起動する (`executor` / `executor_last_event_at` / `session` を自分のものに書き換える)。起動の前に、`phase` が `research` で run dir に成果物が 1 つも無ければ、手順 1 の gate 判定をやり直す (gate 判定とその反映の間でセッションが死ぬと、宣言のあるタスクが full のまま固まるため。判定はマーカー行の機械照合なので、何度やっても同じ結果になる)。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは対応する findings ファイルのパスを、`finalize` のときは `finish mode: <mode>, base: <タスクの base>` を添える — finalize の再開でも base が渡らないと PR が既定ブランチに向く)。
   - 30 分未満 → 何もせず次の wakeup を待つ (/loop dynamic 配下ならフォールバック 1800 秒を予約し直す)。
-- そのタスクの `executor` が null (実行エージェントの起動前にセッションが死んだ) → SendMessage 失敗と同じ扱い: `takeover_at: <現在時刻>` を記録してこのイテレーションを終える (30 分後の判定は先頭の分岐が行う)。
+- そのタスクの `executor` が null → **走っている実行エージェントは存在しない**。`session` が自分でないなら、`takeover_at` を待たずにこのイテレーションで新しい実行エージェントを起動してよい (Begin 行は `takeover_at` 経路と同じ「Resume from phase …」)。実行エージェントを起動する前にセッションが死んだということなので (起動していれば agentId が入っている)、30 分待っても新しい情報は増えない。`session` が自分なら、自分で起動し忘れた状態なので同じくこのイテレーションで起動する。
 - そのタスクの `executor_last_event_at` が 90 分以内 → 実行エージェントは稼働中とみなす。**何も送らない**。/loop dynamic 配下ならフォールバック (1800 秒) を予約し直してターンを終える。固定間隔 cron 配下なら何も予約せず終える。
 - そのタスクの `executor_last_event_at` が 90 分より古い → 実行エージェントに SendMessage で「Status check: finish your current phase per protocol and stop with your protocol line. Do not advance phases without an explicit verified-PASS message.」を送る。
   - 送信が成功した → `executor_last_event_at` を現在時刻に更新して state.json を書く (ping の繰り返しを防ぐ)。その後の停止通知が通常どおり検証ゲートを駆動する。
@@ -254,13 +301,20 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 追従は「定期的に見に行く」のではなく「**変化したら起こされる**」形にする。待つ処理はバックグラウンドのシェルに置き、モデルは何かが動いたときだけ起きる:
 
 ```
-bash ~/.claude/skills/task-pipeline/scripts/watch-pr.sh <PR URL> <task id> 60 21600 '<watch.sig — 渡す条件は下記>'
+TASK_PIPELINE_HEARTBEAT=<.task-pipeline の絶対パス>/sessions/<自分のセッション id> \
+  bash ~/.claude/skills/task-pipeline/scripts/watch-pr.sh <PR URL> <task id> 60 21600 '<watch.sig — 渡す条件は下記>'
 ```
 
-これを **background で** 走らせる。スクリプトは PR の署名 (状態・head sha・CI ロールアップ・コメント数・レビュー数・未解決スレッド数・コメントの最終更新時刻) を GraphQL 1 回で取り、変化するまでブロックして終了する。ポーリングするのはこのシェルであってモデルではないので、**変化が無い間は 1 度も起きない**。webhook の受け口を持てない環境で反応の速さだけを webhook と同じにするための仕組みである。
+これを **background で** 走らせる。`TASK_PIPELINE_HEARTBEAT` はスクリプトが 1 周ごとに touch するセッション生存印で、セッション id が取れないときだけ省く。**これを渡さないと、in_review で待っている間に所有セッションが死んだと誤判定される** — 待っている間はオーケストレーターも実行エージェントも回らないので、heartbeat を打てるのはこのプロセスだけである (`/loop` を付けずに起動されたセッションは、通知が来るまで一度も起きない)。スクリプトは PR の署名 (状態・head sha・CI ロールアップ・コメント数・レビュー数・未解決スレッド数・コメントの最終更新時刻) を GraphQL 1 回で取り、変化するまでブロックして終了する。ポーリングするのはこのシェルであってモデルではないので、**変化が無い間は 1 度も起きない**。webhook の受け口を持てない環境で反応の速さだけを webhook と同じにするための仕組みである。
 
-- 起動するのは **レビュー待ちに入った直後** と **pr_fix の push 直後**。background shell の id を `watch.proc` に、起動時刻を `watch.proc_started_at` に記録する。この 2 つの起動では第 5 引数 (前回署名) を渡さず、`watch.sig` も null に戻す — push で head が変わっており、古い署名を基準にすると自分の push を変化として拾ってしまう。
-- 毎イテレーション、`watching` のタスクに watch プロセスが無ければ (`watch.proc` が null、または `proc_started_at` から 7 時間以上経っているのに通知が来ていない = セッションが変わって死んだ) 起動し直す。起動し直すときは `watch.sig` があれば第 5 引数に渡す — プロセスが死んでいた間に起きた変化 (レビュー指摘・CI 失敗) を、次の比較で「changed」として取り落とさないため。`watch.sig` が null のまま張り直すことになった場合 (最初の通知が届く前にセッションが死んだ) は、張る前に観測サブエージェントを 1 回同期起動して、死んでいた間の変化を回収する (対応済みの重複は `handled` が除く)。**ただし `watch.fix_pending` が真のタスクでは起動しない** — 直すべきものが分かっているのに変化を待つのは無意味で、しかも待ってしまうと修正のきっかけを取り落とす。そのタスクは下記「修正サイクル」の先頭 (手順 0 のガード) から入る (観測はやり直さない。findings は既にある)。
+- 起動するのは **レビュー待ちに入った直後** と **pr_fix の push 直後**。background shell の id を `watch.proc` に、起動時刻を `watch.proc_started_at` に、自分のセッション id をタスクの `session` に記録する (watch プロセスもセッション内でしか生きないので、これが所有の宣言になる)。この 2 つの起動では第 5 引数 (前回署名) を渡さず、`watch.sig` も null に戻す — push で head が変わっており、古い署名を基準にすると自分の push を変化として拾ってしまう。
+- 毎イテレーション、**in_review で** `watching` のタスクを見て、次の**いずれか**に当てはまれば watch プロセスを起動し直す (in_progress で pr_fix を回している間は `watch.state` が `watching` のままだが、修正が終わって in_review に戻るときに張り直すので、ここでは張らない):
+  - `watch.proc` が null (解放済みか、まだ張っていない)
+  - タスクの `session` が**非 null で**生存一覧に無い (所有セッションごと死んだ。`watch.proc` は他セッション由来なので**止めずに null に落とす**)
+  - `proc_started_at` から 7 時間以上経っているのに通知が来ていない (`session` が null で所有者を特定できないときの唯一の手掛かり)
+
+  起動し直したら `session` を自分の id に書き換える。`session` が生きている他セッションのタスクはここに来ない (毎イテレーションの手順 1 で除外済み) — 相手が張り直すので、二重に張ってはならない。**起動し直すときは `watch.sig` があれば第 5 引数に渡す** — プロセスが死んでいた間に起きた変化 (レビュー指摘・CI 失敗) を、次の比較で「changed」として取り落とさないため。`watch.sig` が null のまま張り直すことになった場合 (最初の通知が届く前にセッションが死んだ) は、張る前に観測サブエージェントを 1 回同期起動して、死んでいた間の変化を回収する (対応済みの重複は `handled` が除く)。**ただし `watch.fix_pending` が真のタスクでは起動しない** — 直すべきものが分かっているのに変化を待つのは無意味で、しかも待ってしまうと修正のきっかけを取り落とす。そのタスクは下記「修正サイクル」の先頭 (手順 0 のガード) から入る (観測はやり直さない。findings は既にある)。
+- **固定間隔 cron 配下では、watch プロセスはターンを跨げない。** 毎イテレーション張り直すことになり、`watch.sig` は終了通知からしか書かれないので上の catch-up 観測が毎回走る — つまり cron では追従が「変化したら起きる」ではなく「毎イテレーション観測する」に退化し、変化が無くてもコストがかかる。PR の追従を使うなら `/loop` (dynamic) で回すのがよい。
 - 終了通知を受けたら `watch.proc` を null に、通知に含まれる署名 (`changed` の `<新>`、`timeout` の `<署名>`) を `watch.sig` に保存してから、その 1 行を見て分岐する:
   - `PR-WATCH <id> changed <旧> -> <新>` → 何かが動いた。下記の観測サブエージェントを起動する。**スクリプトは「変わった」ことしか言わない — 何が起きたかの判定は観測サブエージェントの仕事である。** 安いブロッキング検出と高い分類をこう分けている。
   - `PR-WATCH <id> timeout <署名>` (終了コード 2) → 6 時間何も動かなかった。観測は起動せず、プロセスを起動し直す。そのタスクの `watch.idle` を +1 するのは**候補が枯渇した後だけ** (スキーマの定義どおり)。枯渇前のタスク消化中は増やさない — ここで数えると、枯渇に入った直後に「丸 1 日動きが無い」と誤認して追従を打ち切ってしまう。
@@ -290,13 +344,13 @@ Return only the watch JSON.
 
 どの verdict でも、返ってきた `review_only` が空でなければ: その要旨を 1 行で報告し (findings ファイルが書かれていればパスを添える)、報告した id を `watch.handled` に足す — 人の判断待ちの指摘を毎回報告し直さない・watcher に再登場させないため。
 
-`merged` / `closed`、および `watch.state` が `stopped` になったタスクの watch プロセスは**起動し直さない**。`stopped` にするときに生きているプロセスが残っていれば止める。
+`merged` / `closed`、および `watch.state` が `stopped` になったタスクの watch プロセスは**起動し直さない**。`stopped` にするときに生きているプロセスが残っていれば止め、`session` を null に戻す (揮発資源が無くなったので、ユーザーが `watching` に戻したときはどのセッションでも拾える)。
 
 ### 修正サイクル
 
-0. **別のタスクが既に `in_progress` なら、このイテレーションでは始めない。** `watch.fix_pending` を真にしたまま (watch プロセスも起動せずに) 置き、次のイテレーションでこの手順 0 から拾い直す (最初にガードを再評価する — 別タスクの in_progress は何イテレーションも続きうる)。飛行中は 1 タスクという原則をここでも守る。
+0. **自分が所有する別のタスクが既に `in_progress` なら、このイテレーションでは始めない** (他セッションが実行中のタスクは数えない — 飛行中は 1 タスクという原則はセッション単位である)。 `watch.fix_pending` を真にしたまま (watch プロセスも起動せずに) 置き、**`session` は null に戻して** 次のイテレーションでこの手順 0 から拾い直す (この状態のタスクは揮発資源を 1 つも持たないので、所有を主張し続けると、自分が死んだときに誰も拾えない — watch の張り直し経路は `fix_pending` が真のタスクでは塞がれているため) (最初にガードを再評価する — 別タスクの in_progress は何イテレーションも続きうる)。飛行中は 1 タスクという原則をここでも守る。
 1. `watch.fix_attempts` を +1 する。**3 を超えたら修正しない**: `watch.state` を `stopped`、`note` に「追従上限」と最後の findings パスを書き、以降は人のレビューに委ねる旨を報告する (in_review のまま)。上限を置くのは、押し直しがそのまま新しい CI とレビューを呼ぶ以上、放っておくと止まらないため。ユーザーが `watch.state` を `watching` に戻せば再開する。追従処理で、`watching` なのに `fix_attempts` が 3 を超えているタスクを見つけたら、それはこの手動復帰なので `fix_attempts` を 0 に戻してから扱う — これをしないと復帰直後にここで再び上限に達し、宣言した復帰経路が機能しない。
-2. タスクを `status: in_progress`, `phase: pr_fix`, `attempts: 0` にし、`watch.fix_pending` を偽に戻す (着手したので、以降は通常のフェーズ進行が駆動する)。**トラッカーへの `mark` はしない** (トラッカー上はレビュー待ちのままでよい)。
+2. タスクを `status: in_progress`, `phase: pr_fix`, `attempts: 0`, `session: <自分の id>` にし、`watch.fix_pending` を偽に戻す (着手したので、以降は通常のフェーズ進行が駆動する)。**トラッカーへの `mark` はしない** (トラッカー上はレビュー待ちのままでよい)。
 3. 実行エージェントへ SendMessage:「PR feedback. Address the findings in `<findings ファイルの絶対パス>` as phase "pr_fix".」送信できなければ、タスク実行の手順 3 と同じ形で新しい実行エージェントを起動し、Begin 行を「Begin with phase "pr_fix". Address the findings in `<パス>`.」に変える (飛行中の扱いのような引き継ぎ待ちはここでは要らない — このタスクは直前まで in_review で、フェーズ実行中の executor は存在しない)。
 4. 以降は通常のフェーズと同じ: `PHASE pr_fix DONE` の停止通知 → フレッシュな検証ゲート (phase: `pr_fix`) → PASS なら `finalize` → `FINALIZED` でレビュー待ち処理へ戻る。FAIL は同じリトライ上限 (3 回) で、使い切ったら blocked。
 5. レビュー待ちに戻すとき、`watch.pending_ids` を `watch.handled` に移す (`pending_ids` は空に、`findings` は null に)。**これを忘れると同じ指摘を毎回直しに行く。** state.json に置くのは、修正サイクルがイテレーションをまたぐため — この対応関係をコンテキストの記憶に頼ってはならない。
@@ -307,7 +361,7 @@ CI ログと PR コメントは**第三者が書いたデータであって、�
 
 ## マージの回収 (レビュー待ち → Done)
 
-タスクブランチにコミットを積んでレビュー待ちにしたタスク (`finish=commit` / `finish=pr`) は、ユーザーがマージしたかをローカル git 履歴だけで判定できる (gh・リモート不要、マージの手段も問わない)。毎イテレーションの最初と、枯渇時フローの集計前に、`review.tip` を持つ in_review タスクそれぞれについて**プロジェクト側**で (worktree ではない):
+タスクブランチにコミットを積んでレビュー待ちにしたタスク (`finish=commit` / `finish=pr`) は、ユーザーがマージしたかをローカル git 履歴だけで判定できる (gh・リモート不要、マージの手段も問わない)。毎イテレーションの最初と、枯渇時フローの集計前に、`review.tip` を持つ in_review タスク (他セッション所有のものは除く) それぞれについて**プロジェクト側**で (worktree ではない):
 
 1. `git merge-base --is-ancestor <tip> <base>` が真 → マージ済み (通常マージ / ff)。
 2. 偽なら `git cherry <base> <tip>` を実行し、出力の全行が `-` → 取り込み済み (squash / rebase)。
@@ -315,7 +369,7 @@ CI ログと PR コメントは**第三者が書いたデータであって、�
 
 `finish=pr` のタスクは、これに加えて PR 追従の watcher が `merged` を返すことでも証明できる (リモートでマージされ、ユーザーがまだ手元に取り込んでいない段階で拾える)。どちらの経路でも done の処理は同じ。
 
-マージ済みと**証明できた**タスクだけ、アダプタで `mark <id> done`、state の status を done に更新、history に追記する。`watch.proc` が生きていれば止める (もう見張るものが無い)。判定できないもの (squash 時にコンフリクト解消でパッチが変わった等) は In Review に残る — ユーザーが手で Done へ移せばよい。証明なしに done へ落とすことは決してしない。
+マージ済みと**証明できた**タスクだけ、アダプタで `mark <id> done`、state の status を done に更新、history に追記する。`watch.proc` が**自分の起動したもので**生きていれば止め (他セッション由来なら null に落とすだけ)、`session` を null に戻す (もう見張るものが無い)。判定できないもの (squash 時にコンフリクト解消でパッチが変わった等) は In Review に残る — ユーザーが手で Done へ移せばよい。証明なしに done へ落とすことは決してしない。
 
 done にしたタスクに `worktree` があれば、ここで片付ける (作業はマージ済みなので失うものが無い唯一の地点):
 
@@ -330,12 +384,13 @@ git -C <プロジェクトルート> branch -d task-pipeline/<id>
 
 - タスクを in_review / blocked にしたら → /loop dynamic 配下なら ScheduleWakeup 60 秒で次イテレーションへ (そこで次の 1 件の承認を聞く)。
 - 飛行中にターンを終えるとき → フォールバック 1800 秒 (上記)。
+- ターンの終わりに所有を手放すのは、**ループを止めるときだけ** (上記「セッションの所有権」)。飛行中や追従中にターンを終えるときは何も手放さない — 実行エージェントと watch プロセスが heartbeat を打ち続けるので、生きている限り所有は維持される。
 - PR 追従で待つとき (push 直後、`wait`、`clean`) → 変化の検知は watch プロセスの終了通知が駆動する。ただし /loop dynamic 配下なら、フォールバックの ScheduleWakeup (3600 秒、同じ prompt) を予約してからターンを終える — watch プロセスと終了通知はセッションと共に失われるため、これが無いとセッション死でパイプライン全体の再開契機が消える (通知が先に来れば wakeup は空振りするだけで害は無い)。ターンを終える前に watch プロセスが起動されていることも確かめる。
 - 承認で `list` が `{"tasks": []}` を返したら (枯渇。**候補そのものが尽きたときだけ**):
   1. マージの回収 (上記) を行ってから、state.json の history と queue を集計し、証拠パス付きの最終報告を書く。レビュー待ち (in_review) は ref (PR URL / コミットハッシュ) 付きで一覧にする — ここがユーザーのレビュー起点になる。回収済み (done) と blocked (理由付き) も一覧にする。追従中の PR があれば、その CI 状態と `watch.fix_attempts` も添える。
-  2. **追従中の PR が 1 本も無ければループを止める**: dynamic なら ScheduleWakeup `stop: true`。固定間隔 (cron) なら CronList で自ジョブを特定して CronDelete。
-  3. `watch.state` が `watching` の PR が残っているなら**止めずに追従だけを続ける**: 最終報告は出したうえで、dynamic なら 3600 秒で次イテレーションへ (固定間隔なら CronDelete しない)。この wakeup は watch プロセスが死んでいないかを確かめるためだけの保険で、変化の検知はプロセス側がやる。以降のイテレーションも `list` は毎回呼び、**新しい候補が現れたら通常どおり承認を聞く** (全タスクの `watch.idle` を 0 に戻す)。
-     - `watch.idle` を +1 するのは **その PR の watch プロセスが timeout (6 時間まったく動きが無い) で終わったとき**だけ。何かが動いた PR は 0 に戻す。**追従中のすべての PR の `watch.idle` が 4 に達したら** (= 丸 1 日どの PR も動いていない)、その旨 (「N 本の PR は人のレビュー待ちのまま変化が無いので追従を終える」) を報告してループを止める。保険の wakeup では増やさない — 増やすと、変化を待っているだけの正常な状態を「何も起きていない」と数えてしまう。
+  2. **自分の担当の PR が 1 本も無ければループを止める**: dynamic なら ScheduleWakeup `stop: true`。固定間隔 (cron) なら CronList で自ジョブを特定して CronDelete。止める前に、自分が所有するタスクを解放する (上記「セッションの所有権」— 自分の watch プロセスを止め、`watch.proc` と `session` を null にする)。ここで数える「自分の担当」は、`watch.state` が `watching` のタスクのうち**生きている他セッションが所有しているもの以外すべて** — 自分所有だけを数えてはならない。cron 配下では前のイテレーション (heartbeat の切れたセッション) が持っていた PR がここに入り、それを数えないと**自分でジョブを消してから誰も追従しなくなる**。
+  3. `watch.state` が `watching` の**自分の担当**の PR が残っているなら**止めずに追従だけを続ける**: 最終報告は出したうえで、dynamic なら 3600 秒で次イテレーションへ (固定間隔なら CronDelete しない)。この wakeup は watch プロセスが死んでいないかを確かめるためだけの保険で、変化の検知はプロセス側がやる。以降のイテレーションも `list` は毎回呼び、**新しい候補が現れたら通常どおり承認を聞く** (全タスクの `watch.idle` を 0 に戻す)。
+     - `watch.idle` を +1 するのは **その PR の watch プロセスが timeout (6 時間まったく動きが無い) で終わったとき**だけ。何かが動いた PR は 0 に戻す。**自分の担当のすべての PR の `watch.idle` が 4 に達したら** (= 丸 1 日どの PR も動いていない)、その旨 (「N 本の PR は人のレビュー待ちのまま変化が無いので追従を終える」) を報告し、手順 2 と同じく `session` を手放してからループを止める。保険の wakeup では増やさない — 増やすと、変化を待っているだけの正常な状態を「何も起きていない」と数えてしまう。
 
   止める理由: 候補が無いまま起き続けるのは無意味な wakeup とコンテキスト肥大にしかならない。この停止は「トラッカーに残っている仕事はすべて消化した」という宣言である。候補が残っているのにキューが空なだけのときは**止めずに承認を聞く** — ユーザーは 1 件ずつ選ぶので、キューが空になるのは正常な通過点であって終わりではない。追従だけのために回り続ける期間に上限を置くのも同じ理屈で、レビューが数日動かない PR のために起き続けても得るものが無いためである。
 
