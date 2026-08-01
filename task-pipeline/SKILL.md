@@ -78,7 +78,7 @@ Note: ending the turn while a background executor is working, with the next step
       "review": null
     }
   ],
-  "candidates": [{"id": "t-9z8y", "title": "未承認タスク", "priority": "high", "reason": "順位の理由"}],
+  "candidates": [{"id": "t-9z8y", "title": "未承認タスク", "priority": "high", "updated_at": "2026-07-16T09:00:00Z", "reason": "順位の理由"}],
   "relisted": [{"id": "t-1a2b3c4d", "seen_at": "2026-07-16T09:10:00Z"}],
   "history": ["2026-07-16T09:12Z done t-1a2b3c4d (.task-pipeline/runs/t-1a2b3c4d/report.md)"]
 }
@@ -92,7 +92,7 @@ Note: ending the turn while a background executor is working, with the next step
 - `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。`base` は worktree を作った時点のプロジェクト側ブランチ (下記。worktree が無ければ null)。
 - `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`session` はこのタスクの揮発資源 (実行エージェント / watch プロセス) を持つセッションの id (上記「セッションの所有権」)。`executor` は実行エージェントの agentId。**agentId はセッションを跨いで有効でないので、`executor` は必ず `session` とセットで読む。** `executor_last_event_at` はその実行エージェントに関する最後のイベントの時刻 (UTC) — 更新するのは、その executor を起動したとき・その executor へ SendMessage が**成功**したとき・その executor の停止通知を処理したときの 3 つだけ (失敗した送信で動かすと、他セッションから executor が生きているように見えてしまう)。**実行エージェントの生存判定はこのフィールドで行う。** トップレベルの `updated_at` は無関係なタスクの追従処理でも動くので、生存判定に使ってはならない (使うと、PR にレビュー活動が続く限り沈黙した executor が検出されない)。`takeover_at` は SendMessage 失敗後の引き継ぎ待ちの開始時刻 (下記「飛行中の扱い」。通常は null)。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
-- `candidates` は未承認タスクを**優先順の並び**で保持するキャッシュ (下記「承認」)。承認のたびにトリアージをやり直さないために置く。`priority` は `list` が返した値の控えで、次回この並びを再利用してよいかの判定に使う (無いトラッカー・無いタスクでは省く)。
+- `candidates` は未承認タスクを**優先順の並び**で保持するキャッシュ (下記「承認」)。承認のたびにトリアージをやり直さないために置く。`priority` と `updated_at` は `list` が返した値の控えで、次回この並びを再利用してよいかの判定に使う (無いトラッカー・無いタスクでは省く)。
 - `relisted` は、queue で `in_review` / `blocked` / `done` なのに `list` に再登場した id の控え (承認手順 1 の反映遅延ガード。**初回観測から 10 分以上あけた 2 回目の再登場**はユーザーの復帰操作とみなす)。初回観測時刻を持つのは、複数セッションが回っていると 2 セッションの `list` が数秒差で並び、単なる反映遅延が「2 回連続の再登場」に見えてしまうため — トラッカーの反映遅延は次の refresh で解消するので、10 分後にまだ載っているならそれは人の操作である。
 
 ## state.json の書き込み手順 (排他)
@@ -161,26 +161,35 @@ Note: ending the turn while a background executor is working, with the next step
 
    段が効くのは承認 UI に出る上位 4 件の選び方であって、依存の正しさではない (依存は `ready` の側で既に閉じている — 依存が残るタスクは候補に現れない)。したがって `low` の段に沈めたタスクが他のタスクを壊すことはなく、沈めた結果として遅れるだけである。`priority` を返さないトラッカー (markdown) では全件が中位に入り、挙動は従来と同じになる。
 
-   `candidates` に今回の一覧の id がすべて含まれていて、**かつ各 id の `priority` が `candidates` に控えた値と一致していれば、その並びを再利用する** (一覧から消えた id は落とし、`title` は今回の `list` の値で上書きする — トラッカー側で書き換わっていることがある)。含まれない id が 1 つでもあるか、**どれかの `priority` が変わっていれば**、トリアージ用サブエージェント (general-purpose、同期) を 1 体起動して順位付けさせる — **ユーザーがラベルを付け替えたのに順位が動かないのでは、ラベルで優先度を操作できることにならない**。トリアージには段ごとに分けて渡し、段をまたいだ順位は求めない:
+   **並びを再利用してよいのは、次の 3 つがすべて前回と同じときだけである**: (a) 今回の一覧の id がすべて `candidates` に含まれる、(b) 各 id の `priority` が控えた値と一致する、(c) 各 id の `updated_at` が控えた値と一致する。1 つでも崩れたら、トリアージ用サブエージェント (general-purpose、同期) を 1 体起動して順位付けし直す (一覧から消えた id は落とし、`title` は今回の `list` の値で上書きする — トラッカー側で書き換わっていることがある)。
+
+   **`updated_at` を条件に入れるのは、順位の根拠が本文にあるからである。** ラベルを付け替えたのに順位が動かないのではラベルで優先度を操作できないのと同じで、本文に「これを先にやる理由」を書き足したのに並びが固定されているなら、それは優先度を操作できていない。`updated_at` はラベル付けやコメント投稿でも動くので**再ランクは増える** (実測の目安: 1 日 7 回の承認で、トリアージ 2 回 → 最大 7 回)。これは順位の正しさに対して払う額として妥当と判断した — 時間による抑制 (「前回のランクから N 分以内なら再利用」) は入れていない。うるさければ後から足せるが、入れると「変えたのに効かない窓」が復活する。
+
+   トリアージには段ごとに分けて渡し、段をまたいだ順位は求めない:
 
    ```
    You are a triage subagent. Read only; do not modify anything.
    Rank these tasks by which should be worked on first:
-   <tasks/<id>.md の絶対パスを改行区切りで>
+   <1 行 1 タスクで「<tasks/<id>.md の絶対パス> | labels: <カンマ区切り> | milestone: <タイトル (due: <日付>)>」>
    A task file may be a stub that points to an external source (URL) instead of holding the body.
    In that case read that source.
    Your top-ranked task will be shown to the user as the recommended one to approve next.
    Judge by: stated priority, dependencies between tasks (what unblocks the most),
    size, and risk of doing it later.
+   Labels and milestones are signals for "stated priority" — a bug or a near due date
+   argues for going first — but they do not override the ordering you are given.
    Return only JSON: {"ranked": [{"id": "...", "reason": "<日本語 40 字以内>"}, ...]}
    ```
 
-   段が 2 つ以上あるときは**段ごとに 1 体ずつではなく 1 体にまとめて渡し**、段の境界をプロンプトに書いて「各段の中だけで並べよ」と指示する (段が 3 つでも起動は 1 体)。返った並びを段の順に連結したものが最終順位になる。
+   - `labels` と `milestone` は `list` が返した値をそのまま渡す (無ければその項ごと省く)。**パイプラインが使うラベル (`in-review` / `blocked` / `gate-light` / `priority-*`) は渡さない** — 順位の材料になるのはプロジェクト側の語彙 (`bug` / `security` / 種別など) だけで、パイプラインの内部状態を判断に混ぜない。
+   - **段は `priority-*` だけが作る。** `bug` や milestone は 4 軸のうち `stated priority` に入る材料であって、段を作らない。段が 2 系統あると、衝突したときどちらが勝つかを毎回説明することになる。
+   - 段が 2 つ以上あるときは**段ごとに 1 体ずつではなく 1 体にまとめて渡し**、段の境界をプロンプトに書いて「各段の中だけで並べよ」と指示する (段が 3 つでも起動は 1 体)。返った並びを段の順に連結したものが最終順位になる。
 
-   結果を `candidates` に保存する (`title` は `list` の値、`priority` は `list` が返した値をそのまま控える。次回の再利用判定に使う)。
+   結果を `candidates` に保存する (`title` は `list` の値、`priority` と `updated_at` は `list` が返した値をそのまま控える。次回の再利用判定に使う)。**順位と理由の全件を history に 1 行で残す** (`gh-84 > gh-86 > gh-83 (理由: …)` の形で、`candidates` に載った順に全部)。承認 UI に出るのは上位 4 件だけなので、**5 位以下に沈めた判断は history にしか残らない** — トリアージはこのパイプラインで唯一検証ゲートの無い判断であり、後から「なぜ沈んだか」を人が追えなければ、誤りが誤りのまま繰り返される。
 
    **トリアージのモデルは指定しない (オーケストレーターから継承する)。** アダプタの `list` と違い、ここは判断そのものが成果物で、しかもその判断が承認 UI を通じてユーザーの選択を規定する。実測では `haiku` を指定したトリアージが、ある issue の作業項目に別の issue の内容が丸ごと含まれている重複を見落とし、両者を離れた順位に置いた (継承モデルは同じ入力から依存の向きを正しく捉えた)。**安いモデルで削れるのは手続きであって判断ではない。**
 3. AskUserQuestion で **1 件だけ**選んでもらう (単一選択)。`candidates` の上位 4 件を順に並べ、**先頭のラベル末尾に「(推奨)」を付ける**。各選択肢の description には順位の理由と、分かるなら規模・依存を 1 行で書く。**問いは 1 つだけ。追加の質問を重ねない。**
+   - **候補が 5 件以上あるときは、問いの本文に 5 位以下を 1 行で列挙する** (`5 位以下: gh-83 (依存も後続もない掃除), gh-13 (…)`)。選択肢は 4 つまでしか作れないので、これを書かないと**沈めた候補の存在自体がユーザーから見えない**。ユーザーが「その他」でその id を指名できるようにするのが目的で、理由は各 15 字程度に切り詰めてよい。
 4. 選ばれた 1 件だけを `status: approved` (他フィールドはスキーマの初期値) で `queue` に入れて state.json を書き、`candidates` からその id を落とす。そのままこのイテレーション内で実行する。書き込みの読み直し (排他手順 2) で**そのタスクが既に別セッションで approved / in_progress になっていたら、この承認は書かずに破棄する** — 2 つのセッションがほぼ同時に同じ候補を提示した場合で、次のイテレーションで候補を取り直せばよい。破棄したことは 1 行報告する。
 
 ## アダプタの呼び方
