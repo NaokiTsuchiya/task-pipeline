@@ -1,5 +1,10 @@
 # ユニット B: 検証系サブエージェントの effort 制御経路 (P10)
 
+> **完了 (2026-08-01)。結論: `effort: high` は不採用。** 実測記録と採否の根拠は
+> [`../verifier-effort-2026-08.md`](../verifier-effort-2026-08.md)。経路 (`agents/task-pipeline-verifier.md` /
+> `install.sh` / `SKILL.md` の subagent_type + フォールバック) は tools 制限を目的に残してある。
+> 第 2 段 (pr-watcher) は着手していない (理由は実測記録の §6)。
+
 このファイルだけで新しいセッションが作業を開始できるように書いてある。前提になった設計レビュー (2026-08-01) の全文はセッション記録にしかないので、疑問点はこのリポジトリの現物 (`task-pipeline/SKILL.md`、`references/`、`docs/cost-analysis-2026-07.md`) を正とすること。
 
 ## 目的
