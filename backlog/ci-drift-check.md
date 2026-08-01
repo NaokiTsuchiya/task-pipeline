@@ -1,6 +1,7 @@
 # CI で README 一覧のずれを検知する
 
 依存: readme-list-sync
+未確定: リモート (GitHub リポジトリ) をいつ作るか — 現状 `git remote -v` は空で、このままでは GitHub Actions は永久に走らない (2026-08-02 確認)
 
 ## 背景 / 現状
 
