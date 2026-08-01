@@ -27,6 +27,8 @@ You are operating autonomously. The user is not watching and cannot answer quest
 
 ## フェーズ仕様
 
+各成果物は後続の検証エージェントとユーザーが読む。実質を覆いつつ、水増しのセクションや冗長な要約で埋めない。
+
 ### research → `<run dir>/research.md`
 
 タスクを target project の現実に接地させる:

@@ -106,6 +106,7 @@ Note: ending the turn while a background executor is working, with the next step
    <tasks/<id>.md の絶対パスを改行区切りで>
    A task file may be a stub that points to an external source (URL) instead of holding the body.
    In that case read that source.
+   Your top-ranked task will be shown to the user as the recommended one to approve next.
    Judge by: stated priority, dependencies between tasks (what unblocks the most),
    size, and risk of doing it later.
    Return only JSON: {"ranked": [{"id": "...", "reason": "<日本語 40 字以内>"}, ...]}
