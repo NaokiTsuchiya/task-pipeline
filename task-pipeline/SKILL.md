@@ -220,7 +220,7 @@ Return only what the adapter file specifies for this operation.
 
    `<phase>` は state.json のそのタスクの現在値 (`research` または `research+plan`)。agentId を state.json の `executor` に、現在時刻を `executor_last_event_at` に、自分のセッション id を `session` に記録する (3 つは必ず同時に書く — `session` の無い `executor` は他セッションから引き継ぎ可否を判定できない)。
 4. **以降、このタスクの進行は実行エージェントの停止通知だけが駆動する。** 通知待ちでターンを終えるときは、/loop dynamic 配下ならフォールバックの ScheduleWakeup (1800 秒、同じ prompt) を予約しておく (実行が沈黙したままでもループが死なないように)。稼働中の実行エージェントに作業指示を送ってはならない。
-5. 実行エージェントはフェーズを 1 つ終えるごとに成果物を run dir に書き、`PHASE <name> DONE — <成果物パス>` または `BLOCKED: <理由>` の 1 行で停止する。停止通知を受けたら (このとき `executor_last_event_at` を更新する):
+5. 実行エージェントはフェーズを 1 つ終えるごとに成果物を run dir に書き、`PHASE <name> DONE — <成果物パス>` または `BLOCKED: <理由>` の 1 行で停止する。停止通知を受けたら (このとき `executor_last_event_at` を更新し、**そのタスクの `session` が空なら自分の id を書く** — 自分の実行エージェントから通知が届いたこと自体が所有の証明である。所有権の仕組みが入る前から飛行中だったタスクは `session` を持たないので、この 1 行が無いと、稼働中のタスクが他セッションから「所有者なし」に見え続ける):
    - 送り元の agentId が state.json の `executor` と一致しない通知は無視する (`executor_last_event_at` も更新しない)。引き継ぎで executor を替えた後に、旧 executor の遅れた通知が届くことがある。
    - `BLOCKED` → 即座にタスクを blocked にする (リトライしない)。state 更新 (`session` は null に戻す — 実行エージェントはもう居ない)、アダプタで `mark <id> blocked <理由>`、次のタスクは次イテレーションに回す。
    - `DONE` で、`<name>` が state.json の `phase` と一致 → 検証ゲートへ。
