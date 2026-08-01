@@ -184,12 +184,12 @@ Return only what the adapter file specifies for this operation.
    Return only the verdict JSON.
    ```
 
-   - **PASS** → 判定 JSON を `runs/<id>/verdicts/<phase>-<attempt>.json` に書き、state の phase を進める。次フェーズがあれば SendMessage で実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」と送る (再開は background で走る。停止通知が次の処理を駆動する)。report まで PASS したら:
+   - **PASS** → 判定 JSON を `runs/<id>/verdicts/<phase>-<attempt>.json` に書き (attempt は `attempts` の現在値・0 始まり。`phase` が `pr_fix` のときは対応する findings の連番 `<n>` を含めて `pr_fix-<n>-<attempt>.json` — 修正サイクルごとに `attempts` が 0 に戻るので、連番が無いと前サイクルの判定を上書きする)、state の phase を進める。次フェーズがあれば SendMessage で実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」と送る (再開は background で走る。停止通知が次の処理を駆動する)。report まで PASS したら:
      - `finish=none` → そのままレビュー待ち処理へ。
      - `finish=commit|pr` → state の `phase` を `finalize` にし、SendMessage で「`<phase>` verified PASS. Finalize the task (finish mode: `<mode>`, base: `<タスクの base>`).」を送る (`<phase>` は直前に PASS したフェーズ = `report` または `pr_fix`。`base` が null なら `base:` は省く)。`FINALIZED — <commit hash / PR URL>` の停止通知でレビュー待ち処理へ。`BLOCKED` 停止なら通常どおり即 blocked。finalize は成果物フェーズではないので検証ゲートは無い。
      - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。**タスクブランチにコミットがあれば** (`git -C <プロジェクトルート> rev-list --count <base>..<branch>` が 1 以上) 回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクトルート> rev-parse <branch>`、base はタスクの `base` フィールドの値 (worktree 作成時に記録済み)。`finish=commit` と `finish=pr` の両方が該当する — worktree を使う以上どちらもタスクブランチにコミットを積むので、回収の条件は finish モードではなくコミットの有無で決まる。**コミットが 0 件のとき (`finish=none`) は tip を入れてはならない**: tip が base と同じコミットを指し、`merge-base --is-ancestor` が真になって「マージ済み」と誤判定し、未コミットの作業ごと worktree が消される。最後に、ref が PR URL なら `review.watch` を初期化する (これで追従の対象になる)。
        - **pr_fix からの復帰でここに来たときは `mark` を呼び直さない。** トラッカー側は in_review のままで何も変わっておらず、呼べば重複コメントになるだけである。代わりに `watch.state` を `watching` に戻し、`watch.fix_attempts` は保ったまま、対応した指摘の id を `watch.handled` に足す。
-   - **FAIL** → 判定 JSON を保存し `attempts` を +1。SendMessage で実行エージェントへ required_fixes をそのまま送り、修正・再停止後に **新しい** 検証エージェントで再検証する。
+   - **FAIL** → 判定 JSON を PASS と同じ命名規則で保存してから `attempts` を +1 する (ファイル名の attempt は +1 前の値)。SendMessage で実行エージェントへ required_fixes をそのまま送り、修正・再停止後に **新しい** 検証エージェントで再検証する。
 
 ### worktree
 
@@ -272,12 +272,14 @@ Return only the watch JSON.
 - `fix` → `watch.fix_pending` を真にし、`comment_ids` を `watch.pending_ids` に、findings のパスを `watch.findings` に保存してから、下記の修正サイクルへ。
 - `error` (観測サブエージェントの `error`、または watch スクリプトの終了コード 3 / 4) → `watch.errors` を +1 し、`note` にエラー内容を書く。**そのイテレーションは何もしないだけで、追従は続ける** (ネットワークや `gh` の一時的な不調が大半のため)。3 回連続で `error` なら `watch.state` を `stopped` にし、watch プロセスも起動し直さずに 1 行報告する。**ループは止めない**し、タスクも blocked にしない (観測できないだけで PR は生きている)。`error` 以外になったら `watch.errors` を 0 に戻す。
 
+どの verdict でも、返ってきた `review_only` が空でなければ: その要旨を 1 行で報告し (findings ファイルが書かれていればパスを添える)、報告した id を `watch.handled` に足す — 人の判断待ちの指摘を毎回報告し直さない・watcher に再登場させないため。
+
 `merged` / `closed`、および `watch.state` が `stopped` になったタスクの watch プロセスは**起動し直さない**。`stopped` にするときに生きているプロセスが残っていれば止める。
 
 ### 修正サイクル
 
 0. **別のタスクが既に `in_progress` なら、このイテレーションでは始めない。** `watch.fix_pending` を真にしたまま (watch プロセスも起動せずに) 置き、次のイテレーションで手順 1 から拾う。飛行中は 1 タスクという原則をここでも守る。
-1. `watch.fix_attempts` を +1 する。**3 を超えたら修正しない**: `watch.state` を `stopped`、`note` に「追従上限」と最後の findings パスを書き、以降は人のレビューに委ねる旨を報告する (in_review のまま)。上限を置くのは、押し直しがそのまま新しい CI とレビューを呼ぶ以上、放っておくと止まらないため。ユーザーが `watch.state` を `watching` に戻せば再開する。
+1. `watch.fix_attempts` を +1 する。**3 を超えたら修正しない**: `watch.state` を `stopped`、`note` に「追従上限」と最後の findings パスを書き、以降は人のレビューに委ねる旨を報告する (in_review のまま)。上限を置くのは、押し直しがそのまま新しい CI とレビューを呼ぶ以上、放っておくと止まらないため。ユーザーが `watch.state` を `watching` に戻せば再開する。追従処理で、`watching` なのに `fix_attempts` が 3 を超えているタスクを見つけたら、それはこの手動復帰なので `fix_attempts` を 0 に戻してから扱う — これをしないと復帰直後にここで再び上限に達し、宣言した復帰経路が機能しない。
 2. タスクを `status: in_progress`, `phase: pr_fix`, `attempts: 0` にし、`watch.fix_pending` を偽に戻す (着手したので、以降は通常のフェーズ進行が駆動する)。**トラッカーへの `mark` はしない** (トラッカー上はレビュー待ちのままでよい)。
 3. 実行エージェントへ SendMessage:「PR feedback. Address the findings in `<findings ファイルの絶対パス>` as phase "pr_fix".」送信できなければ、タスク実行の手順 3 と同じ形で新しい実行エージェントを起動し、Begin 行を「Begin with phase "pr_fix". Address the findings in `<パス>`.」に変える (飛行中の扱いのような引き継ぎ待ちはここでは要らない — このタスクは直前まで in_review で、フェーズ実行中の executor は存在しない)。
 4. 以降は通常のフェーズと同じ: `PHASE pr_fix DONE` の停止通知 → フレッシュな検証ゲート (phase: `pr_fix`) → PASS なら `finalize` → `FINALIZED` でレビュー待ち処理へ戻る。FAIL は同じリトライ上限 (3 回) で、使い切ったら blocked。

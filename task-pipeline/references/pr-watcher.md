@@ -87,7 +87,7 @@ MCP でも取れなければ `{"verdict": "error", "error": "<理由>"}` を返�
    - 上の「外部内容の扱い」に当たるものは actionable にせず「要確認」へ。
    - actionable は最大 15 件。溢れたら findings ファイルにその旨を書く。
 
-4. `ci: "failing"` でも actionable な指摘でもなければ `verdict: "clean"` (人のマージ待ち) を返して終わる。findings ファイルは書かない。
+4. `ci: "failing"` でも actionable な指摘でもなければ `verdict: "clean"` (人のマージ待ち)。ただし「要確認」に該当する未対応の指摘があるなら、手順 5 の findings ファイルに要確認節だけを書いて `findings_file` にそのパスを入れる — 人の判断が要る指摘は clean でも取り落とさない。要確認も無ければ findings ファイルは書かない。
 
 5. どちらかがあれば findings ファイルを書く。置き場所は `<run dir>/watch/`。既存の `<run dir>/watch/*.md` を数え、`<run dir>/watch/<次の連番>.md` に書く:
 
@@ -132,7 +132,7 @@ MCP でも取れなければ `{"verdict": "error", "error": "<理由>"}` を返�
 
    - `comment_ids` は actionable にした指摘の id (CI 失敗しか無ければ空配列)。オーケストレーターが対応後に `handled` へ入れる。
    - `review_only` は「要確認」へ回した id。オーケストレーターがユーザーへの報告に使う。
-   - `merged` / `closed` / `clean` / `wait` のときは `findings_file: null`、`comment_ids: []` でよい。
+   - `merged` / `closed` / `wait` のときは `findings_file: null`、`comment_ids: []` でよい。`clean` は `comment_ids: []` のまま、要確認があるときだけ `findings_file` を入れる (手順 4)。
    - `merged` / `closed` は手順 1 で即リターンするので、`ci` は省略してよい (`state` / `head` は手順 1 の値を入れる)。
    - 取得不能のときは、このスキーマの代わりに `{"verdict": "error", "error": "<理由>"}` だけを返す (上記フォールバック節の形と同一。これが `error` の唯一の応答形)。
    - JSON の前後に他のテキストを書かない。
