@@ -76,6 +76,7 @@ Note: ending the turn while a background executor is working, with the next step
     }
   ],
   "candidates": [{"id": "t-9z8y", "title": "未承認タスク", "reason": "順位の理由"}],
+  "relisted": [],
   "watch_idle": 0,
   "history": ["2026-07-16T09:12Z done t-1a2b3c4d (.task-pipeline/runs/t-1a2b3c4d/report.md)"]
 }
@@ -89,6 +90,7 @@ Note: ending the turn while a background executor is working, with the next step
 - `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。`executor_last_event_at` はその実行エージェントに関する最後のイベントの時刻 (UTC) — 更新するのは、その executor を起動したとき・その executor へ SendMessage が**成功**したとき・その executor の停止通知を処理したときの 3 つだけ (失敗した送信で動かすと、他セッションから executor が生きているように見えてしまう)。**実行エージェントの生存判定はこのフィールドで行う。** トップレベルの `updated_at` は無関係なタスクの追従処理でも動くので、生存判定に使ってはならない (使うと、PR にレビュー活動が続く限り沈黙した executor が検出されない)。`takeover_at` は SendMessage 失敗後の引き継ぎ待ちの開始時刻 (下記「飛行中の扱い」。通常は null)。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
 - `candidates` は未承認タスクを**優先順の並び**で保持するキャッシュ (下記「承認」)。承認のたびにトリアージをやり直さないために置く。
+- `relisted` は、queue で `in_review` / `blocked` / `done` なのに `list` に再登場した id の控え (承認手順 1 の反映遅延ガード。2 回連続の再登場はユーザーの復帰操作とみなす)。
 
 ## state.json の書き込み手順 (排他)
 
@@ -112,7 +114,7 @@ Note: ending the turn while a background executor is working, with the next step
 
 **1 回の承認で通すのは 1 件だけ。** ユーザーに一覧の優先順位を考えさせない — 順位付けはこちらの仕事で、ユーザーの仕事は提示された上位から 1 件を選ぶことだけである。これがこのパイプラインで唯一ユーザーを待ってよい定常ポイントである。
 
-1. アダプタサブエージェントに `list` を実行させる (プロンプト書式は下記「アダプタの呼び方」)。返るのは `{id, title}` のインデックスだけで、本文は `tasks/<id>.md` にある。**`queue` に `approved` / `in_progress` / `in_review` / `blocked` / `done` で載っている id は、一覧に混ざっていても候補から除く** — トラッカー側の除外が反映されるまでに遅延があるトラッカーでは、直前に片付けたタスクが 1 度だけ再登場することがあるため。除いた結果 0 件、または `{"tasks": []}` なら枯渇時フローへ。
+1. アダプタサブエージェントに `list` を実行させる (プロンプト書式は下記「アダプタの呼び方」)。返るのは `{id, title}` のインデックスだけで、本文は `tasks/<id>.md` にある。**`queue` に `approved` / `in_progress` で載っている id は常に候補から除く** (実行中・実行待ちのタスク)。`in_review` / `blocked` / `done` で載っている id が一覧に混ざっていた場合は 2 段階で扱う: その id が `relisted` に**無ければ**、候補から除いて `relisted` に足す — トラッカー側の除外の反映に遅延があるトラッカーでは、直前に片付けたタスクが 1 度だけ再登場することがあるため。**既に `relisted` に有れば** (2 回連続の再登場)、遅延ではなくユーザーがトラッカー側で復帰させたものなので、queue のそのエントリを落として通常の候補として扱い、`relisted` からも消す (in_review だったタスクは `review` / `watch` ごと落とし、watch プロセスが生きていれば止める)。今回の一覧に現れなかった id は `relisted` から消す。除いた結果 0 件、または `{"tasks": []}` なら枯渇時フローへ。
 2. 優先順位を決める。`candidates` に今回の一覧の id がすべて含まれていれば**その並びを再利用する** (一覧から消えた id は落とし、`title` は今回の `list` の値で上書きする — トラッカー側で書き換わっていることがある)。含まれない id が 1 つでもあれば、トリアージ用サブエージェント (general-purpose、同期) を 1 体起動して順位付けさせる:
 
    ```
@@ -208,7 +210,7 @@ Return only what the adapter file specifies for this operation.
 - 作成に成功したら state.json のそのタスクに `"worktree": "<絶対パス>"` と、worktree を作った時点でのプロジェクト側のブランチ (`git -C <プロジェクトルート> rev-parse --abbrev-ref HEAD`) を `"base"` として記録する。in_review になったとき `review.base` にはこのタスクの `base` を移す — in_review 時に rev-parse し直してはならない (ユーザーが途中でブランチを切り替えていると誤った base を拾い、マージ回収の誤判定に直結する)。
 - **作れなかったとき**: 失敗理由で扱いが分かれる。
   - **プロジェクトが git リポジトリでない** → worktree 無しでプロジェクトルートを target project にして続行する (`worktree` は null のまま)。この場合の `finish=commit` は従来どおり現在のブランチへのコミットになる。理由を history に残す。
-  - **ブランチ `task-pipeline/<id>` が既に存在する等、それ以外の失敗** → 続行しない。ブランチ既存は別セッションの二重着手か前回実行の残骸の最有力な兆候であり、プロジェクトルートで続行すると上の「ユーザーの作業ツリーを触らない」保証が破れる。タスクを blocked にする (state 更新、アダプタで `mark <id> blocked <理由>`。理由には git の実エラー出力を含める)。残骸が原因なら、ユーザーがその worktree とブランチを消せば、blocked を外した次の承認で再実行できる。
+  - **ブランチ `task-pipeline/<id>` が既に存在する等、それ以外の失敗** → 続行しない。ブランチ既存は別セッションの二重着手か前回実行の残骸の最有力な兆候であり、プロジェクトルートで続行すると上の「ユーザーの作業ツリーを触らない」保証が破れる。タスクを blocked にする (state 更新、アダプタで `mark <id> blocked <理由>`。理由には git の実エラー出力を含める)。残骸が原因なら、ユーザーがその worktree とブランチを消してトラッカー側の blocked 表現を外せば、承認手順 1 の復帰規則で候補に戻る。
 - **削除するのは done を回収したときだけ** (下記「マージの回収」)。in_review や blocked では消さない — `finish=none` の未コミット変更や blocked の途中成果物は worktree にしか無く、消すと失われるため。
 
 ### 検証ゲートの絶対規則
