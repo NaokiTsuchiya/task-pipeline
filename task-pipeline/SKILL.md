@@ -86,7 +86,7 @@ Note: ending the turn while a background executor is working, with the next step
 - `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。`ref` が PR URL のときは追従用に `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "sig": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "checked_at": null, "note": null}` も併せて置く (`proc` は変化を待つバックグラウンドプロセスの id)。
 - `watch_idle` は候補が枯渇した後、どの PR にも動きが無いまま watch プロセスが空振りした連続回数 (下記「ペーシングと枯渇」)。
 - `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。`base` は worktree を作った時点のプロジェクト側ブランチ (下記。worktree が無ければ null)。
-- `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。`executor_last_event_at` はその実行エージェントに関する最後のイベントの時刻 (UTC) — 更新するのは、その executor を起動したとき・その executor へ SendMessage したとき・その executor の停止通知を処理したときの 3 つだけ。**実行エージェントの生存判定はこのフィールドで行う。** トップレベルの `updated_at` は無関係なタスクの追従処理でも動くので、生存判定に使ってはならない (使うと、PR にレビュー活動が続く限り沈黙した executor が検出されない)。`takeover_at` は SendMessage 失敗後の引き継ぎ待ちの開始時刻 (下記「飛行中の扱い」。通常は null)。
+- `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。`executor_last_event_at` はその実行エージェントに関する最後のイベントの時刻 (UTC) — 更新するのは、その executor を起動したとき・その executor へ SendMessage が**成功**したとき・その executor の停止通知を処理したときの 3 つだけ (失敗した送信で動かすと、他セッションから executor が生きているように見えてしまう)。**実行エージェントの生存判定はこのフィールドで行う。** トップレベルの `updated_at` は無関係なタスクの追従処理でも動くので、生存判定に使ってはならない (使うと、PR にレビュー活動が続く限り沈黙した executor が検出されない)。`takeover_at` は SendMessage 失敗後の引き継ぎ待ちの開始時刻 (下記「飛行中の扱い」。通常は null)。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
 - `candidates` は未承認タスクを**優先順の並び**で保持するキャッシュ (下記「承認」)。承認のたびにトリアージをやり直さないために置く。
 
@@ -172,6 +172,7 @@ Return only what the adapter file specifies for this operation.
    agentId を state.json の `executor` に、現在時刻を `executor_last_event_at` に記録する。
 4. **以降、このタスクの進行は実行エージェントの停止通知だけが駆動する。** 通知待ちでターンを終えるときは、/loop dynamic 配下ならフォールバックの ScheduleWakeup (1800 秒、同じ prompt) を予約しておく (実行が沈黙したままでもループが死なないように)。稼働中の実行エージェントに作業指示を送ってはならない。
 5. 実行エージェントはフェーズを 1 つ終えるごとに成果物を run dir に書き、`PHASE <name> DONE — <成果物パス>` または `BLOCKED: <理由>` の 1 行で停止する。停止通知を受けたら (このとき `executor_last_event_at` を更新する):
+   - 送り元の agentId が state.json の `executor` と一致しない通知は無視する (`executor_last_event_at` も更新しない)。引き継ぎで executor を替えた後に、旧 executor の遅れた通知が届くことがある。
    - `BLOCKED` → 即座にタスクを blocked にする (リトライしない)。state 更新、アダプタで `mark <id> blocked <理由>`、次のタスクは次イテレーションに回す。
    - `DONE` で、`<name>` が state.json の `phase` と一致 → 検証ゲートへ。
    - `DONE` で、`<name>` が state.json の `phase` と不一致 (プロトコル行の重複再送など) → 無視する。
@@ -222,10 +223,14 @@ Return only what the adapter file specifies for this operation.
 
 wakeup がタスクの飛行中に来るのは正常である (フォールバック、または固定間隔 cron)。仕事は停止通知が運んでくるので、原則することは無い:
 
+- **`takeover_at` が非 null なら、まずこれを評価する** (Status check の再送も `takeover_at` の再記録もしない):
+  - `executor_last_event_at` が `takeover_at` より後に動いている → 所有セッションが生きて処理した。`takeover_at` を消して手を引く (以降は通常の扱い)。
+  - 動いておらず、`takeover_at` から 30 分以上経った → 所有セッションは居ない。`takeover_at` を消し、タスク実行の手順 3 の形式で新しい実行エージェントを起動する。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは対応する findings ファイルのパスを、`finalize` のときは `finish mode: <mode>, base: <タスクの base>` を添える — finalize の再開でも base が渡らないと PR が既定ブランチに向く)。
+  - 30 分未満 → 何もせず次の wakeup を待つ (/loop dynamic 配下ならフォールバック 1800 秒を予約し直す)。
 - そのタスクの `executor_last_event_at` が 90 分以内 → 実行エージェントは稼働中とみなす。**何も送らない**。/loop dynamic 配下ならフォールバック (1800 秒) を予約し直してターンを終える。固定間隔 cron 配下なら何も予約せず終える。
-- そのタスクの `executor_last_event_at` が 90 分より古い → 実行エージェントに SendMessage で「Status check: finish your current phase per protocol and stop with your protocol line. Do not advance phases without an explicit verified-PASS message.」を送り、`executor_last_event_at` を現在時刻に更新して state.json を書く (ping の繰り返しを防ぐ)。
-  - 送信がエラーになった → **即座に再起動しない。** agentId はセッション内でしか有効でないため、送信エラーは executor が死んだことの証明にならない — 別セッションが起動した executor が生きている可能性がある。タスクに `takeover_at: <現在時刻>` を記録してこのイテレーションを終える。以降のイテレーションで、`takeover_at` から 30 分以上経ってなお `executor_last_event_at` が動いていなければ、所有セッションは居ないと判断して `takeover_at` を消し、タスク実行の手順 3 の形式で新しい実行エージェントを起動する。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは、対応する findings ファイルのパスも添える)。`executor_last_event_at` が動いていたら (所有セッションが生きて処理した)、`takeover_at` を消して手を引く。
-  - 送信できたら、その後の停止通知が通常どおり検証ゲートを駆動する。
+- そのタスクの `executor_last_event_at` が 90 分より古い → 実行エージェントに SendMessage で「Status check: finish your current phase per protocol and stop with your protocol line. Do not advance phases without an explicit verified-PASS message.」を送る。
+  - 送信が成功した → `executor_last_event_at` を現在時刻に更新して state.json を書く (ping の繰り返しを防ぐ)。その後の停止通知が通常どおり検証ゲートを駆動する。
+  - 送信がエラーになった → **`executor_last_event_at` は更新せず、即座に再起動もしない。** agentId はセッション内でしか有効でないため、送信エラーは executor が死んだことの証明にならない — 別セッションが起動した executor が生きている可能性がある。タスクに `takeover_at: <現在時刻>` を記録してこのイテレーションを終える (30 分後の判定は先頭の分岐が行う)。
 
 ## PR の追従 (finish=pr)
 
