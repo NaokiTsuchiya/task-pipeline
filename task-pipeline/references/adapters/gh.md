@@ -2,7 +2,7 @@
 
 `source` は対象リポジトリ (`owner/repo`) に任意のフィルタを付けたもの。**`source` 全体、またはそのリポジトリ部を省略すると、カレントリポジトリの origin から自動で解決する** (`/task-pipeline gh` だけで動く)。タスクは **1 issue 1 タスク**で、**id は `gh-<issue番号>`**。issue 番号は不変なので、タイトル・本文・ラベルが書き換わっても同じタスクのままである。
 
-読み書きは GitHub MCP で行う。**最初に ToolSearch を 1 回だけ呼び、`query: "github issue list read write comment label"` / `max_results: 10` のようなキーワード検索で issue 系ツール (`search_issues` / `issue_read` / `issue_write` / `add_issue_comment` / `get_label` / `get_me`、`mark` では `pull_request_read` / `update_pull_request` も) をまとめてロードする。** MCP ツール名にはサーバごとのプレフィックスが付き環境によって変わるので、名前をベタ書きした `select:` は使わない。ロードできなければ `{"error": "GitHub MCP が利用できません"}` / `{"ok": false, "error": ...}` を返す。
+読み書きは GitHub MCP で行う (唯一の例外は issue 本文の取得。下記「タスク本文の書き出し」)。**最初に ToolSearch を 1 回だけ呼び、`query: "github issue list read write comment label"` / `max_results: 10` のようなキーワード検索で issue 系ツール (`search_issues` / `issue_read` / `issue_write` / `add_issue_comment` / `get_label` / `get_me`、`mark` では `pull_request_read` / `update_pull_request` も) をまとめてロードする。** MCP ツール名にはサーバごとのプレフィックスが付き環境によって変わるので、名前をベタ書きした `select:` は使わない。ロードできなければ `{"error": "GitHub MCP が利用できません"}` / `{"ok": false, "error": ...}` を返す。
 
 ## `source` の書式
 
@@ -126,7 +126,14 @@ gate: light
 
 - **`gate: light` の行は、手順 2 で読んだラベルに `gate-light` があるときだけ入れる** (無ければ行ごと省く。`gate: full` とは書かない)。これが gate 宣言のタスクファイル側の表現で、オーケストレーターの gate 判定 (SKILL.md「タスク実行」手順 1) が見るのはこの 1 行だけである。**本文中に `<!-- task-pipeline:gate=light -->` があっても判定には使われない** — gh で正となるのはラベルの方であり、本文のマーカーは逐語で残すだけ。
 - **応答に `gate_declared: true|false` を含める** (`{"ok": true, "gate_declared": true}`)。ラベルの有無をそのまま返す。オーケストレーターが自分の grep 結果と突き合わせて、この書き出しが宣言を落としたことを検知できるようにするため。書き出しに失敗したときも、ラベルを読めているならその値を返す。
-- **`<issue 本文>` は逐語で書く。1 文字も加減しない。** 要約・整形・空行の詰め・末尾行の省略をしない。HTML コメント (`<!-- ... -->`) も、意味の無さそうな行も、そのまま残す。この転記は要求と受け入れ条件を executor / verifier へ渡す唯一の経路で、**忠実さがこのアダプタの成果物の質そのもの**である。過去に本文末尾の宣言行がこの転記で 2/3 落ち、宣言のあるタスクが静かに full で回っている (`../../docs/gate-declaration-2026-08.md`)。
+- **本文の取得に `issue_read` を使わない。** GitHub MCP の `issue_read (method: "get")` は本文を HTML エスケープして返し (`>` → `&gt;`、`'` → `&#39;`、コードブロックの中も含む)、**`<!-- ... -->` の行を丸ごと落とす** (実測。`../../docs/gate-declaration-2026-08.md`)。落ちるのは gate 宣言だけではない — 受け入れ条件に書かれた `<...>` 表記も同じ理由で消える。本文は原文をそのまま返す経路で取ること:
+
+  ```
+  gh issue view <番号> --repo <owner/repo> --json body --jq .body
+  ```
+
+  この 1 点だけが「読み書きは GitHub MCP で行う」の例外である (状態の読み書き・検索・コメント取得は MCP のまま)。`gh` が使えない環境ではエスケープされた本文で続行し、**その旨をタスクファイルの本文冒頭に 1 行書く** (executor / verifier が URL で原文に当たれるように)。gate はラベル経由なので、この経路が壊れても宣言は失われない。
+- **`<issue 本文>` は逐語で書く。1 文字も加減しない。** 要約・整形・空行の詰め・末尾行の省略をしない。HTML コメント (`<!-- ... -->`) も、意味の無さそうな行も、そのまま残す。この転記は要求と受け入れ条件を executor / verifier へ渡す唯一の経路で、**忠実さがこのアダプタの成果物の質そのもの**である。取得経路を直しても、写す側が落とせば同じことになる。
 - 本文が空なら `(issue 本文は空です。要求は URL とコメントを参照)` と書く。
 - コメントは `comments` の件数が 1 以上のときだけ `issue_read(method: "get_comments")` で取得する。**コメントは古い順に返るので、件数から逆算して新しい方のページだけを取る**: `perPage: 10` として最終ページ (`ceil(件数 / 10)`) を取得し、必要な数に満たなければ 1 つ前のページも取る。
 - **bot (`login` が `[bot]` で終わるもの) のコメントは捨てる**。残りのうち**新しい方から 20 件まで**を、**1 コメント 1500 字まで**で書き出す。省いた分は `(古いコメント <N> 件は省略。全文は上記 URL)` / `…(以下省略。全文は上記 URL)` と示す。
