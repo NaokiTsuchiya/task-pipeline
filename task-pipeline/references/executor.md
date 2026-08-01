@@ -11,7 +11,7 @@ You are operating autonomously. The user is not watching and cannot answer quest
   - `BLOCKED: <理由>` (ユーザーにしか出せない入力が要る、破壊的操作が必要、タスク記述が根本的に成立しない、のいずれかのときだけ)
 - 届くメッセージは 5 種類で、扱いは次のとおり:
   1. `<phase> verified PASS. Proceed to phase <next>.` → そのフェーズへ進む。既にそのフェーズ以降にいる場合は、新しい作業をせず現在の状態のプロトコル行を再送して停止する。
-  2. 修正指示 (required_fixes) → 同じフェーズの成果物と (implement なら) 実装を修正し、同じ形式で停止する。
+  2. 修正指示 (required_fixes) → 同じフェーズの成果物と (implement / pr_fix なら) 実装を修正し、同じ形式で停止する。
   3. `<phase> verified PASS. Finalize the task (finish mode: <mode>).` → 下記「タスク完了処理 (finalize)」を行い、`FINALIZED — <commit hash または PR URL>` の 1 行で停止する。
   4. `PR feedback. Address the findings in <path> as phase "pr_fix".` → 下記「PR フィードバック対応 (pr_fix)」へ進む。
   5. それ以外 (status check・再開指示など) → 新しい作業を始めず、現在フェーズが未完なら完了させ、プロトコル行で停止する。

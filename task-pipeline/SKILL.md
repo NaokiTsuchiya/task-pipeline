@@ -97,7 +97,7 @@ Note: ending the turn while a background executor is working, with the next step
 **1 回の承認で通すのは 1 件だけ。** ユーザーに一覧の優先順位を考えさせない — 順位付けはこちらの仕事で、ユーザーの仕事は提示された上位から 1 件を選ぶことだけである。これがこのパイプラインで唯一ユーザーを待ってよい定常ポイントである。
 
 1. アダプタサブエージェントに `list` を実行させる (プロンプト書式は下記「アダプタの呼び方」)。返るのは `{id, title}` のインデックスだけで、本文は `tasks/<id>.md` にある。**`queue` に `in_review` / `blocked` / `done` で載っている id は、一覧に混ざっていても候補から除く** — トラッカー側の除外が反映されるまでに遅延があるトラッカーでは、直前に片付けたタスクが 1 度だけ再登場することがあるため。除いた結果 0 件、または `{"tasks": []}` なら枯渇時フローへ。
-2. 優先順位を決める。`candidates` に今回の一覧の id がすべて含まれていれば**その並びを再利用する** (一覧から消えた id は落とす)。含まれない id が 1 つでもあれば、トリアージ用サブエージェント (general-purpose、同期) を 1 体起動して順位付けさせる:
+2. 優先順位を決める。`candidates` に今回の一覧の id がすべて含まれていれば**その並びを再利用する** (一覧から消えた id は落とし、`title` は今回の `list` の値で上書きする — トラッカー側で書き換わっていることがある)。含まれない id が 1 つでもあれば、トリアージ用サブエージェント (general-purpose、同期) を 1 体起動して順位付けさせる:
 
    ```
    You are a triage subagent. Read only; do not modify anything.
@@ -114,7 +114,7 @@ Note: ending the turn while a background executor is working, with the next step
 
    **トリアージのモデルは指定しない (オーケストレーターから継承する)。** アダプタの `list` と違い、ここは判断そのものが成果物で、しかもその判断が承認 UI を通じてユーザーの選択を規定する。実測では `haiku` を指定したトリアージが、ある issue の作業項目に別の issue の内容が丸ごと含まれている重複を見落とし、両者を離れた順位に置いた (継承モデルは同じ入力から依存の向きを正しく捉えた)。**安いモデルで削れるのは手続きであって判断ではない。**
 3. AskUserQuestion で **1 件だけ**選んでもらう (単一選択)。`candidates` の上位 4 件を順に並べ、**先頭のラベル末尾に「(推奨)」を付ける**。各選択肢の description には順位の理由と、分かるなら規模・依存を 1 行で書く。**問いは 1 つだけ。追加の質問を重ねない。**
-4. 選ばれた 1 件だけを `queue` に入れて state.json を書き、`candidates` からその id を落とす。そのままこのイテレーション内で実行する。
+4. 選ばれた 1 件だけを `status: approved` (他フィールドはスキーマの初期値) で `queue` に入れて state.json を書き、`candidates` からその id を落とす。そのままこのイテレーション内で実行する。
 
 ## アダプタの呼び方
 
@@ -123,7 +123,7 @@ Note: ending the turn while a background executor is working, with the next step
 ```
 You are a tracker adapter subagent.
 Read ~/.claude/skills/task-pipeline/references/adapters/<tracker>.md and follow it.
-operation: list | mark <id> <status> [reason]
+operation: list | mark <id> <status> [reason|ref]
 source: <source> / state dir: <プロジェクトルートの .task-pipeline 絶対パス>
 why: <この操作に至った経緯を 1 行、事実だけ>
 Return only what the adapter file specifies for this operation.
@@ -205,7 +205,7 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 
 - `updated_at` が 90 分以内 → 実行エージェントは稼働中とみなす。**何も送らない**。/loop dynamic 配下ならフォールバック (1800 秒) を予約し直してターンを終える。固定間隔 cron 配下なら何も予約せず終える。
 - `updated_at` が 90 分より古い → 実行エージェントに SendMessage で「Status check: finish your current phase per protocol and stop with your protocol line. Do not advance phases without an explicit verified-PASS message.」を送り、state.json を書いて `updated_at` を更新する (ping の繰り返しを防ぐ)。
-  - 送信がエラーになる (エージェントが存在しない = セッションが変わった) → タスク実行の手順 2 の形式で新しい実行エージェントを起動する。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは、対応する findings ファイルのパスも添える)。
+  - 送信がエラーになる (エージェントが存在しない = セッションが変わった) → タスク実行の手順 3 の形式で新しい実行エージェントを起動する。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは、対応する findings ファイルのパスも添える)。
   - 送信できたら、その後の停止通知が通常どおり検証ゲートを駆動する。
 
 ## PR の追従 (finish=pr)
@@ -243,7 +243,7 @@ handled: <review.watch.handled をカンマ区切り、空なら none>
 Return only the watch JSON.
 ```
 
-返る `verdict` ごとの扱い。いずれも `watch.head` / `watch.ci` / `watch.checked_at` を state に反映する:
+返る `verdict` ごとの扱い。いずれも `watch.head` / `watch.ci` には watch JSON の値を、`watch.checked_at` には現在時刻 (UTC) を state に反映する (watcher の JSON に時刻フィールドは無い):
 
 - `merged` → マージ済みの証明として扱い、下記「マージの回収」の done 処理 (mark done、state 更新、worktree 片付け) を行う。ローカル git 履歴での証明を待たなくてよい (リモートでマージされた事実を直接見ているため)。
 - `closed` → 未マージで閉じられた = ユーザーが取り下げた。`watch.state` を `stopped`、`note` に理由を書き、in_review のまま残して 1 行報告する。**blocked にはしない** (パイプラインが詰まったのではなく、人が判断した結果である)。

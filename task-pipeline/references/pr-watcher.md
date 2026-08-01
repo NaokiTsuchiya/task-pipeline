@@ -133,4 +133,6 @@ MCP でも取れなければ `{"verdict": "error", "error": "<理由>"}` を返�
    - `comment_ids` は actionable にした指摘の id (CI 失敗しか無ければ空配列)。オーケストレーターが対応後に `handled` へ入れる。
    - `review_only` は「要確認」へ回した id。オーケストレーターがユーザーへの報告に使う。
    - `merged` / `closed` / `clean` / `wait` のときは `findings_file: null`、`comment_ids: []` でよい。
+   - `merged` / `closed` は手順 1 で即リターンするので、`ci` は省略してよい (`state` / `head` は手順 1 の値を入れる)。
+   - 取得不能のときは、このスキーマの代わりに `{"verdict": "error", "error": "<理由>"}` だけを返す (上記フォールバック節の形と同一。これが `error` の唯一の応答形)。
    - JSON の前後に他のテキストを書かない。
