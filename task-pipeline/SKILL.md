@@ -67,6 +67,7 @@ Note: ending the turn while a background executor is working, with the next step
       "phase": null,
       "attempts": 0,
       "executor": null,
+      "executor_last_event_at": null,
       "blocked_reason": null,
       "worktree": null,
       "base": null,
@@ -84,7 +85,7 @@ Note: ending the turn while a background executor is working, with the next step
 - `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。`ref` が PR URL のときは追従用に `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "checked_at": null, "note": null}` も併せて置く (`proc` は変化を待つバックグラウンドプロセスの id)。
 - `watch_idle` は候補が枯渇した後、どの PR にも動きが無いまま watch プロセスが空振りした連続回数 (下記「ペーシングと枯渇」)。
 - `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。`base` は worktree を作った時点のプロジェクト側ブランチ (下記。worktree が無ければ null)。
-- `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。
+- `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。`executor_last_event_at` はその実行エージェントに関する最後のイベントの時刻 (UTC) — 更新するのは、その executor を起動したとき・その executor へ SendMessage したとき・その executor の停止通知を処理したときの 3 つだけ。**実行エージェントの生存判定はこのフィールドで行う。** トップレベルの `updated_at` は無関係なタスクの追従処理でも動くので、生存判定に使ってはならない (使うと、PR にレビュー活動が続く限り沈黙した executor が検出されない)。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
 - `candidates` は未承認タスクを**優先順の並び**で保持するキャッシュ (下記「承認」)。承認のたびにトリアージをやり直さないために置く。
 
@@ -158,9 +159,9 @@ Return only what the adapter file specifies for this operation.
    Begin with phase "research".
    ```
 
-   agentId を state.json の `executor` に記録する。
+   agentId を state.json の `executor` に、現在時刻を `executor_last_event_at` に記録する。
 4. **以降、このタスクの進行は実行エージェントの停止通知だけが駆動する。** 通知待ちでターンを終えるときは、/loop dynamic 配下ならフォールバックの ScheduleWakeup (1800 秒、同じ prompt) を予約しておく (実行が沈黙したままでもループが死なないように)。稼働中の実行エージェントに作業指示を送ってはならない。
-5. 実行エージェントはフェーズを 1 つ終えるごとに成果物を run dir に書き、`PHASE <name> DONE — <成果物パス>` または `BLOCKED: <理由>` の 1 行で停止する。停止通知を受けたら:
+5. 実行エージェントはフェーズを 1 つ終えるごとに成果物を run dir に書き、`PHASE <name> DONE — <成果物パス>` または `BLOCKED: <理由>` の 1 行で停止する。停止通知を受けたら (このとき `executor_last_event_at` を更新する):
    - `BLOCKED` → 即座にタスクを blocked にする (リトライしない)。state 更新、アダプタで `mark <id> blocked <理由>`、次のタスクは次イテレーションに回す。
    - `DONE` で、`<name>` が state.json の `phase` と一致 → 検証ゲートへ。
    - `DONE` で、`<name>` が state.json の `phase` と不一致 (プロトコル行の重複再送など) → 無視する。
@@ -211,8 +212,8 @@ Return only what the adapter file specifies for this operation.
 
 wakeup がタスクの飛行中に来るのは正常である (フォールバック、または固定間隔 cron)。仕事は停止通知が運んでくるので、原則することは無い:
 
-- `updated_at` が 90 分以内 → 実行エージェントは稼働中とみなす。**何も送らない**。/loop dynamic 配下ならフォールバック (1800 秒) を予約し直してターンを終える。固定間隔 cron 配下なら何も予約せず終える。
-- `updated_at` が 90 分より古い → 実行エージェントに SendMessage で「Status check: finish your current phase per protocol and stop with your protocol line. Do not advance phases without an explicit verified-PASS message.」を送り、state.json を書いて `updated_at` を更新する (ping の繰り返しを防ぐ)。
+- そのタスクの `executor_last_event_at` が 90 分以内 → 実行エージェントは稼働中とみなす。**何も送らない**。/loop dynamic 配下ならフォールバック (1800 秒) を予約し直してターンを終える。固定間隔 cron 配下なら何も予約せず終える。
+- そのタスクの `executor_last_event_at` が 90 分より古い → 実行エージェントに SendMessage で「Status check: finish your current phase per protocol and stop with your protocol line. Do not advance phases without an explicit verified-PASS message.」を送り、`executor_last_event_at` を現在時刻に更新して state.json を書く (ping の繰り返しを防ぐ)。
   - 送信がエラーになる (エージェントが存在しない = セッションが変わった) → タスク実行の手順 3 の形式で新しい実行エージェントを起動する。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは、対応する findings ファイルのパスも添える)。
   - 送信できたら、その後の停止通知が通常どおり検証ゲートを駆動する。
 
