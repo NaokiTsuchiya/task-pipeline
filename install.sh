@@ -74,9 +74,17 @@ if [ -d "$repo_dir/agents" ]; then
         link="$agents_dest/$name"
 
         if [ -h "$link" ]; then
-            # 既存 symlink: ls -l の "-> target" 表記からリンク先を取り、
-            # ディレクトリ部だけ物理解決してから突き合わせる (readlink を使わないため)。
-            link_target=$(ls -ld -- "$link" 2>/dev/null | sed -e 's/^.* -> //')
+            # 既存 symlink: readlink は POSIX 外なので ls -l の "<link> -> <target>"
+            # 表記からリンク先を取り、ディレクトリ部だけ物理解決してから突き合わせる。
+            # リンク先が相対パスのときは **リンクの所在ディレクトリ ($agents_dest)** 基準で
+            # 解決する (カレントディレクトリ基準だと実行場所で判定が変わってしまう)。
+            # shellcheck disable=SC2012  # POSIX の範囲でリンク先を読む手段は ls -l しかない
+            ls_line=$(ls -ld -- "$link" 2>/dev/null)
+            link_target=${ls_line#*"$link -> "}   # 既知のリンクパスごと最短一致で落とす
+            case $link_target in
+                /*) ;;
+                *) link_target="$agents_dest/$link_target" ;;
+            esac
             link_dir=$(CDPATH='' cd -P -- "$(dirname -- "$link_target")" 2>/dev/null && pwd) || link_dir=
             if [ -n "$link_dir" ] && [ "$link_dir/$(basename -- "$link_target")" = "$src" ]; then
                 printf 'skip: agents/%s (already installed)\n' "$name"
