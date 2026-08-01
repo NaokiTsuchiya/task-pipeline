@@ -77,15 +77,14 @@ Note: ending the turn while a background executor is working, with the next step
   ],
   "candidates": [{"id": "t-9z8y", "title": "未承認タスク", "reason": "順位の理由"}],
   "relisted": [],
-  "watch_idle": 0,
   "history": ["2026-07-16T09:12Z done t-1a2b3c4d (.task-pipeline/runs/t-1a2b3c4d/report.md)"]
 }
 ```
 
 - フェーズ列は **research → plan → implement → report** で固定。`phase`、判定ファイル名、サブエージェントへの指示は必ずこの英語トークンを使う。`finish=commit|pr` のときだけ、report PASS 後に検証対象外の後処理として `phase: finalize` を挟む。`finish=pr` では、in_review になった後に `phase: pr_fix` (検証ゲートあり) → `finalize` が何度か追加で回ることがある (下記「PR の追従」)。
 - パイプラインが自力で到達する終端は `in_review` (レビュー待ち) と `blocked`。**Done (マージ/受け入れ完了) はユーザーの行為である。** パイプラインが done を書くのは、ユーザーのマージを git 履歴で証明できたときの回収 (下記「マージの回収」) だけ。
-- `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。`ref` が PR URL のときは追従用に `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "sig": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "checked_at": null, "note": null}` も併せて置く (`proc` は変化を待つバックグラウンドプロセスの id)。
-- `watch_idle` は候補が枯渇した後、どの PR にも動きが無いまま watch プロセスが空振りした連続回数 (下記「ペーシングと枯渇」)。
+- `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。`ref` が PR URL のときは追従用に `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "sig": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "idle": 0, "checked_at": null, "note": null}` も併せて置く (`proc` は変化を待つバックグラウンドプロセスの id)。
+- `watch.idle` は、**その PR の** watch プロセスが timeout (6 時間動きなし) で空振りした連続回数。候補が枯渇した後だけ数える (下記「ペーシングと枯渇」)。PR ごとに持つのは、複数 PR の timeout を単一カウンタで合算すると「4 回 = 丸 1 日」の等式が壊れ、N 本監視で約 6 時間後に追従を打ち切ってしまうため。
 - `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。`base` は worktree を作った時点のプロジェクト側ブランチ (下記。worktree が無ければ null)。
 - `phase` は現在実行中 (まだ PASS していない) のフェーズ。`attempts` はそのフェーズでの検証試行回数。PASS でフェーズが進んだら 0 に戻す。`executor` は実行エージェントの agentId。`executor_last_event_at` はその実行エージェントに関する最後のイベントの時刻 (UTC) — 更新するのは、その executor を起動したとき・その executor へ SendMessage が**成功**したとき・その executor の停止通知を処理したときの 3 つだけ (失敗した送信で動かすと、他セッションから executor が生きているように見えてしまう)。**実行エージェントの生存判定はこのフィールドで行う。** トップレベルの `updated_at` は無関係なタスクの追従処理でも動くので、生存判定に使ってはならない (使うと、PR にレビュー活動が続く限り沈黙した executor が検出されない)。`takeover_at` は SendMessage 失敗後の引き継ぎ待ちの開始時刻 (下記「飛行中の扱い」。通常は null)。
 - `updated_at` は state.json を書くたびに現在時刻 (UTC) に更新する。
@@ -96,7 +95,7 @@ Note: ending the turn while a background executor is working, with the next step
 
 同じリポジトリに複数のセッションがパイプラインを向けると、state.json は共有される (プロジェクトルート基準で 1 箇所に集約されるため)。書き込みは必ず次の手順で行う。読むだけなら不要:
 
-1. `.task-pipeline/lock` を `mkdir` で作る (既存なら失敗するので、これが排他になる)。作れなければ 10 秒待って再試行し、3 回失敗したらこのイテレーションでは書かない (書き込みを伴う処理は次の wakeup に回す)。lock の作成時刻が 10 分より古いときだけは、保持者が死んだとみなして削除し、取り直してよい。
+1. `.task-pipeline/lock` を `mkdir` で作る (既存なら失敗するので、これが排他になる)。作れなければ 10 秒待って再試行し、3 回失敗したらこのイテレーションでは書かない (書き込みを伴う処理は次の wakeup に回す)。lock の作成時刻が 10 分より古いときだけは保持者が死んだとみなしてよい。ただし直接消さず、`mv` で一時名 (`lock.stale.<ランダム>` 等) に退避してから消す — 退避に成功した 1 セッションだけが除去者になるので、複数セッションが同時に stale 判定しても排他が破れない。`mv` に失敗したら他所が除去中なので通常の待ちに戻る。
 2. lock を取ってから state.json を**読み直し**、自分の変更をその最新内容に適用する。イテレーション冒頭に読んだ内容をそのまま書き戻してはならない — 間に入った他セッションの書き込みを巻き戻してしまう。読み直した内容が自分の判断の前提を覆している場合 (例: これから着手しようとしたタスクが既に別セッションで in_progress になっている) は、書かずにその処理自体を破棄する。
 3. 一時ファイル (`state.json.tmp` 等) に全文を書いてから `mv` で `state.json` に置き換える (部分書き込みを防ぐ)。
 4. `.task-pipeline/lock` を削除する。
@@ -209,7 +208,7 @@ Return only what the adapter file specifies for this operation.
 - 同じブランチを 2 つの worktree で同時にチェックアウトできないという git の制約上、**worktree を使う以上どのタスクも必ず自分のブランチを持つ**。したがって `finish=commit` は「現在のブランチ」ではなく `task-pipeline/<id>` へのコミットになり、`finish=none` の未コミット変更も worktree 側に残る。どちらの場合も、レビュー待ちの報告に worktree のパスとブランチ名を必ず書く。
 - 作成に成功したら state.json のそのタスクに `"worktree": "<絶対パス>"` と、worktree を作った時点でのプロジェクト側のブランチ (`git -C <プロジェクトルート> rev-parse --abbrev-ref HEAD`) を `"base"` として記録する。in_review になったとき `review.base` にはこのタスクの `base` を移す — in_review 時に rev-parse し直してはならない (ユーザーが途中でブランチを切り替えていると誤った base を拾い、マージ回収の誤判定に直結する)。
 - **作れなかったとき**: 失敗理由で扱いが分かれる。
-  - **プロジェクトが git リポジトリでない** → worktree 無しでプロジェクトルートを target project にして続行する (`worktree` は null のまま)。この場合の `finish=commit` は従来どおり現在のブランチへのコミットになる。理由を history に残す。
+  - **プロジェクトが git リポジトリでない** → worktree 無しでプロジェクトルートを target project にして続行する (`worktree` は null のまま)。git が無い以上 `finish=commit|pr` は成立せず finalize が BLOCKED になるので、この経路は実質 `finish=none` 専用である。理由を history に残す。
   - **ブランチ `task-pipeline/<id>` が既に存在する等、それ以外の失敗** → 続行しない。ブランチ既存は別セッションの二重着手か前回実行の残骸の最有力な兆候であり、プロジェクトルートで続行すると上の「ユーザーの作業ツリーを触らない」保証が破れる。タスクを blocked にする (state 更新、アダプタで `mark <id> blocked <理由>`。理由には git の実エラー出力を含める)。残骸が原因なら、ユーザーがその worktree とブランチを消してトラッカー側の blocked 表現を外せば、承認手順 1 の復帰規則で候補に戻る。
 - **削除するのは done を回収したときだけ** (下記「マージの回収」)。in_review や blocked では消さない — `finish=none` の未コミット変更や blocked の途中成果物は worktree にしか無く、消すと失われるため。
 
@@ -251,10 +250,10 @@ bash ~/.claude/skills/task-pipeline/scripts/watch-pr.sh <PR URL> <task id> 60 21
 これを **background で** 走らせる。スクリプトは PR の署名 (状態・head sha・CI ロールアップ・コメント数・レビュー数・未解決スレッド数・コメントの最終更新時刻) を GraphQL 1 回で取り、変化するまでブロックして終了する。ポーリングするのはこのシェルであってモデルではないので、**変化が無い間は 1 度も起きない**。webhook の受け口を持てない環境で反応の速さだけを webhook と同じにするための仕組みである。
 
 - 起動するのは **レビュー待ちに入った直後** と **pr_fix の push 直後**。background shell の id を `watch.proc` に、起動時刻を `watch.proc_started_at` に記録する。この 2 つの起動では第 5 引数 (前回署名) を渡さず、`watch.sig` も null に戻す — push で head が変わっており、古い署名を基準にすると自分の push を変化として拾ってしまう。
-- 毎イテレーション、`watching` のタスクに watch プロセスが無ければ (`watch.proc` が null、または `proc_started_at` から 7 時間以上経っているのに通知が来ていない = セッションが変わって死んだ) 起動し直す。起動し直すときは `watch.sig` があれば第 5 引数に渡す — プロセスが死んでいた間に起きた変化 (レビュー指摘・CI 失敗) を、次の比較で「changed」として取り落とさないため。**ただし `watch.fix_pending` が真のタスクでは起動しない** — 直すべきものが分かっているのに変化を待つのは無意味で、しかも待ってしまうと修正のきっかけを取り落とす。そのタスクは下記「修正サイクル」の手順 1 から入る (観測はやり直さない。findings は既にある)。
+- 毎イテレーション、`watching` のタスクに watch プロセスが無ければ (`watch.proc` が null、または `proc_started_at` から 7 時間以上経っているのに通知が来ていない = セッションが変わって死んだ) 起動し直す。起動し直すときは `watch.sig` があれば第 5 引数に渡す — プロセスが死んでいた間に起きた変化 (レビュー指摘・CI 失敗) を、次の比較で「changed」として取り落とさないため。`watch.sig` が null のまま張り直すことになった場合 (最初の通知が届く前にセッションが死んだ) は、張る前に観測サブエージェントを 1 回同期起動して、死んでいた間の変化を回収する (対応済みの重複は `handled` が除く)。**ただし `watch.fix_pending` が真のタスクでは起動しない** — 直すべきものが分かっているのに変化を待つのは無意味で、しかも待ってしまうと修正のきっかけを取り落とす。そのタスクは下記「修正サイクル」の手順 1 から入る (観測はやり直さない。findings は既にある)。
 - 終了通知を受けたら `watch.proc` を null に、通知に含まれる署名 (`changed` の `<新>`、`timeout` の `<署名>`) を `watch.sig` に保存してから、その 1 行を見て分岐する:
   - `PR-WATCH <id> changed <旧> -> <新>` → 何かが動いた。下記の観測サブエージェントを起動する。**スクリプトは「変わった」ことしか言わない — 何が起きたかの判定は観測サブエージェントの仕事である。** 安いブロッキング検出と高い分類をこう分けている。
-  - `PR-WATCH <id> timeout <署名>` (終了コード 2) → 6 時間何も動かなかった。観測は起動せず、プロセスを起動し直す。`watch_idle` を +1 するのは**候補が枯渇した後だけ** (スキーマの定義どおり)。枯渇前のタスク消化中は増やさない — ここで数えると、枯渇に入った直後に「丸 1 日動きが無い」と誤認して追従を打ち切ってしまう。
+  - `PR-WATCH <id> timeout <署名>` (終了コード 2) → 6 時間何も動かなかった。観測は起動せず、プロセスを起動し直す。そのタスクの `watch.idle` を +1 するのは**候補が枯渇した後だけ** (スキーマの定義どおり)。枯渇前のタスク消化中は増やさない — ここで数えると、枯渇に入った直後に「丸 1 日動きが無い」と誤認して追従を打ち切ってしまう。
   - `PR-WATCH <id> error ...` (終了コード 3 / 4) → 下記 `error` と同じ扱い。
 
 ### 観測
@@ -325,8 +324,8 @@ git -C <プロジェクトルート> branch -d task-pipeline/<id>
 - 承認で `list` が `{"tasks": []}` を返したら (枯渇。**候補そのものが尽きたときだけ**):
   1. マージの回収 (上記) を行ってから、state.json の history と queue を集計し、証拠パス付きの最終報告を書く。レビュー待ち (in_review) は ref (PR URL / コミットハッシュ) 付きで一覧にする — ここがユーザーのレビュー起点になる。回収済み (done) と blocked (理由付き) も一覧にする。追従中の PR があれば、その CI 状態と `watch.fix_attempts` も添える。
   2. **追従中の PR が 1 本も無ければループを止める**: dynamic なら ScheduleWakeup `stop: true`。固定間隔 (cron) なら CronList で自ジョブを特定して CronDelete。
-  3. `watch.state` が `watching` の PR が残っているなら**止めずに追従だけを続ける**: 最終報告は出したうえで、dynamic なら 3600 秒で次イテレーションへ (固定間隔なら CronDelete しない)。この wakeup は watch プロセスが死んでいないかを確かめるためだけの保険で、変化の検知はプロセス側がやる。以降のイテレーションも `list` は毎回呼び、**新しい候補が現れたら通常どおり承認を聞く** (`watch_idle` は 0 に戻す)。
-     - `watch_idle` を +1 するのは **watch プロセスが timeout (6 時間まったく動きが無い) で終わったとき**だけ。何かが動いたら 0 に戻す。**`watch_idle` が 4 に達したら** (= 丸 1 日どの PR も動いていない)、その旨 (「N 本の PR は人のレビュー待ちのまま変化が無いので追従を終える」) を報告してループを止める。保険の wakeup では増やさない — 増やすと、変化を待っているだけの正常な状態を「何も起きていない」と数えてしまう。
+  3. `watch.state` が `watching` の PR が残っているなら**止めずに追従だけを続ける**: 最終報告は出したうえで、dynamic なら 3600 秒で次イテレーションへ (固定間隔なら CronDelete しない)。この wakeup は watch プロセスが死んでいないかを確かめるためだけの保険で、変化の検知はプロセス側がやる。以降のイテレーションも `list` は毎回呼び、**新しい候補が現れたら通常どおり承認を聞く** (全タスクの `watch.idle` を 0 に戻す)。
+     - `watch.idle` を +1 するのは **その PR の watch プロセスが timeout (6 時間まったく動きが無い) で終わったとき**だけ。何かが動いた PR は 0 に戻す。**追従中のすべての PR の `watch.idle` が 4 に達したら** (= 丸 1 日どの PR も動いていない)、その旨 (「N 本の PR は人のレビュー待ちのまま変化が無いので追従を終える」) を報告してループを止める。保険の wakeup では増やさない — 増やすと、変化を待っているだけの正常な状態を「何も起きていない」と数えてしまう。
 
   止める理由: 候補が無いまま起き続けるのは無意味な wakeup とコンテキスト肥大にしかならない。この停止は「トラッカーに残っている仕事はすべて消化した」という宣言である。候補が残っているのにキューが空なだけのときは**止めずに承認を聞く** — ユーザーは 1 件ずつ選ぶので、キューが空になるのは正常な通過点であって終わりではない。追従だけのために回り続ける期間に上限を置くのも同じ理屈で、レビューが数日動かない PR のために起き続けても得るものが無いためである。
 
