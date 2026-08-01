@@ -1,14 +1,17 @@
 #!/bin/sh
-# install.sh — SKILL.md を持つトップレベルディレクトリを ~/.claude/skills/ へ symlink する。
+# install.sh — SKILL.md を持つトップレベルディレクトリを ~/.claude/skills/ へ、
+#              agents/*.md を ~/.claude/agents/ へ symlink する。
 #
 # 使い方:
-#   sh ./install.sh [リンク先ディレクトリ]
+#   sh ./install.sh [skill のリンク先ディレクトリ] [agent のリンク先ディレクトリ]
 #
-# リンク先の優先順: 第 1 引数 > 環境変数 SKILLS_DIR > ~/.claude/skills
+# リンク先の優先順:
+#   skill: 第 1 引数 > 環境変数 SKILLS_DIR > ~/.claude/skills
+#   agent: 第 2 引数 > 環境変数 AGENTS_DIR > ~/.claude/agents
 #
 # - 冪等: 既に正しい symlink があるものはスキップする。
-# - 安全: 同名エントリがこのリポジトリの skill ディレクトリを指していない場合
-#   (実ディレクトリ、他所向き symlink など) は変更せず、警告を出して続行する。
+# - 安全: 同名エントリがこのリポジトリの skill ディレクトリ / agent ファイルを指していない
+#   場合 (実ディレクトリ・実ファイル、他所向き symlink など) は変更せず、警告を出して続行する。
 # - POSIX sh + POSIX 標準ユーティリティのみ (readlink 等の拡張は使わない)。
 set -u
 
@@ -55,6 +58,44 @@ done
 if [ "$found" -eq 0 ]; then
     printf 'warning: no skill directories (containing SKILL.md) found under %s\n' "$repo_dir" >&2
     status=1
+fi
+
+# --- カスタムサブエージェント定義 (agents/*.md) ---
+# skill と同じ冪等・安全ルールでファイル単位に symlink する。
+# agents/ が無いリポジトリでも動くよう、無ければ何もしない (警告も出さない)。
+if [ -d "$repo_dir/agents" ]; then
+    agents_dest=${2:-${AGENTS_DIR:-"$HOME/.claude/agents"}}
+    mkdir -p -- "$agents_dest" || exit 1
+    agents_dest=$(CDPATH='' cd -P -- "$agents_dest" && pwd) || exit 1
+
+    for src in "$repo_dir"/agents/*.md; do
+        [ -f "$src" ] || continue   # マッチ 0 件のときは展開されないパターンが来る
+        name=$(basename -- "$src")
+        link="$agents_dest/$name"
+
+        if [ -h "$link" ]; then
+            # 既存 symlink: ls -l の "-> target" 表記からリンク先を取り、
+            # ディレクトリ部だけ物理解決してから突き合わせる (readlink を使わないため)。
+            link_target=$(ls -ld -- "$link" 2>/dev/null | sed -e 's/^.* -> //')
+            link_dir=$(CDPATH='' cd -P -- "$(dirname -- "$link_target")" 2>/dev/null && pwd) || link_dir=
+            if [ -n "$link_dir" ] && [ "$link_dir/$(basename -- "$link_target")" = "$src" ]; then
+                printf 'skip: agents/%s (already installed)\n' "$name"
+            else
+                printf 'warning: %s is a symlink not pointing to this repository — left untouched\n' "$link" >&2
+                status=1
+            fi
+        elif [ -e "$link" ]; then
+            printf 'warning: %s exists and is not a symlink to this repository — left untouched\n' "$link" >&2
+            status=1
+        else
+            if ln -s -- "$src" "$link"; then
+                printf 'install: agents/%s -> %s\n' "$name" "$src"
+            else
+                printf 'warning: failed to create symlink %s\n' "$link" >&2
+                status=1
+            fi
+        fi
+    done
 fi
 
 exit "$status"

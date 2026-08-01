@@ -15,7 +15,9 @@
 sh ./install.sh
 ```
 
-SKILL.md を持つ skill ディレクトリがすべて `~/.claude/skills/` へ symlink される。skill を追加したときも同じコマンドを再実行するだけでよい (冪等。既存の無関係なエントリは上書きせず警告して残す)。リンク先は第 1 引数または環境変数 `SKILLS_DIR` で変更できる (例: `sh ./install.sh /path/to/dir`)。
+SKILL.md を持つ skill ディレクトリがすべて `~/.claude/skills/` へ、`agents/*.md` (カスタムサブエージェント定義) がすべて `~/.claude/agents/` へ symlink される。skill や agent を追加したときも同じコマンドを再実行するだけでよい (冪等。既存の無関係なエントリは上書きせず警告して残す)。リンク先は第 1 / 第 2 引数または環境変数 `SKILLS_DIR` / `AGENTS_DIR` で変更できる (例: `sh ./install.sh /path/to/skills /path/to/agents`)。
+
+`agents/` を入れなくても skill は動く (task-pipeline の検証ゲートは general-purpose にフォールバックする) が、`agents/task-pipeline-verifier.md` は検証ゲートの reasoning effort と tools を固定するので、入れておくのが既定である。
 
 ## task-pipeline の使い方
 
