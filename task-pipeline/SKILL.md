@@ -159,7 +159,13 @@ Return only what the adapter file specifies for this operation.
 
 ## タスク実行
 
-1. state.json で対象タスクを `status: in_progress`, `phase: research`, `attempts: 0` に更新し、`runs/<id>/` を作る。アダプタで `mark <id> in_progress` する。この `mark` が `{"ok": false}` で**着手済みの兆候** (already assigned / already in progress) を返したら実行しない: タスクを queue から外して history に記録し、次のイテレーションへ進む (別のセッションか人が着手している — トラッカー側を正とする)。それ以外の `mark` 失敗は下記「アダプタの呼び方」のとおり続行する。`mark` の後、タスクの `gate` を判定する: `grep -Fq '<!-- task-pipeline:gate=light -->' <tasks/<id>.md の絶対パス>` の**終了コードだけ**を見る (本文を Read しない — この機械判定はコンテキスト規律を破らない)。ヒットしたらそのタスクを `gate: "light"`, `phase: "research+plan"` に更新する。ヒットしない・ファイルが無い・grep が実行できないときは何もしない — **既定は full** で、light はこの 1 経路でしか選ばれない。gh アダプタはタスク本文を `mark in_progress` の時点で書くので、この判定を `mark` より前に行ってはならない (スタブに宣言は無いので、必ず full に落ちてしまう)。
+1. state.json で対象タスクを `status: in_progress`, `phase: research`, `attempts: 0` に更新し、`runs/<id>/` を作る。アダプタで `mark <id> in_progress` する。この `mark` が `{"ok": false}` で**着手済みの兆候** (already assigned / already in progress) を返したら実行しない: タスクを queue から外して history に記録し、次のイテレーションへ進む (別のセッションか人が着手している — トラッカー側を正とする)。それ以外の `mark` 失敗は下記「アダプタの呼び方」のとおり続行する。`mark` の後、タスクの `gate` を判定する:
+
+   ```
+   sed -n '/^## コメント$/q;p' <tasks/<id>.md の絶対パス> | grep -Fxq '<!-- task-pipeline:gate=light -->'
+   ```
+
+   この**終了コードだけ**を見る (本文を Read しない — この機械判定はコンテキスト規律を破らない)。行全体一致 (`-x`) は本文が文中でマーカーに言及しただけの誤検出を、`## コメント` 手前での打ち切りはトラッカーのコメント転記にマーカーが書かれた場合の誤検出を防ぐ (コードブロック内の引用行は残る誤検出源だが、統合ゲートの宣言再判定が受け止めるので、light 側に倒れても品質は破れない)。ヒットしたらそのタスクを `gate: "light"`, `phase: "research+plan"` に更新する。ヒットしない・ファイルが無い・コマンドが実行できないときは何もしない — **既定は full** で、light はこの 1 経路でしか選ばれない。gh アダプタはタスク本文を `mark in_progress` の時点で書くので、この判定を `mark` より前に行ってはならない (スタブに宣言は無いので、必ず full に落ちてしまう)。同じ理由で、`mark` が失敗したまま続行した場合は本文が未取得のことがあり、宣言のあるタスクでも判定が空振りして full に落ちる — これは安全側の意図した降格である。
 2. **タスク専用の worktree を作る** (下記「worktree」)。作れなかった場合はそこに書いたとおりに扱う。
 3. 実行エージェントを **background で 1 体** 起動する (subagent_type: general-purpose)。プロンプトはこの 5 行のみ:
 
@@ -229,8 +235,9 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 
 - **`takeover_at` が非 null なら、まずこれを評価する** (Status check の再送も `takeover_at` の再記録もしない):
   - `executor_last_event_at` が `takeover_at` より後に動いている → 所有セッションが生きて処理した。`takeover_at` を消して手を引く (以降は通常の扱い)。
-  - 動いておらず、`takeover_at` から 30 分以上経った → 所有セッションは居ない。`takeover_at` を消し、タスク実行の手順 3 の形式で新しい実行エージェントを起動する。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは対応する findings ファイルのパスを、`finalize` のときは `finish mode: <mode>, base: <タスクの base>` を添える — finalize の再開でも base が渡らないと PR が既定ブランチに向く)。
+  - 動いておらず、`takeover_at` から 30 分以上経った → 所有セッションは居ない。`takeover_at` を消し、タスク実行の手順 3 の形式で新しい実行エージェントを起動する。起動の前に、`phase` が `research` で run dir に成果物が 1 つも無ければ、手順 1 の gate 判定をやり直す (gate 判定とその反映の間でセッションが死ぬと、宣言のあるタスクが full のまま固まるため。判定はマーカー行の機械照合なので、何度やっても同じ結果になる)。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは対応する findings ファイルのパスを、`finalize` のときは `finish mode: <mode>, base: <タスクの base>` を添える — finalize の再開でも base が渡らないと PR が既定ブランチに向く)。
   - 30 分未満 → 何もせず次の wakeup を待つ (/loop dynamic 配下ならフォールバック 1800 秒を予約し直す)。
+- そのタスクの `executor` が null (実行エージェントの起動前にセッションが死んだ) → SendMessage 失敗と同じ扱い: `takeover_at: <現在時刻>` を記録してこのイテレーションを終える (30 分後の判定は先頭の分岐が行う)。
 - そのタスクの `executor_last_event_at` が 90 分以内 → 実行エージェントは稼働中とみなす。**何も送らない**。/loop dynamic 配下ならフォールバック (1800 秒) を予約し直してターンを終える。固定間隔 cron 配下なら何も予約せず終える。
 - そのタスクの `executor_last_event_at` が 90 分より古い → 実行エージェントに SendMessage で「Status check: finish your current phase per protocol and stop with your protocol line. Do not advance phases without an explicit verified-PASS message.」を送る。
   - 送信が成功した → `executor_last_event_at` を現在時刻に更新して state.json を書く (ping の繰り返しを防ぐ)。その後の停止通知が通常どおり検証ゲートを駆動する。
