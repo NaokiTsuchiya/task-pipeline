@@ -3,6 +3,7 @@
 - [ ] readme-list-sync
 - [ ] scripts-test-harness
 - [ ] verifier-fixes-at-once
+- [ ] state-cli-foundation
 
 ## In Review
 
