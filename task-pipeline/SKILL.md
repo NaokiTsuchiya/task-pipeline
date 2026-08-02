@@ -23,12 +23,13 @@ Note: ending the turn while a background executor is working, with the next step
 
 ## 引数と場所
 
-- `$ARGUMENTS`: `<tracker> [source] [finish=none|commit|pr] [approve=ask|auto] [max_open=<N>]` (例: `markdown ./TASKS.md finish=commit`、`gh ?label=ready finish=pr approve=auto`)。`/loop` 経由では毎イテレーション同じ引数で再起動される。
-  - tracker より後ろのトークンは、`finish=` / `approve=` / `max_open=` で始まるものがそれぞれの設定、それ以外が `source`。
+- `$ARGUMENTS`: `<tracker> [source] [finish=none|commit|pr] [approve=ask|auto] [max_open=<N>] [rebase=auto|off]` (例: `markdown ./TASKS.md finish=commit`、`gh ?label=ready finish=pr approve=auto`)。`/loop` 経由では毎イテレーション同じ引数で再起動される。
+  - tracker より後ろのトークンは、`finish=` / `approve=` / `max_open=` / `rebase=` で始まるものがそれぞれの設定、それ以外が `source`。
   - `approve` は承認の取り方。`ask` (省略時): 候補の上位から**ユーザーが 1 件選ぶ**。`auto`: **順位 1 位を自動で採る** (下記「承認」)。`auto` にすると人を待つ定常ポイントが無くなり、パイプラインは ready なタスクを上から消化し続ける — **トラッカー側の ready がそのまま唯一の人間ゲートになる**ので、`?label=ready` のような絞り込み無しで `auto` を使ってはならない。
   - `max_open` は**マージ待ちのまま溜めてよい自分の PR の本数** (既定 2)。この本数に達している間は新しいタスクを着手しない。ただし**上限に達している間も枯渇の判定と追従の打ち切りには到達する** (下記「ペーシングと枯渇」の停滞) — 到達しないと、誰もマージしない限り空の wakeup が無期限に続く。レビューが追いつかないまま PR だけが積み上がるのを防ぐための上限で、`finish=pr` のときだけ意味を持つ。
   - **`source` は省略できる。** その場合はアダプタ起動プロンプトの `source:` を空にして渡し、既定値の解釈はアダプタに委ねる (既定を持たないアダプタはエラーを返す)。state.json の `source` には与えられたまま (省略なら空文字) を記録する。
   - `finish` はタスク完了時のコード変更の扱い。`none` (省略時): working tree に未コミットで残す。`commit`: タスクごとに現在のブランチへコミット。`pr`: タスクごとにブランチを切り、コミット・push して PR を作成し、**以降その PR の CI とレビューコメントを追従する** (下記「PR の追従」)。
+  - `rebase` は**マージを回収した後に、まだレビュー待ちの自分の PR を新しい `origin/<base>` へ載せ直すか**。`auto` (省略時): ガードを全部通ったものだけ rebase して force push する (下記「残った PR を新しい基点へ載せ直す」)。`off`: 何もしない (基点が古いままの PR は人がリベースする)。`finish=pr` のときだけ意味を持つ。
 - skill dir: `~/.claude/skills/task-pipeline/`
 - アダプタ定義: `~/.claude/skills/task-pipeline/references/adapters/<tracker>.md`。存在しなければ adapters/ を Glob で列挙して提示し、**ループを止めて** (枯渇時フロー手順 2 と同じ) 終了する。
 - **プロジェクトルート**: このパイプラインが「プロジェクト」と呼ぶのは常に**メイン worktree のルート**であって、起動時のカレントディレクトリではない。
@@ -90,9 +91,10 @@ Note: ending the turn while a background executor is working, with the next step
 }
 ```
 
-- フェーズ列はタスクの `gate` により 2 形態ある。`full` (既定): **research → plan → implement → report**。`light`: **research+plan → implement → report** (research と plan を 1 フェーズに統合し、検証ゲートも 1 回になる)。`gate` はタスク実行手順 1 で、タスクファイルの frontmatter から機械的に判定する — **宣言が無い・判定できないタスクは常に `full`** で、一度決めたら以降変えない。宣言の妥当性は統合ゲートの verifier が再判定する (verifier.md の research+plan 節) — 覆されても gate とフェーズ列は巻き戻さず、full 相当の要求が統合ゲートでそのまま課される。`phase`、判定ファイル名 (`verdicts/<phase>-<attempt>.json`)、サブエージェントへの指示は必ずこれらの英語トークンを使う (統合フェーズは `research+plan` の 1 トークン)。`finish=commit|pr` のときだけ、report PASS 後に検証対象外の後処理として `phase: finalize` を挟む。`finish=pr` では、in_review になった後に `phase: pr_fix` (検証ゲートあり) → `finalize` が何度か追加で回ることがある (下記「PR の追従」)。
+- フェーズ列はタスクの `gate` により 2 形態ある。`full` (既定): **research → plan → implement → report**。`light`: **research+plan → implement → report** (research と plan を 1 フェーズに統合し、検証ゲートも 1 回になる)。`gate` はタスク実行手順 1 で、タスクファイルの frontmatter から機械的に判定する — **宣言が無い・判定できないタスクは常に `full`** で、一度決めたら以降変えない。宣言の妥当性は統合ゲートの verifier が再判定する (verifier.md の research+plan 節) — 覆されても gate とフェーズ列は巻き戻さず、full 相当の要求が統合ゲートでそのまま課される。`phase`、判定ファイル名 (`verdicts/<phase>-<attempt>.json`)、サブエージェントへの指示は必ずこれらの英語トークンを使う (統合フェーズは `research+plan` の 1 トークン)。`finish=commit|pr` のときだけ、report PASS 後に検証対象外の後処理として `phase: finalize` を挟む。`finish=pr` では、in_review になった後に `phase: pr_fix` (検証ゲートあり) → `finalize` が何度か追加で回ることがある (下記「PR の追従」)。同じく `phase: rebase_fix` (検証ゲートあり) → `finalize` が回ることもある (下記「解決サイクル」)。
 - パイプラインが自力で到達する終端は `in_review` (レビュー待ち) と `blocked`。**Done (マージ/受け入れ完了) はユーザーの行為である。** パイプラインが done を書くのは、ユーザーのマージを git 履歴で証明できたときの回収 (下記「マージの回収」) だけ。
 - `review` は in_review になったときに埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}`。branch/tip/base は**タスクブランチにコミットがあるときだけ**入れる (回収の判定に使う)。`ref` が PR URL のときは追従用に `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "sig": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "checked_at": null, "note": null}` も併せて置く (`proc` は変化を待つバックグラウンドプロセスの id)。
+- `review.rebase` は**載せ直しの状態**で、`{"blocked_onto": "<そのときの `origin/<base>` の sha>", "reason": "dirty|diverged|conflict|push", "at": "<UTC>"}` (下記「残った PR を新しい基点へ載せ直す」)。既定は無し。`blocked_onto` は同じ基点に対して同じ失敗を何度も試して報告し直さないために置く — 基点が動けば (= 新しいマージがあれば) また試す。`reason` が `conflict` のときは、これにトリアージの結果 (`kind` / `cause` / `report`) と、解決サイクルに要る `resolve_pending` (真なら次のイテレーションで解決に着手する) / `from_tip` (載せ直す前のブランチ tip。諦めたときの巻き戻し先) が加わる。
 - `review.withdrawn` / `review.withdrawn_asked` は、PR が未マージで閉じられたタスクの後始末に使う (下記「PR の追従」の `closed`)。既定は無し (偽と同じ)。`withdrawn` はそのタスクのブランチがもうマージされないことを、`withdrawn_asked` は queue から外すかをユーザーに一度尋ねたことを表す。
 - `stalled` は**パイプラインが新しいタスクを着手できない状態**の種類 (`null` = 停滞していない / `"depleted"` = 候補が尽きた / `"max_open"` = レビュー待ちの上限に達している)、`stalled_since` はその状態に入った時刻 (UTC)。**追従を打ち切る唯一の判定材料**である (下記「ペーシングと枯渇」の停滞)。毎イテレーション、分岐が決まった時点で書き直す。セッションごとではなく**パイプライン全体**の状態で、どれか 1 つのセッションが着手できたなら停滞ではない。空振りの回数ではなく時刻で持つのは、(a) 回数だと複数 PR の空振りを合算した瞬間に「4 回 = 丸 1 日」の等式が壊れて PR ごとにカウンタを分ける必要が出るのに対し、時刻は監視本数に依らないため、(b) 空振りの通知が構造的に届かない運転形態 (固定間隔 cron。下記「PR の追従」) では回数を数えようが無いためである。
 - `worktree` はそのタスク専用 worktree の絶対パス (下記「worktree」)。作れなかったときだけ null。`base` は worktree を作った時点のプロジェクト側ブランチ (下記。worktree が無ければ null)。
@@ -150,7 +152,7 @@ Note: ending the turn while a background executor is working, with the next step
    - `approved` のタスクがある → 先頭 1 件をタスク実行へ (**1 セッション 1 タスク**。他セッションが別のタスクを実行中でも、自分の飛行中タスクが無いなら進めてよい)。
    - どちらも無い (state が無い場合を含む) → 承認へ。
 
-   **飛行中の上限**: 新しいタスクの実行を始める前 (approved の着手・承認のどちらでも) に、**除外した (= 生きている他セッションが実行中の) in_progress タスクが 2 件以上あるなら始めない。** 1 行報告し、dynamic なら ScheduleWakeup 1800 秒を予約してこのイテレーションを終える (予約しないと、他セッションが片付いてもこのセッションが二度と起きない)。プロジェクト全体で飛行中を 2 件までに抑える — 並行実行を認めるのは人がレビューできる本数までで、所有が失効しないまま増え続ける状況 (毎イテレーションが別セッションになる cron など) で着手だけが積み上がるのも防ぐ。**pr_fix はこの上限の対象外** — 新しい着手ではなく、既に出した PR を仕上げる作業だからである。
+   **飛行中の上限**: 新しいタスクの実行を始める前 (approved の着手・承認のどちらでも) に、**除外した (= 生きている他セッションが実行中の) in_progress タスクが 2 件以上あるなら始めない。** 1 行報告し、dynamic なら ScheduleWakeup 1800 秒を予約してこのイテレーションを終える (予約しないと、他セッションが片付いてもこのセッションが二度と起きない)。プロジェクト全体で飛行中を 2 件までに抑える — 並行実行を認めるのは人がレビューできる本数までで、所有が失効しないまま増え続ける状況 (毎イテレーションが別セッションになる cron など) で着手だけが積み上がるのも防ぐ。**pr_fix と rebase_fix はこの上限の対象外** — 新しい着手ではなく、既に出した PR を仕上げる作業だからである。
 
    **レビュー待ちの上限 (`max_open`、既定 2)**: 同じく新しいタスクを始める前に、**マージ待ちのまま残っている自分の in_review タスク** (`review.ref` が PR URL で、まだ done を回収していないもの。他セッション所有のものと `review.withdrawn` が真のものは数えない) を数える。**レビューが追いつかないまま PR だけが積み上がるのを防ぐための上限**で、`finish=pr` のときだけ意味を持つ。
 
@@ -162,7 +164,7 @@ Note: ending the turn while a background executor is working, with the next step
 
    **逆に言えば、この上限に達していない限り、PR がレビュー待ちであることは次のタスクを始めない理由にならない。** in_review のタスクがセッションを占有することは無く (残っているのは watch プロセスだけ)、マージの回収は毎イテレーション冒頭に独立して行われる。**マージを待ってから次に進む必要はない。**
 
-   ただし重ねると**次のタスクの基点にはレビュー待ちの PR の内容が入らない** (worktree はプロジェクト側のブランチから切られ、そこに未マージの PR は無い)。同じファイルを触るタスクが並ぶと、後から出す PR 側にリベースが要る。実測 (RayDiContext 2026-08-01) では gh-79 が移動したテストファイルを gh-80 が編集しており、直列に回していたので問題にならなかった。重ねるなら、**近縁のタスクが並んだことを worktree 作成時の history に残す** (後でリベースが要る理由を人が追えるように)。
+   ただし重ねると**次のタスクの基点にはレビュー待ちの PR の内容が入らない** (worktree はプロジェクト側のブランチから切られ、そこに未マージの PR は無い)。同じファイルを触るタスクが並ぶと、後から出す PR 側にリベースが要る。実測 (RayDiContext 2026-08-01) では gh-79 が移動したテストファイルを gh-80 が編集しており、直列に回していたので問題にならなかった。**そのリベースは、先に出た PR がマージされた時点でパイプラインが自分で行う** (下記「残った PR を新しい基点へ載せ直す」。`rebase=off` では行わない) — 人に渡るのはコンフリクトしたときだけである。重ねるなら、**近縁のタスクが並んだことを worktree 作成時の history に残す** (後で載せ直しやコンフリクトが起きる理由を人が追えるように)。
 2. 処理の節目ごとに state.json を更新し、タスクが in_review / blocked / done になったら進捗を 1〜3 行 (証拠パス付き) で報告する。
    - **blocked にしたら、どの経路から来たかによらず `PushNotification` を 1 本送る** (`status: "proactive"`、200 字未満・1 行・markdown 無し)。文面は `<id> blocked: <理由を 1 行> — <run dir か worktree のパス>`。**blocked はパイプラインが自力で進めない状態で、人が来るまで何も起きない** — 通知が無いと以降の wakeup がすべて空回りする。in_review の通知 (下記「タスク実行」) より緊急度が高い唯一の地点である。ツールが無い環境では何もしない (通知は成果物ではないので、送れなくても blocked の処理自体は完了させる)。
    - 送るのは blocked にした**その 1 回だけ**。同じタスクが blocked のまま残っている間、以降のイテレーションでは送らない (状態は変わっていないので、鳴らしても新しい情報が無い)。
@@ -291,6 +293,7 @@ Return only what the adapter file specifies for this operation.
    - `BLOCKED` → 即座にタスクを blocked にする (リトライしない)。state 更新 (`session` は null に戻す — 実行エージェントはもう居ない)、アダプタで `mark <id> blocked <理由>`、次のタスクは次イテレーションに回す。
    - `DONE` で、`<name>` が state.json の `phase` と一致 → 検証ゲートへ。
    - `DONE` で、`<name>` が state.json の `phase` と不一致 (プロトコル行の重複再送など) → 無視する。
+   - `REBASE-CONFLICT — <パス>` → 載せ直しが衝突で止まった。`phase` が `finalize` なら (PR を出す・押し直す直前の載せ直し) 下記「コンフリクトのトリアージ」の手順 3 以降をそのまま行い、`rebase_fix` なら下記「解決サイクル」の諦め方に入る。**どちらでも blocked にはしない。**
 6. **検証ゲート**: フレッシュな検証エージェントを **毎回新規に** 同期起動する (subagent_type: `task-pipeline-verifier`):
 
    ```
@@ -302,9 +305,9 @@ Return only what the adapter file specifies for this operation.
 
    - **未インストール環境のフォールバック**: `task-pipeline-verifier` は `agents/task-pipeline-verifier.md` を `~/.claude/agents/` に置いて初めて存在する (このリポジトリの `install.sh` が行う)。Agent tool が unknown agent type のエラーを返したら、**同じプロンプトのまま** `subagent_type: general-purpose` で起動し直し、history に「verifier agent type 未インストール — general-purpose で実行」を 1 行残す。skill 単体でも動く状態を保つためで、フォールバックしたこと自体は失敗ではない。
 
-   - **PASS** → 判定 JSON を `runs/<id>/verdicts/<phase>-<attempt>.json` に書き (attempt は `attempts` の現在値・0 始まり。`phase` が `pr_fix` のときは対応する findings の連番 `<n>` を含めて `pr_fix-<n>-<attempt>.json` — 修正サイクルごとに `attempts` が 0 に戻るので、連番が無いと前サイクルの判定を上書きする)、state の phase を進める。次フェーズがあれば SendMessage で実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」と送る (再開は background で走る。停止通知が次の処理を駆動する)。report まで PASS したら:
+   - **PASS** → 判定 JSON を `runs/<id>/verdicts/<phase>-<attempt>.json` に書き (attempt は `attempts` の現在値・0 始まり。`phase` が `pr_fix` のときは対応する findings の連番 `<n>` を含めて `pr_fix-<n>-<attempt>.json`、`rebase_fix` のときは対応する `rebase-fix-<n>.md` の連番で `rebase_fix-<n>-<attempt>.json` — 修正・解決サイクルごとに `attempts` が 0 に戻るので、連番が無いと前サイクルの判定を上書きする)、state の phase を進める。次フェーズがあれば SendMessage で実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」と送る (再開は background で走る。停止通知が次の処理を駆動する)。report まで PASS したら:
      - `finish=none` → そのままレビュー待ち処理へ。
-     - `finish=commit|pr` → state の `phase` を `finalize` にし、SendMessage で「`<phase>` verified PASS. Finalize the task (finish mode: `<mode>`, base: `<タスクの base>`).」を送る (`<phase>` は直前に PASS したフェーズ = `report` または `pr_fix`。`base` が null なら `base:` は省く)。`FINALIZED — <commit hash / PR URL>` の停止通知でレビュー待ち処理へ。`BLOCKED` 停止なら通常どおり即 blocked。finalize は成果物フェーズではないので検証ゲートは無い。
+     - `finish=commit|pr` → state の `phase` を `finalize` にし、SendMessage で「`<phase>` verified PASS. Finalize the task (finish mode: `<mode>`, base: `<タスクの base>`).」を送る (`<phase>` は直前に PASS したフェーズ = `report` または `pr_fix`。`base` が null なら `base:` は省く。**`rebase=off` のときだけ末尾に `, rebase: off` を足す** — executor は push の直前にも基点を確かめて載せ直すので、切る指示を渡さないと引数が片側にしか効かない)。`FINALIZED — <commit hash / PR URL>` の停止通知でレビュー待ち処理へ。`BLOCKED` 停止なら通常どおり即 blocked。finalize は成果物フェーズではないので検証ゲートは無い。
      - レビュー待ち処理: `status: in_review`、アダプタで `mark <id> in_review [ref]` (ref: `pr` なら PR URL、`commit` ならコミットハッシュ、`none` なら無し)、history に ref 付きで追記、1〜3 行で報告 (worktree があればそのパスとブランチ名も添える)。**タスクブランチにコミットがあれば** (`git -C <プロジェクトルート> rev-list --count <base>..<branch>` が 1 以上) 回収用に `review` を埋める: branch = `task-pipeline/<id>`、tip = `git -C <プロジェクトルート> rev-parse <branch>`、base はタスクの `base` フィールドの値 (worktree 作成時に記録済み)。`finish=commit` と `finish=pr` の両方が該当する — worktree を使う以上どちらもタスクブランチにコミットを積むので、回収の条件は finish モードではなくコミットの有無で決まる。**コミットが 0 件のとき (`finish=none`) は tip を入れてはならない**: tip が base と同じコミットを指し、`merge-base --is-ancestor` が真になって「マージ済み」と誤判定し、未コミットの作業ごと worktree が消される。最後に、ref が PR URL なら `review.watch` を初期化して watch プロセスを起動し、`session` は自分のまま残す (これで追従の対象になる)。**起動の手順は下記「PR の追従」で、この起動は `watch.sig` が null なので張る前に catch-up 観測が 1 回入る** — pr_fix からの復帰でここに来たときは、修正を回している間に届いた指摘をそこで回収する。**その catch-up より前に、下の pr_fix 復帰の行にある `watch.handled` の更新を済ませておくこと**: 順序が逆になると、いま対応したばかりの指摘が未対応として再浮上する。**初期化のとき、そのタスクに既存の `watch.handled` があれば引き継ぐ** — 復帰したタスクを流し直したときに、前回対応済みのレビュー指摘が新しい findings として再浮上しないようにするため (他のフィールドは既定値でよい)。**PR URL でなければ揮発資源がもう無いので `session` を null に戻す** — 追従の要らないタスクを自分のセッションに紐づけたままにすると、そのセッションが死んでいる間はマージの回収が他セッションから見て手出し不可になる。
        - **レビュー待ちにしたら、ユーザーに通知を 1 本送る** (`PushNotification`, `status: "proactive"`)。**パイプラインが人を待ち始める唯一の地点**で、無人運転では次に人が見に来るまでがそのまま滞留時間になるため (実測: 2026-08-01 の 5 本は PR 作成からマージまで 3.8〜10.2 分だったが、これはユーザーが張り付いていた場合の値である)。文面は 200 字未満・1 行・markdown 無しで、**行動できる情報を先に置く**:
 
@@ -315,7 +318,8 @@ Return only what the adapter file specifies for this operation.
          - 送るのは **PR / コミットができた最初の 1 回だけ**。`pr_fix` からの復帰 (下の行) では送らない — 指摘に対応して押し直したことは watch 側の追従で見えており、往復のたびに鳴らすと通知の価値が落ちる。
          - **ツールが無い環境では何もしない。** 送れなかったことを失敗として扱わず、フェーズも止めない (通知は成果物ではない)。ユーザーが端末の前にいるときは重複なので送られないことがあるが、それも正常である。
          - 通知に載せるのは id・URL・タイトルだけにする。**CI の状態や検証の結果は書かない** — この時点では CI が回り始めてすらいないことがあり、通知は取り消せない。
-       - **pr_fix からの復帰でここに来たときは `mark` を呼び直さない。** トラッカー側は in_review のままで何も変わっておらず、呼べば重複コメントになるだけである。代わりに `watch.state` を `watching` に戻し、`watch.fix_attempts` は保ったまま、対応した指摘の id を `watch.handled` に足す。**この `handled` の追加は、上の watch 起動 (とその前に入る catch-up 観測) より前に済ませる** — catch-up 観測には `handled` をそのまま渡すので、後回しにすると、いま対応したばかりの指摘が未対応として再浮上する。
+       - **rebase_fix からの復帰でここに来たときも `mark` を呼び直さず、通知も送らない。** 行うのは `review.tip` を新しい tip に更新すること、`watch.state` を `watching` に戻すこと、`review.rebase` を消すこと、watch を張り直すことだけである (`watch.handled` も `fix_attempts` もそのまま保つ — 載せ直しはレビュー指摘への往復ではない)。
+      - **pr_fix からの復帰でここに来たときは `mark` を呼び直さない。** トラッカー側は in_review のままで何も変わっておらず、呼べば重複コメントになるだけである。代わりに `watch.state` を `watching` に戻し、`watch.fix_attempts` は保ったまま、対応した指摘の id を `watch.handled` に足す。**この `handled` の追加は、上の watch 起動 (とその前に入る catch-up 観測) より前に済ませる** — catch-up 観測には `handled` をそのまま渡すので、後回しにすると、いま対応したばかりの指摘が未対応として再浮上する。
    - **FAIL** → 判定 JSON を PASS と同じ命名規則で保存してから `attempts` を +1 する (ファイル名の attempt は +1 前の値)。SendMessage で実行エージェントへ required_fixes をそのまま送り、修正・再停止後に **新しい** 検証エージェントで再検証する。
 
 ### worktree
@@ -359,7 +363,7 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 - **二重起動を最後に食い止めているのは、実行エージェント自身が打つ heartbeat である。** 実行エージェントはサブエージェントなので所属セッションの `CLAUDE_CODE_SESSION_ID` を継ぐ。executor.md は作業の区切りごとに `sessions/<id>` を touch するよう指示しており、そのため**実行エージェントが動いている限り、所有セッションは state.json を一度も書かなくても生存一覧に残る** (`/loop` を付けずに起動されたセッションは、停止通知が来るまで一度も回らないので、これが無いと生きたまま一覧から落ちる)。したがって上の「生きている他セッションのタスクには触らない」が、長いフェーズの最中も効く。
 - **`takeover_at` が非 null なら、まずこれを評価する** (Status check の再送も `takeover_at` の再記録もしない):
   - `executor_last_event_at` が `takeover_at` より後に動いている → 所有セッションが生きて処理した。`takeover_at` を消して手を引く (以降は通常の扱い)。
-  - 動いておらず、`takeover_at` から 30 分以上経った → 所有セッションは居ない。`takeover_at` を消し、タスク実行の手順 3 の形式で新しい実行エージェントを起動する (`executor` / `executor_last_event_at` / `session` を自分のものに書き換える)。起動の前に、`phase` が `research` で run dir に成果物が 1 つも無ければ、手順 1 の gate 判定をやり直す (gate 判定とその反映の間でセッションが死ぬと、宣言のあるタスクが full のまま固まるため。判定はマーカー行の機械照合なので、何度やっても同じ結果になる)。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは対応する findings ファイルのパスを、`finalize` のときは `finish mode: <mode>, base: <タスクの base>` を添える — finalize の再開でも base が渡らないと PR が既定ブランチに向く)。
+  - 動いておらず、`takeover_at` から 30 分以上経った → 所有セッションは居ない。`takeover_at` を消し、タスク実行の手順 3 の形式で新しい実行エージェントを起動する (`executor` / `executor_last_event_at` / `session` を自分のものに書き換える)。起動の前に、`phase` が `research` で run dir に成果物が 1 つも無ければ、手順 1 の gate 判定をやり直す (gate 判定とその反映の間でセッションが死ぬと、宣言のあるタスクが full のまま固まるため。判定はマーカー行の機械照合なので、何度やっても同じ結果になる)。Begin 行は「Resume from phase "<phase>". Check existing artifacts in the run dir first.」に変える (`phase` が `pr_fix` のときは対応する findings ファイルのパスを、`rebase_fix` のときは衝突の控えとトリアージレポートのパスと `onto: origin/<base>` を、`finalize` のときは `finish mode: <mode>, base: <タスクの base>` を添える — finalize の再開でも base が渡らないと PR が既定ブランチに向く)。
   - 30 分未満 → 何もせず次の wakeup を待つ (/loop dynamic 配下ならフォールバック 1800 秒を予約し直す)。
 - そのタスクの `executor` が null → **走っている実行エージェントは存在しない**。`session` が自分でないなら、`takeover_at` を待たずにこのイテレーションで新しい実行エージェントを起動してよい (Begin 行は `takeover_at` 経路と同じ「Resume from phase …」)。実行エージェントを起動する前にセッションが死んだということなので (起動していれば agentId が入っている)、30 分待っても新しい情報は増えない。`session` が自分なら、自分で起動し忘れた状態なので同じくこのイテレーションで起動する。
 - そのタスクの `executor_last_event_at` が 90 分以内 → 実行エージェントは稼働中とみなす。**何も送らない**。/loop dynamic 配下ならフォールバック (1800 秒) を予約し直してターンを終える。固定間隔 cron 配下なら何も予約せず終える。
@@ -390,11 +394,12 @@ TASK_PIPELINE_HEARTBEAT=<.task-pipeline の絶対パス>/sessions/<自分のセ�
   - タスクの `session` が**非 null で**生存一覧に無い (所有セッションごと死んだ。`watch.proc` は他セッション由来なので**止めずに null に落とす**)
   - `proc_started_at` から 7 時間以上経っているのに通知が来ていない (`session` が null で所有者を特定できないときの唯一の手掛かり)
 
-  起動し直したら `session` を自分の id に書き換える。`session` が生きている他セッションのタスクはここに来ない (毎イテレーションの手順 1 で除外済み) — 相手が張り直すので、二重に張ってはならない。**起動し直すときは `watch.sig` があれば第 5 引数に渡す** — プロセスが死んでいた間に起きた変化 (レビュー指摘・CI 失敗) を、次の比較で「changed」として取り落とさないため。**ただし `watch.fix_pending` が真のタスクでは起動しない** — 直すべきものが分かっているのに変化を待つのは無意味で、しかも待ってしまうと修正のきっかけを取り落とす。そのタスクは下記「修正サイクル」の先頭 (手順 0 のガード) から入る (観測はやり直さない。findings は既にある)。
-- **`watch.sig` が null のまま張ることになった起動では、張る前に観測サブエージェントを `mode: catch-up` で 1 回同期起動する (catch-up 観測)。** 第 5 引数を渡さない起動は**基準署名をその場で新規取得する**ので、それまでに届いていた変化はすべて基準に焼き込まれ、以後どれだけ待っても `changed` にならない。CI が動くリポジトリなら次の rollup 遷移でまとめて拾えるが、CI の無いリポジトリ (watcher の `ci: "none"`) では署名が動く要因が無く、その指摘は永久に観測されない。この経路に入るのは次の 3 つで、扱いはいずれも同じ (対応済みの重複は `handled` が除くので、既対応の指摘が再浮上することはない):
+  起動し直したら `session` を自分の id に書き換える。`session` が生きている他セッションのタスクはここに来ない (毎イテレーションの手順 1 で除外済み) — 相手が張り直すので、二重に張ってはならない。**起動し直すときは `watch.sig` があれば第 5 引数に渡す** — プロセスが死んでいた間に起きた変化 (レビュー指摘・CI 失敗) を、次の比較で「changed」として取り落とさないため。**ただし `watch.fix_pending` か `review.rebase.resolve_pending` が真のタスクでは起動しない** — 直すべきものが分かっているのに変化を待つのは無意味で、しかも待ってしまうと修正のきっかけを取り落とす。そのタスクは下記「修正サイクル」/「解決サイクル」の先頭 (手順 0 のガード) から入る (観測はやり直さない。findings もトリアージも既にある)。
+- **`watch.sig` が null のまま張ることになった起動では、張る前に観測サブエージェントを `mode: catch-up` で 1 回同期起動する (catch-up 観測)。** 第 5 引数を渡さない起動は**基準署名をその場で新規取得する**ので、それまでに届いていた変化はすべて基準に焼き込まれ、以後どれだけ待っても `changed` にならない。CI が動くリポジトリなら次の rollup 遷移でまとめて拾えるが、CI の無いリポジトリ (watcher の `ci: "none"`) では署名が動く要因が無く、その指摘は永久に観測されない。この経路に入るのは次の 4 つで、扱いはいずれも同じ (対応済みの重複は `handled` が除くので、既対応の指摘が再浮上することはない):
   - 最初の通知が届く前にセッションが死んだ (`watch.sig` が一度も書かれていない)
   - 上の「レビュー待ちに入った直後」「pr_fix の push 直後」の起動 (`watch.sig` を null に戻す起動)
   - 観測が `error` を返した後の張り直し (下記 `error` の扱い)
+  - 載せ直しの force push の後の張り直し (下記「残った PR を新しい基点へ載せ直す」。これも `watch.sig` を null に戻す push である)
 
   **`mode: catch-up` を渡すのは、これらの起動が必ず push 直後か長い空白の後だからである。** 通常モードの観測は CI 実行中 (`ci: "pending"`) を見た時点で `wait` を返して打ち切るので、push 直後の catch-up は**回収そのものが行われない** (push 直後は head が 5 分以内なので、CI の無いリポジトリでも `pending` と判定される)。catch-up モードでは CI 実行中でも指摘の収集まで進む (pr-watcher.md の「catch-up モード」節)。
 
@@ -482,7 +487,7 @@ git -C <プロジェクトルート> branch -d task-pipeline/<id>
 
 削除に失敗しても (未コミット変更が残っている等) タスクは done のままにし、パスを添えて報告するだけにする。**強制削除 (`--force`) はしない。**
 
-**done を回収したときの後処理一式**とは、ここまでの done 処理 (`mark done`、state 更新、history 追記、watch の停止と `session` の解放、worktree とブランチの片付け) に、**下の 2 つの節 — 「マージで解けた依存の昇格」と「マージ後にプロジェクト側を origin へ追いつかせる」— を加えた全体**を指す。**どの経路から done を回収しても** (この節のローカル履歴による判定、PR 追従の `merged`、枯渇時フローからの回収) この一式を最後まで行う。前半だけで止めると、走れるタスクが `pending-deps` に残ったまま「候補が尽きた」と判断したり、次のタスクが直前のマージを含まない古い木から始まったりする。
+**done を回収したときの後処理一式**とは、ここまでの done 処理 (`mark done`、state 更新、history 追記、watch の停止と `session` の解放、worktree とブランチの片付け) に、**下の 3 つの節 — 「マージで解けた依存の昇格」「マージ後にプロジェクト側を origin へ追いつかせる」「残った PR を新しい基点へ載せ直す」— を加えた全体**を指す。**どの経路から done を回収しても** (この節のローカル履歴による判定、PR 追従の `merged`、枯渇時フローからの回収) この一式を最後まで行う。前半だけで止めると、走れるタスクが `pending-deps` に残ったまま「候補が尽きた」と判断したり、次のタスクが直前のマージを含まない古い木から始まったり、まだ open な PR が古い基点のまま置き去りになったりする。**3 つの節はこの順に行う** — 載せ直しは `origin` に追いついた後の `origin/<base>` を基点にするので、同期より先に走らせると 1 つ前の基点へ載せることになる。
 
 ### マージで解けた依存の昇格
 
@@ -524,6 +529,82 @@ git -C <プロジェクトルート> merge --ff-only origin/<プロジェクト�
 - プロジェクト側の現在のブランチが、いま done にしたタスクの `base` と違うとき (ユーザーが切り替えた) は**触らない**。
 - 同期できなくても done の回収は成立している。次のタスクが古い基点から始まることになるので、その旨を worktree 作成時に history へ残す (上記「worktree」)。
 - remote が無いリポジトリでは `fetch` が失敗するだけで、マージの回収は従来どおりローカル履歴のみで動く。**この同期はマージ回収の前提ではない** (回収は `origin` に触れずに成立する) — 次のタスクの基点を新しく保つための後処理である。
+
+### 残った PR を新しい基点へ載せ直す (rebase)
+
+`origin` に追いついたら、続けて**まだレビュー待ちの自分の PR を新しい `origin/<base>` に載せ直す** (`rebase=off` ならこの節ごと飛ばす)。マージした瞬間に、残っている open PR の基点は 1 つ古くなる: レビューの差分が現在の `<base>` に対するものでなくなり、同じファイルを触るタスクが並んでいればマージのときにコンフリクトが人の手に渡り、CI が古い基点で緑でも `<base>` の上では壊れうる。**基点が動いた瞬間にしか、この古さは生じない** — だから片付けるのもここである。
+
+これは PR の履歴を書き換える (force push する) 操作なので、**パイプラインが作った `task-pipeline/<id>` ブランチにだけ**行い、ガードを 1 つでも落としたら**触らずに記録して報告する**。`--continue` も `--force` も使わない。
+
+対象は、queue の **`in_review`** タスクのうち次をすべて満たすもの (生きている他セッションが所有するタスクは毎イテレーションの手順 1 で既に除外されている。**`in_progress` で `pr_fix` を回しているタスクが対象外なのもここで効く** — その worktree では実行エージェントが作業中で、足元の履歴を書き換えれば成果が壊れる):
+
+- `review.ref` が PR URL で、`review.watch.state` が `watching` (取り下げ済み・`stopped` のものは触らない — 既に人の手に渡っている)
+- `review.withdrawn` が偽で、`worktree` が非 null
+- `review.rebase.blocked_onto` が現在の `origin/<base>` の sha (`git -C <プロジェクトルート> rev-parse origin/<base>`) と一致しない (同じ基点で前回落ちたものを試し直さない)
+
+`<base>` はそのタスクの `review.base`。`origin/<base>` が無ければ何もしない。判定はプロジェクトルート、実行は worktree で行う (ブランチはそこにチェックアウトされているので、ルートからは rebase できない):
+
+1. `git -C <プロジェクトルート> merge-base --is-ancestor origin/<base> task-pipeline/<id>` が真 → **既に載っている**。何もしない (通常はここで終わる)。
+2. 次の 3 つを確かめ、1 つでも崩れていたら**触らない** (`review.rebase` に `reason` と現在の `origin/<base>` の sha を記録し、1 行報告する):
+   - `git -C <worktree> status --porcelain` が空 (未コミット変更が無い。あれば `dirty`)
+   - `git -C <worktree> rev-parse --abbrev-ref HEAD` が `task-pipeline/<id>` (detached や中断した rebase の途中でない。違えば同じく `dirty`)
+   - `git -C <プロジェクトルート> rev-parse task-pipeline/<id>` と `origin/task-pipeline/<id>` が一致する (違えば `diverged`)。**この一致確認がこの節の要である**: 直前の同期で `fetch` 済みなので remote-tracking は新しく、`--force-with-lease` だけでは他所からの push を弾けない。ずれているなら、誰かが PR ブランチに直接押したか、こちらの push がまだ済んでいない。
+3. 旧 tip (`git -C <プロジェクトルート> rev-parse task-pipeline/<id>`) を控えてから `git -C <worktree> rebase origin/<base>`。**タイムアウトを 120 秒付ける** — 署名が有効なリポジトリでは各コミットを署名し直すので、認可の切れた署名エージェントでは止まりうる。失敗はすべて `git -C <worktree> rebase --abort` で戻す。タイムアウトとその他の失敗は 2 と同じ記録と報告で終わり、**コンフリクトのときだけ下記のトリアージを行う** (`reason` は `conflict`)。**解消は決してしない** — 何が正しいかはレビューの中身の問題で、パイプラインが判断してよいことではない。
+4. `git -C <worktree> push --force-with-lease=task-pipeline/<id>:<旧 tip> origin task-pipeline/<id>`。**lease は控えた旧 tip で明示する** (引数無しの `--force-with-lease` は remote-tracking を基準にするので、直前の `fetch` で保護が無効になっている)。失敗したら `git -C <worktree> reset --hard <旧 tip>` で載せ直しを取り消してから記録と報告をする (`push`)。**ローカルだけ進んだ状態を残してはならない** — 次の `pr_fix` の通常 push が non-ff で撥ねられ、以降は 2 の一致確認にも永久に引っかかる。
+5. 成功したら:
+   - `review.tip` を新しい tip に更新する。**マージの回収はこの tip を見る**ので、更新を落とすと `merge-base --is-ancestor` が二度と真にならない。`review.rebase` は消す。
+   - **自分が起動した watch プロセスを止め、`watch.proc` と `watch.sig` を null に戻す** (pr_fix の push 直後と同じ扱い。head が変わっており、古い署名を基準にすると自分の push を変化として拾う)。張り直しは次のイテレーションの張り直し経路が行い、そこで catch-up 観測が入る。他セッション由来の `watch.proc` は止めずに null に落とすだけ。
+   - `watch.fix_attempts` には数えない (レビュー指摘への往復ではない)。history に旧 tip → 新 tip と基点の sha を残し、1 行報告する。
+
+- **`finish=commit` のタスクは対象外。** PR が無い = レビューの単位も押し直す先も無く、履歴だけが書き換わる。
+- **1 回のマージで対象が複数あれば全部処理する。** それぞれ独立で、1 本が 2 で落ちても他は続ける。
+- **同じ載せ直しを、executor も push の直前に行う** (executor.md の finalize)。**ここが拾うのは、既に出してある PR の基点が後から古くなった場合**で、あちらが拾うのは PR を出す (押し直す) 瞬間に既に古い場合である。とくに `pr_fix` を回している間のマージはこの節が対象外にする (worktree で実行エージェントが作業中のため) ので、その分は push 直前の確認が受け止める。
+- **衝突なく載せ直せた木は誰も検証していない** (検証ゲートが PASS を出したのは古い基点の上の木である)。壊れていれば CI が落ち、通常の追従が `pr_fix` で直す。CI の無いリポジトリでは、それはレビューで人が見ることになる。push 直前の載せ直し (executor 側) だけは、その場で plan の検証手順を回し直せるので回している。**衝突したときは事情が違う** — 解消は人の判断に近いコードの変更なので、下記の解決サイクルで検証ゲートを通す。
+
+#### コンフリクトのトリアージ
+
+載せ直しがコンフリクトしたら、**「コンフリクトした」とだけ報告して終わらない。** 人がその 1 行から得られるのは「自分で見に行け」だけで、しかも見に行くには abort 済みの衝突を自分で再現するところから始めることになる。オーケストレーターは衝突の中身を読めない (コンテキスト規律) ので、控えを取ってから 1 体に任せる:
+
+1. **abort する前に控える** (abort すると失われる): `git -C <worktree> diff --diff-filter=U` の出力を `<runs/<id>>/rebase/conflict-<UTC 時刻>.diff` へ、`git -C <worktree> diff --name-only --diff-filter=U` の一覧、旧 tip と `origin/<base>` の sha。**控えた中身は読まない** (パスだけ扱う)。
+2. `git -C <worktree> rebase --abort` で戻す。**トリアージは衝突を残したまま行わない** — セッションが死ぬと worktree が rebase 途中のまま固まり、ガード 2 で以後どのイテレーションも触れなくなる。
+3. read-only のトリアージサブエージェント (general-purpose、同期) を 1 体起動する。プロンプトはこの形のみ:
+
+   ```
+   You are a read-only rebase conflict triage subagent.
+   Do not modify the repository, the branch, the tracker, or any file except the report below.
+   conflict capture: <.diff の絶対パス> / repo: <プロジェクトルートの絶対パス>
+   branch: task-pipeline/<id> (tip <旧 tip>) / onto: origin/<base> (<sha>)
+   task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス>
+   Inspect both sides with read-only git (log / diff / show) and say what actually collides.
+   Write a short report to <run dir>/rebase/conflict-<同じ時刻>.md.
+   Return only JSON: {"kind": "superseded|overlap|adjacent|structural|other",
+    "files": ["..."], "cause": "<日本語 60 字以内>", "next": "<推奨する解き方を日本語 60 字以内>",
+    "report": "<書いたレポートの絶対パス>"}
+   ```
+
+   - `kind` の意味: `superseded` = 相手側が同じ変更を既に含んでいる / `overlap` = 同じ箇所を別の意図で変えた / `adjacent` = 近接行の機械的な衝突 / `structural` = ファイルの移動・削除と編集の衝突 / `other`。
+   - **解き方を書かせるだけで、解かせない。** 書き込みを許すのはレポート 1 本だけである。
+4. 返った JSON を `review.rebase` に `kind` / `cause` / `report` として控え、**報告は 1〜2 行**にする (`<id>: origin/<base> へ載せ直せず (overlap: 同じ関数を両側が変更)。次: <next> — <report のパス>`)。
+5. `kind` で分岐する:
+   - **`superseded`** → 解決しない。その PR がもう不要かもしれないことを報告に明示して終える (取り下げの判断は人がする — パイプラインは PR を閉じない)。衝突を解いたところで、中身の無い PR ができるだけである。
+   - **それ以外** → `review.rebase.resolve_pending` を真に、`from_tip` に旧 tip を入れて、下記の解決サイクルへ。
+
+#### 解決サイクル (rebase_fix)
+
+トリアージまでで人に渡さず、**衝突の解消もパイプラインがやる。** ただし解消はコードの変更なので、他のフェーズとまったく同じ扱いにする — **実行エージェントが解き、フレッシュな検証ゲートが通してからでなければ push しない**。オーケストレーターが自分で解くことはしない (コンテキスト規律の問題ではなく、自分が直したものを自分で通せない構造を保つためである)。**衝突の解消は、相手側の変更を黙って捨てても差分上は「解決済み」に見える** — ここに検証を挟まないのは、パイプラインの中で最も静かに壊れる経路になる。
+
+対象は `review.rebase.resolve_pending` が真のタスクで、毎イテレーションの追従処理で拾う (修正サイクルと同じ位置)。
+
+**`review` がまだ無いタスク — 最初の PR を出す直前に executor が衝突した場合 — では、控えを置く先が無い代わりに持ち越すものも無い。** 実行エージェントは生きていて、タスクは既に `in_progress` なので、そのイテレーション内でそのまま手順 1 (`phase` を `finalize` から `rebase_fix` へ) に入る。`resolve_pending` も `from_tip` も使わない (rebase は executor が既に abort しており、巻き戻すものが無い)。諦めるときは、下の「諦め方」の代わりに **finalize を `rebase: off` 付きで送り直し、古い基点のまま PR を出させる** — 出来上がった作業を、載せ直せないことだけを理由に握り潰さない。
+
+0. **自分が所有する別のタスクが既に `in_progress` なら、このイテレーションでは始めない** (修正サイクル手順 0 と同じ。飛行中は 1 セッション 1 タスク)。`resolve_pending` を真のまま置き、`session` は null に戻して次のイテレーションでここから拾い直す。
+1. タスクを `status: in_progress`, `phase: rebase_fix`, `attempts: 0`, `session: <自分の id>` にし、`resolve_pending` を偽に戻す。**トラッカーへの `mark` はしない** (トラッカー上はレビュー待ちのままでよい)。**この着手は飛行中の上限の対象外** (pr_fix と同じく、新しい着手ではなく出した PR を仕上げる作業である)。
+2. 実行エージェントへ SendMessage:「Rebase conflict. Rebase the branch onto `origin/<base>` and resolve the conflicts as phase "rebase_fix". conflict capture: `<.diff の絶対パス>` / triage: `<report の絶対パス>`.」送信できなければ、タスク実行の手順 3 と同じ形で新しい実行エージェントを起動し、Begin 行を「Begin with phase "rebase_fix". Rebase onto `origin/<base>`. conflict capture: `<パス>` / triage: `<パス>`.」に変える。**rebase 自体を実行エージェントにやらせる** — 衝突を抱えた worktree を扱えるのはそこで作業するエージェントだけで、オーケストレーターが解いた木を後から渡す形にすると、検証を通っていない変更が finalize に混ざる。
+3. `PHASE rebase_fix DONE` の停止通知 → フレッシュな検証ゲート (phase: `rebase_fix`、判定は `verdicts/rebase_fix-<n>-<attempt>.json`) → PASS なら通常どおり `finalize` (`finish mode` と `base` を渡す。executor は push 直前の確認で既に最新と判定し、force push する) → `FINALIZED` でレビュー待ち処理へ戻る。
+4. **`REBASE-CONFLICT — <パス>` で停止したら、解消できなかったということである** (手に負えない衝突を無理に解かせない)。下の「諦め方」へ。
+5. FAIL は同じリトライ上限 (3 回)。**使い切っても blocked にしない** — 下の「諦め方」へ。
+
+**諦め方** (リトライ上限・`REBASE-CONFLICT` 停止のどちらでも同じ): `git -C <worktree> rebase --abort` (途中なら) の後 `git -C <worktree> reset --hard <review.rebase.from_tip>` で載せ直しを取り消し、`status: in_review` に戻して `review.rebase` に `reason: conflict` と `blocked_onto` を残し、トリアージのレポートのパスを添えて報告する。**ここは「リトライ上限」の唯一の例外である** — PR は古い基点のまま生きていてレビューできる状態は失われておらず、載せ直せなかったことだけを理由にタスクを止めるのは損失が大きすぎる。押していないので、ローカルとリモートが一致した状態も保たれる。
 
 ## ペーシングと枯渇
 
