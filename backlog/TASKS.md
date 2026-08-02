@@ -1,9 +1,7 @@
 # バックログ
 
-- [ ] verifier-fixes-at-once
-- [ ] readme-list-sync
-- [ ] test-harness-foundation
-- [ ] state-cli-foundation
+- [ ] state-cli-verbs
+- [ ] sha-record-for-gate-light
 
 ## In Review
 
@@ -17,3 +15,10 @@
 - [x] promotion-withdrawal-consistency
 - [x] install-agents-symlink-resolution
 - [x] readme-feature-sync
+- [x] verifier-fixes-at-once
+- [x] readme-list-sync
+- [x] test-harness-foundation
+- [x] state-cli-schema-validation
+- [x] aggregate-scripts-phase-token
+- [x] watch-pr-signature-window
+- [x] state-cli-foundation
