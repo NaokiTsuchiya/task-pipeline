@@ -39,13 +39,13 @@ flat() { printf '%s' "$1" | tr '\n' '|'; }
 # GraphQL レスポンス JSON (署名の材料。comments/reviews/threads はすべて空にして
 # 署名を手計算できる形に揃える — sig() 参照)。$1 = headRefOid
 body() {
-    printf '{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"%s","comments":{"totalCount":0,"nodes":[]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}' "$1"
+    printf '{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"%s","comments":{"totalCount":0,"nodes":[]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":0,"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}' "$1"
 }
 
 # body() が生成する JSON に対して watch-pr.sh の jq フィルタが計算する署名文字列。
 # $1 = headRefOid
 sig() {
-    printf 'OPEN|%s|SUCCESS|0|0|0|-' "$1"
+    printf 'OPEN|%s|SUCCESS|0|0|0|0|-' "$1"
 }
 
 # 呼び出し順にフィクスチャを並べたディレクトリを作り、そのパスを返す。
@@ -164,6 +164,100 @@ _detail=
 [ -f "$hb_file" ] || _detail="heartbeat ファイルが存在しない"
 [ "$mtime8" -gt 1700000000 ] || _detail="$_detail mtime=$mtime8 (2023-11-14 相当より新しくない → touch されていない、rc=$rc)"
 if [ -z "$_detail" ]; then ok "W8 TASK_PIPELINE_HEARTBEAT が touch される"; else ng "W8 TASK_PIPELINE_HEARTBEAT が touch される" "$_detail"; fi
+
+# 呼び出し回数 (AC5)。mock gh はフィクスチャディレクトリに .call_count を書く
+# (tests/fixtures/mock-gh/gh 参照)。1 周 1 GraphQL 呼び出しのままであることを確認する。
+call_count() {
+    cat "$1/.call_count" 2>/dev/null || printf '0'
+}
+
+# --- W9: 窓外スレッド総数の変化 (新規スレッド投稿) → changed (AC1 スレッド件数版) -----
+old9='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w9","comments":{"totalCount":51,"nodes":[]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":100,"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+new9='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w9","comments":{"totalCount":51,"nodes":[]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":101,"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+sig9old='OPEN|sha-w9|SUCCESS|51|0|100|0|-'
+sig9new='OPEN|sha-w9|SUCCESS|51|0|101|0|-'
+resp=$(mkresp "$old9" "$new9")
+out=$(GH_MOCK_RESPONSES=$resp bash "$watch_sh" "$pr_url" task9 1 10 2>"$work/.w9err")
+rc=$?
+want9="PR-WATCH task9 changed $sig9old -> $sig9new"
+_detail=
+[ "$rc" = 0 ] || _detail="exit=$rc (want 0) err=$(flat "$(cat "$work/.w9err")")"
+[ "$out" = "$want9" ] || _detail="$_detail got=[$(flat "$out")] want=[$(flat "$want9")]"
+[ "$(call_count "$resp")" = 2 ] || _detail="$_detail call_count=$(call_count "$resp") (want 2)"
+if [ -z "$_detail" ]; then ok "W9 窓外スレッド総数の変化 → changed (AC1)"; else ng "W9 窓外スレッド総数の変化 → changed (AC1)" "$_detail"; fi
+
+# --- W10: 直近スレッド (旧コードでは窓外・新コードでは窓内) の resolve → changed (AC1) --
+old10='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w10","comments":{"totalCount":51,"nodes":[]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":101,"nodes":[{"isResolved":false,"comments":{"nodes":[{"updatedAt":"2026-07-01T00:00:00Z"}]}}]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+new10='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w10","comments":{"totalCount":51,"nodes":[]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":101,"nodes":[{"isResolved":true,"comments":{"nodes":[{"updatedAt":"2026-07-01T00:00:00Z"}]}}]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+sig10old='OPEN|sha-w10|SUCCESS|51|0|101|1|2026-07-01T00:00:00Z'
+sig10new='OPEN|sha-w10|SUCCESS|51|0|101|0|2026-07-01T00:00:00Z'
+resp=$(mkresp "$old10" "$new10")
+out=$(GH_MOCK_RESPONSES=$resp bash "$watch_sh" "$pr_url" task10 1 10 2>"$work/.w10err")
+rc=$?
+want10="PR-WATCH task10 changed $sig10old -> $sig10new"
+_detail=
+[ "$rc" = 0 ] || _detail="exit=$rc (want 0) err=$(flat "$(cat "$work/.w10err")")"
+[ "$out" = "$want10" ] || _detail="$_detail got=[$(flat "$out")] want=[$(flat "$want10")]"
+[ "$(call_count "$resp")" = 2 ] || _detail="$_detail call_count=$(call_count "$resp") (want 2)"
+if [ -z "$_detail" ]; then ok "W10 窓内スレッドの resolve → changed (AC1)"; else ng "W10 窓内スレッドの resolve → changed (AC1)" "$_detail"; fi
+
+# --- W11: 窓内の新規コメント → changed (AC3 対照 1/3、回帰) --------------------------
+old11='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w11","comments":{"totalCount":5,"nodes":[]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":0,"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+new11='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w11","comments":{"totalCount":6,"nodes":[]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":0,"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+sig11old='OPEN|sha-w11|SUCCESS|5|0|0|0|-'
+sig11new='OPEN|sha-w11|SUCCESS|6|0|0|0|-'
+resp=$(mkresp "$old11" "$new11")
+out=$(GH_MOCK_RESPONSES=$resp bash "$watch_sh" "$pr_url" task11 1 10 2>"$work/.w11err")
+rc=$?
+want11="PR-WATCH task11 changed $sig11old -> $sig11new"
+_detail=
+[ "$rc" = 0 ] || _detail="exit=$rc (want 0) err=$(flat "$(cat "$work/.w11err")")"
+[ "$out" = "$want11" ] || _detail="$_detail got=[$(flat "$out")] want=[$(flat "$want11")]"
+[ "$(call_count "$resp")" = 2 ] || _detail="$_detail call_count=$(call_count "$resp") (want 2)"
+if [ -z "$_detail" ]; then ok "W11 窓内の新規コメント → changed (AC3 対照)"; else ng "W11 窓内の新規コメント → changed (AC3 対照)" "$_detail"; fi
+
+# --- W12: 既存スレッドへの返信 (窓内) → changed (AC3 対照 2/3、回帰) -------------------
+old12='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w12","comments":{"totalCount":0,"nodes":[]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":1,"nodes":[{"isResolved":false,"comments":{"nodes":[{"updatedAt":"2026-02-01T00:00:00Z"}]}}]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+new12='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w12","comments":{"totalCount":0,"nodes":[]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":1,"nodes":[{"isResolved":false,"comments":{"nodes":[{"updatedAt":"2026-02-01T00:00:00Z"},{"updatedAt":"2026-02-02T00:00:00Z"}]}}]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+sig12old='OPEN|sha-w12|SUCCESS|0|0|1|1|2026-02-01T00:00:00Z'
+sig12new='OPEN|sha-w12|SUCCESS|0|0|1|1|2026-02-02T00:00:00Z'
+resp=$(mkresp "$old12" "$new12")
+out=$(GH_MOCK_RESPONSES=$resp bash "$watch_sh" "$pr_url" task12 1 10 2>"$work/.w12err")
+rc=$?
+want12="PR-WATCH task12 changed $sig12old -> $sig12new"
+_detail=
+[ "$rc" = 0 ] || _detail="exit=$rc (want 0) err=$(flat "$(cat "$work/.w12err")")"
+[ "$out" = "$want12" ] || _detail="$_detail got=[$(flat "$out")] want=[$(flat "$want12")]"
+[ "$(call_count "$resp")" = 2 ] || _detail="$_detail call_count=$(call_count "$resp") (want 2)"
+if [ -z "$_detail" ]; then ok "W12 既存スレッドへの返信 (窓内) → changed (AC3 対照)"; else ng "W12 既存スレッドへの返信 (窓内) → changed (AC3 対照)" "$_detail"; fi
+
+# --- W13: 窓内コメントの本文編集 (件数不変・updatedAt だけ変化) → changed (AC3 対照 3/3) --
+old13='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w13","comments":{"totalCount":3,"nodes":[{"updatedAt":"2026-03-01T00:00:00Z"}]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":0,"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+new13='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w13","comments":{"totalCount":3,"nodes":[{"updatedAt":"2026-03-05T00:00:00Z"}]},"reviews":{"totalCount":0,"nodes":[]},"reviewThreads":{"totalCount":0,"nodes":[]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+sig13old='OPEN|sha-w13|SUCCESS|3|0|0|0|2026-03-01T00:00:00Z'
+sig13new='OPEN|sha-w13|SUCCESS|3|0|0|0|2026-03-05T00:00:00Z'
+resp=$(mkresp "$old13" "$new13")
+out=$(GH_MOCK_RESPONSES=$resp bash "$watch_sh" "$pr_url" task13 1 10 2>"$work/.w13err")
+rc=$?
+want13="PR-WATCH task13 changed $sig13old -> $sig13new"
+_detail=
+[ "$rc" = 0 ] || _detail="exit=$rc (want 0) err=$(flat "$(cat "$work/.w13err")")"
+[ "$out" = "$want13" ] || _detail="$_detail got=[$(flat "$out")] want=[$(flat "$want13")]"
+[ "$(call_count "$resp")" = 2 ] || _detail="$_detail call_count=$(call_count "$resp") (want 2)"
+if [ -z "$_detail" ]; then ok "W13 窓内コメントの本文編集 → changed (AC3 対照)"; else ng "W13 窓内コメントの本文編集 → changed (AC3 対照)" "$_detail"; fi
+
+# --- W14: 変化無し + 同一入力の決定性 (AC4)。totalCount 追加後も毎回一致することを固定する -
+body14='{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"sha-w14","comments":{"totalCount":7,"nodes":[{"updatedAt":"2026-01-01T00:00:00Z"}]},"reviews":{"totalCount":2,"nodes":[{"updatedAt":"2026-01-02T00:00:00Z"}]},"reviewThreads":{"totalCount":3,"nodes":[{"isResolved":true,"comments":{"nodes":[{"updatedAt":"2026-01-03T00:00:00Z"}]}},{"isResolved":false,"comments":{"nodes":[{"updatedAt":"2026-01-01T00:00:00Z"}]}}]},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}'
+sig14='OPEN|sha-w14|SUCCESS|7|2|3|1|2026-01-03T00:00:00Z'
+resp=$(mkresp "$body14" "$body14" "$body14")
+out=$(GH_MOCK_RESPONSES=$resp bash "$watch_sh" "$pr_url" task14 1 2 2>"$work/.w14err")
+rc=$?
+want14="PR-WATCH task14 timeout $sig14"
+_detail=
+[ "$rc" = 2 ] || _detail="exit=$rc (want 2) err=$(flat "$(cat "$work/.w14err")")"
+[ "$out" = "$want14" ] || _detail="$_detail got=[$(flat "$out")] want=[$(flat "$want14")]"
+[ "$(call_count "$resp")" = 3 ] || _detail="$_detail call_count=$(call_count "$resp") (want 3)"
+if [ -z "$_detail" ]; then ok "W14 変化無し・同一入力の決定性 → timeout (AC4)"; else ng "W14 変化無し・同一入力の決定性 → timeout (AC4)" "$_detail"; fi
 
 printf '\n%s\n' "----------------------------------------"
 printf 'PASS %s / FAIL %s / SKIP %s\n' "$pass" "$fail" "$skipped"
