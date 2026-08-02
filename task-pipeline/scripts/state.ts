@@ -622,6 +622,7 @@ export const ALLOWED_FLAGS: Record<string, ReadonlySet<string>> = {
     "branch",
     "tip",
     "base",
+    "clear-session",
     ...LOCK_FLAGS,
   ]),
   // --- 追従 ---
@@ -644,6 +645,7 @@ export const ALLOWED_FLAGS: Record<string, ReadonlySet<string>> = {
     "errors-reset",
     "note",
     "state",
+    "session",
     ...LOCK_FLAGS,
   ]),
   "fix-pending": new Set([
@@ -1204,7 +1206,14 @@ async function cmdFinalizeStart(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  const from = requireEnumFlag(flags, "from", ["report", "pr_fix"]);
+  // "rebase_fix" は state-cli-verbs では対象外だったが、SKILL.md の設計 (rebase_fix PASS も
+  // report/pr_fix と同じく finalize を経て in-review へ戻る) には含まれる。ここに含めないと、
+  // 載せ直しの衝突解消 (解決サイクル) が PASS しても finalize へ進めなくなる。
+  const from = requireEnumFlag(flags, "from", [
+    "report",
+    "pr_fix",
+    "rebase_fix",
+  ]);
   await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
     requirePrecondition(
       item.status === "in_progress" && item.phase === from,
@@ -1258,6 +1267,7 @@ async function cmdInReview(
   const branch = flags.get("branch");
   const base = flags.get("base");
   const tip = flags.get("tip");
+  const clearSession = boolFlag(flags, "clear-session");
 
   await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
     requirePrecondition(
@@ -1282,6 +1292,14 @@ async function cmdInReview(
           base: base!,
         },
       };
+    }
+    // --clear-session true: レビュー待ちにしたタスクに、もう揮発資源 (実行エージェント /
+    // watch プロセス) が無いとき (ref が PR URL でなく watch-init を呼ばない経路) に session
+    // を同じ書き込みで null に戻す。呼ばずに残すと、この session を持つセッションが生きて
+    // いる限り (このタスクとは無関係な作業をしていても) 他セッションから「所有中なので触ら
+    // ない」と誤認され、マージの回収が heartbeat 失効 (最大90分) まで遅れる。
+    if (clearSession) {
+      next = { ...next, session: null };
     }
     return withReplacedItem(state, index, next);
   });
@@ -1374,8 +1392,20 @@ async function cmdWatchSet(
       throw new CliError("usage", `invalid --state: ${stateVal}`);
     }
   }
+  const hasSession = flags.has("session");
+  const sessionVal = hasSession
+    ? nullableFlag(flags.get("session")!)
+    : undefined;
+  if (
+    hasSession && sessionVal !== null && hasState && stateVal === "stopped"
+  ) {
+    throw new CliError(
+      "usage",
+      "--session <non-null> cannot be combined with --state stopped (which already nulls session)",
+    );
+  }
   const anyGiven = hasProc || hasSig || hasHead || hasCi || hasCheckedAt ||
-    errorsInc || errorsReset || hasNote || hasState;
+    errorsInc || errorsReset || hasNote || hasState || hasSession;
   if (!anyGiven) {
     throw new CliError("usage", "watch-set requires at least one field flag");
   }
@@ -1406,6 +1436,9 @@ async function cmdWatchSet(
     };
     if (hasState && stateVal === "stopped") {
       next = { ...next, session: null };
+    }
+    if (hasSession) {
+      next = { ...next, session: sessionVal };
     }
     return withReplacedItem(state, index, next);
   });

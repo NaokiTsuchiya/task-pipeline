@@ -20,6 +20,8 @@ SKILL.md を持つ skill ディレクトリがすべて `~/.claude/skills/` へ�
 
 `agents/` を入れなくても skill は動く (task-pipeline の検証ゲートは general-purpose にフォールバックする) が、`agents/task-pipeline-verifier.md` は検証ゲートの tools を読み取り + テスト実行に必要な最小限に絞る (verifier は target project を変更しない、という行動境界の機械的な裏付け) ので、入れておくのが既定である。
 
+**task-pipeline の実行には `deno` が前提。** `.task-pipeline/state.json` への読み書き (排他・原子的書き込み・heartbeat を含む) は `task-pipeline/scripts/state.ts` という Deno/TypeScript 製 CLI が担う。未導入の環境で task-pipeline を動かすと、CLI の呼び出しコマンド自体がシェルレベルで `deno: command not found` のように失敗する (`deno` 不在は `tests/state-cli.test.sh` 等のテストでは SKIP として扱われるだけで失敗にはならないが、実運用では必須)。
+
 ## task-pipeline の使い方
 
 作業対象プロジェクトで:
@@ -48,6 +50,7 @@ SKILL.md を持つ skill ディレクトリがすべて `~/.claude/skills/` へ�
 - ループが止まるのは**トラッカーの候補が尽きたとき**だけで、そこで実績の最終報告を出す。1 件終わっただけでは止まらない。追従中の PR が残っているときは、そのまま追従だけを続ける。
 - **レビュー待ちに入ったときと blocked にしたときは `PushNotification` が 1 本飛ぶ** (どちらもそのタスクにつき 1 回だけ)。レビュー待ちはパイプラインが人を待ち始める唯一の地点で、blocked は人が来るまで何も起きない状態だから。通知ツールが無い環境では飛ばないだけで、処理は止まらない。
 - 状態は**メイン worktree のルート**の `.task-pipeline/` に置かれる (`state.json`、タスク本文、フェーズ成果物、検証判定)。基準は起動時のカレントディレクトリではなくメイン worktree なので、あなたが別の worktree から `/loop` を回しても state は 1 箇所に集約され、その worktree を消しても失われない。タスク用の worktree も同じくメイン worktree の下に作られる。`.task-pipeline/` は初回作成時に `.git/info/exclude` へ登録される (追跡下の `.gitignore` は変更しない)。
+- **`state.json` への書き込みは `task-pipeline/scripts/state.ts` (Deno 製 CLI) 経由で行われる。** 排他制御・原子的な書き込み・heartbeat・前提チェックは CLI が内側で担い、オーケストレーター (skill 本体) はどの verb をどの引数で呼ぶかを判断するだけになっている。verb の一覧と契約は `task-pipeline/docs/state-cli-contract.md`、各不変条件の設計根拠 (なぜ排他が要るか等) は `task-pipeline/docs/state-machine.md` を参照。
 
 ### PR の追従 (`finish=pr`)
 
