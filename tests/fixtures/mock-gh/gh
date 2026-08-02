@@ -1,0 +1,92 @@
+#!/bin/sh
+# tests/fixtures/mock-gh/gh — 実 gh の代わりに PATH の先頭に置くモック。
+# ネットワーク・認証には一切依存しない。
+#
+#   env:
+#     GH_MOCK_RESPONSES  (必須) — フィクスチャディレクトリ。呼び出しごとに連番ファイル
+#                          (1, 2, 3, ...) を順に読む。カウンタは
+#                          "$GH_MOCK_RESPONSES/.call_count" に持つ (呼び出しごとに
+#                          別プロセスで起動されるため、状態はファイルに置くしかない)。
+#
+#   フィクスチャファイルの中身:
+#     - 文字列 "FAIL" そのもの → この呼び出しを失敗として模す (標準出力なし・exit 1)。
+#     - それ以外 → GraphQL レスポンス JSON とみなし、--jq に渡されたフィルタを実 jq で
+#       適用して標準出力へ書く。
+#
+#   連番を使い切ったら (呼び出し回数がフィクスチャ数を超えたら) 最後の既存ファイルを
+#   繰り返す (安全弁)。
+#
+# 対応する呼び出し形は `gh api graphql -f ... -F ... --jq <filter>` だけ
+# (現状 watch-pr.sh がこの形でしか呼ばないため)。それ以外はエラーで終わる。
+set -u
+
+if [ "${1:-}" != "api" ] || [ "${2:-}" != "graphql" ]; then
+    printf 'mock gh: unsupported invocation: %s\n' "$*" >&2
+    exit 1
+fi
+shift 2
+
+jq_filter=
+while [ $# -gt 0 ]; do
+    case $1 in
+        --jq)
+            jq_filter=${2:-}
+            shift 2
+            ;;
+        --jq=*)
+            jq_filter=${1#--jq=}
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [ -z "${GH_MOCK_RESPONSES:-}" ]; then
+    printf 'mock gh: GH_MOCK_RESPONSES must point to a fixture directory\n' >&2
+    exit 1
+fi
+
+state_file=$GH_MOCK_RESPONSES/.call_count
+prev=0
+[ -f "$state_file" ] && prev=$(cat "$state_file")
+n=$((prev + 1))
+printf '%s' "$n" > "$state_file"
+
+resp_file=$GH_MOCK_RESPONSES/$n
+if [ ! -f "$resp_file" ]; then
+    # 連番を使い切った場合は最後の既存フィクスチャ (ファイル名が数字のみのもの) を繰り返す
+    last=
+    for cand in "$GH_MOCK_RESPONSES"/*; do
+        [ -f "$cand" ] || continue
+        cand_name=$(basename -- "$cand")
+        case $cand_name in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ -z "$last" ] || [ "$cand_name" -gt "$last" ]; then
+            last=$cand_name
+        fi
+    done
+    if [ -n "$last" ]; then
+        resp_file=$GH_MOCK_RESPONSES/$last
+    fi
+fi
+
+if [ ! -f "$resp_file" ]; then
+    printf 'mock gh: no fixture for call %s in %s\n' "$n" "$GH_MOCK_RESPONSES" >&2
+    exit 1
+fi
+
+content=$(cat "$resp_file")
+if [ "$content" = FAIL ]; then
+    exit 1
+fi
+
+if [ -n "$jq_filter" ]; then
+    # gh api --jq は結果が文字列なら raw (無クォート) で出す (jq -r 相当) ので、
+    # ここでも -r を使って実 gh の出力形に揃える。
+    printf '%s' "$content" | jq -r "$jq_filter"
+else
+    printf '%s' "$content"
+fi
