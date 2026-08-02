@@ -6,9 +6,9 @@
 
 | skill | 内容 |
 |---|---|
-| [task-pipeline](task-pipeline/SKILL.md) | issue トラッカーの承認済みタスクを `/loop` で自動消化するパイプライン |
-| [task-prep](task-prep/SKILL.md) | 要望を task-pipeline が消化できる issue 群に変える準備 skill (分解・深掘り・依存整理) |
-| [task-scout](task-scout/SKILL.md) | コードベースの実査から「まだ issue になっていないやるべきこと」を根拠付き候補として出す偵察 skill |
+| [task-pipeline](task-pipeline/SKILL.md) | 承認済みタスクの自動消化パイプライン。 |
+| [task-prep](task-prep/SKILL.md) | 要望を task-pipeline が消化できる issue 群に変える準備 skill。 |
+| [task-scout](task-scout/SKILL.md) | ready の在庫が尽き、トラッカー上の open issue にも次の手がかりが無いときに、コードベースの実査から「まだ issue になっていないやるべきこと」を根拠付きの候補として出す偵察 skill。 |
 
 ## インストール
 
