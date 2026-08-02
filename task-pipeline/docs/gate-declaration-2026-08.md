@@ -104,7 +104,126 @@ history に残るのは `gate=full (no light marker)` の一行だけで、こ�
   実行は壊れないが、静かに light を失う点は本文マーカーと同じ性質である。
 - **markdown アダプタは依然として転記経路にマーカーがある。** ラベルに相当する構造が無いため。
   ただしこちらはファイルを直接読むので、今回の HTML エスケープ経路は通らない。
-- **本文取得に `gh` CLI を使うことの副作用。** この環境の `gh` は 1Password のシェルプラグイン認証に
-  依存し、未認可だと非対話実行がハングしうる (task-prep はこの理由で `gh` CLI を禁じ、MCP に一本化している)。
-  無人ループの中で本文取得が固まると、そのタスクは着手時点で止まる。MCP 側でエスケープを避けて読む口
-  (REST の raw body 等) があるならそちらへ寄せたい — **未調査**。
+- ~~**本文取得に `gh` CLI を使うことの副作用。**~~ **消し込み済み (2026-08-02)。§5 を見よ。**
+  MCP 側にエスケープを避けて読む口 (`search_issues` の `body`) が**あった**ので、両アダプタの一次経路を
+  そちらへ寄せた。`gh` CLI は task-pipeline 側の予備として残り、時間上限と実体バイナリ回避を付けた。
+
+## 5. 本文取得経路の調査 (2026-08-02)
+
+§4 の最後の宿題 (「MCP 側でエスケープを避けて読む口があるならそちらへ寄せたい — 未調査」) の消し込み。
+`NaokiTsuchiya/RayDiContext` の実 issue を 4 経路で実際に取得して比較した。**すべて読み取りのみ**
+(このリポジトリは読み取り専用の証拠置き場として扱っている。`cost-analysis-2026-07.md` の方針)。
+
+### 試した経路と返り値の実例
+
+**(a) `issue_read (method: "get")` — issue #79**
+
+```
+`mago.toml` の `paths = [&#34;src&#34;, &#34;tests&#34;]` / `excludes = [&#34;tests/tmp&#34;, &#34;tests/Fixture&#34;]` により …
+```
+
+`"` → `&#34;`、`'` → `&#39;`、`>` → `&gt;`。本文末尾の `<!-- task-pipeline:gate=light -->` は**応答に含まれない**
+(body は `…実装時に追記すること。\n\n` で終わる)。§2 の再現と同じ。
+
+**(b) `list_issues(fields: ["number","body"])` — issue #86**
+
+```
+$this-&gt;baseDir = __DIR__ . &#39;/tmp/&#39; . uniqid(&#39;guard_&#39;, more_entropy: true);
+$appDir = &#34;{$this-&gt;baseDir}/app&#34;;
+```
+
+**(a) と同じ欠落**。末尾の `<!-- task-pipeline:gate=light -->` も含まれない。`list_issues` は代替にならない。
+
+**(c) `search_issues(fields: [… "body"])` — issue #79 / #80 / #84 / #85 / #86**
+
+```
+`mago.toml` の `paths = ["src", "tests"]` / `excludes = ["tests/tmp", "tests/Fixture"]` により …
+```
+
+同じ #86 の該当箇所:
+
+```
+$this->baseDir = __DIR__ . '/tmp/' . uniqid('guard_', more_entropy: true);
+$appDir = "{$this->baseDir}/app";
+```
+
+`<` `>` `'` `"` すべて**原文のまま**。そして **5 件すべてで末尾の `<!-- task-pipeline:gate=light -->` が
+`body` に含まれていた**。これが探していた raw 経路である。
+
+**(d) `gh issue view 79 --repo NaokiTsuchiya/RayDiContext --json body --jq .body`** (それまでの例外経路)
+
+```
+$ grep -n 'task-pipeline:gate' gh79.txt
+42:<!-- task-pipeline:gate=light -->
+$ grep -n 'paths = ' gh79.txt
+38:`mago.toml` の `paths = ["src", "tests"]` / `excludes = ["tests/tmp", "tests/Fixture"]` により …
+$ wc -c gh79.txt
+    3338
+```
+
+原文どおり。
+
+| 経路 | `"` `'` `>` | `<!-- ... -->` 行 | 判定 |
+|---|---|---|---|
+| `issue_read (get)` | `&#34;` `&#39;` `&gt;` | **落ちる** | 使えない |
+| `list_issues (fields: body)` | `&#34;` `&#39;` `&gt;` | **落ちる** | 使えない |
+| **`search_issues (fields: body)`** | **原文** | **残る** | **採用 (一次)** |
+| `gh issue view --json body` | 原文 | 残る | 予備 (二次) |
+
+推測 (実測ではない): エスケープするのは GraphQL backed のツール (`list_issues` はカーソル `pageInfo` を、
+`issue_read get` は「best-effort hierarchy flags」を返す)、raw なのは REST backed のツール
+(`search_issues` は `incomplete_results` / `total_count`、`get_comments` は `id` / `html_url` /
+`author_association` を返す) という区分。**`get_comments` が REST 形なのでコメント本文も無傷である可能性が
+高いが、山括弧を含むコメントを持つ issue が手元に無く実測できていない。**
+
+### issue 番号 1 件を `search_issues` で狙う方法
+
+GitHub の issue 検索構文に issue 番号の修飾子は無い (`… is:issue 80 in:body,title` は「本文に 80 を含む issue」
+= #84 を返し、#80 は返らない。実測)。代わりに**作成時刻で 1 件に絞れる**:
+
+```
+search_issues(owner, repo, query: "is:issue created:<created_at>..<created_at>",
+              fields: ["number", "body", "updated_at"], perPage: 5)
+→ {"total_count": 1, "items": [{"number": 79, "updated_at": "2026-08-01T11:02:49Z", "body": "…"}]}
+```
+
+`created_at` は `issue_read (get)` が既に返しているので追加の呼び出しは要らない (gh アダプタの `mark` 手順 2、
+task-prep の深掘り入力のどちらも先に `issue_read (get)` を呼んでいる)。同じ秒に作られた issue が複数あっても
+`number` で絞れば一意に決まる。
+
+### 鮮度 (検索インデックス遅延) の照合
+
+`search_issues` は検索インデックス越しなので、直前の編集が反映されていないことがある。とくに task-prep の
+read-modify-write では、古い本文を書き戻すと**編集を巻き戻す** — エスケープより悪い。照合は実測で成立する:
+
+- issue #79 を `issue_read (get)` → `"updated_at":"2026-08-01T11:02:49Z"`
+- 同 issue を `search_issues(fields:["number","updated_at",…])` → `"updated_at":"2026-08-01T11:02:49Z"`
+
+一致すれば「検索が見ている版 = API が見ている版」なので raw 本文を採用してよい。食い違う / 0 件で返る
+(未インデックス) なら採用しない。**インデックスが遅れている状態そのものは実測していない** — 再現するには
+外部リポジトリの issue を編集する必要があり、読み取り専用の方針に反するため。
+
+### `gh` CLI を残す側のハング防御 (実測)
+
+```
+$ command -v timeout gtimeout          → 出力なし (exit 1)。この環境には両方とも無い
+$ perl -e 'alarm shift; exec @ARGV' 2 tail -f /dev/null; echo "exit=$?"
+exit=142                                ← 128+14 (SIGALRM)。2 秒で確実に打ち切られる
+$ which -a gh | grep '^/' | head -1
+/opt/homebrew/bin/gh
+$ perl -e 'alarm shift; exec @ARGV' 30 "$GH" issue view 79 --repo NaokiTsuchiya/RayDiContext --json body --jq .body
+→ exit 0 / 3338 bytes / marker 1 件
+```
+
+`timeout` / `gtimeout` が無いので `perl` の `alarm` + `exec` を使う。打ち切りは終了コード **142** で観測でき、
+通常の失敗と区別できる。`perl` は macOS に標準で入っている。
+
+### 採用結果
+
+- `references/adapters/gh.md` の「タスク本文の書き出し」を **3 段**にした: 一次 = `search_issues` の raw
+  (+ `updated_at` 照合)、二次 = `gh` CLI (実体バイナリ回避 + `alarm` 30 秒、**142 は「`gh` が使えない」と
+  同一視して三次へ**)、三次 = エスケープ本文 + タスクファイル冒頭に警告 1 行。`mark` 手順 2 で
+  `created_at` / `updated_at` を覚える指示も足した。
+- `task-prep/references/trackers/gh.md` の深掘り入力を、`issue_read` の `body` を基礎にしない形に変えた。
+  raw が取れないときは**書き戻しの前に人を 1 回挟む** (更新案 + issue URL + 原文突き合わせ依頼)。
+  task-prep の `gh` CLI 禁止はそのまま — MCP だけで完結する。
