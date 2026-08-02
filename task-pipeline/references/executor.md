@@ -6,15 +6,17 @@ You are operating autonomously. The user is not watching and cannot answer quest
 
 ## 停止・再開プロトコル
 
-- フェーズを 1 つ終えるごとに、成果物を run dir に書き、最終メッセージを次のどちらか **1 行だけ** にして停止する:
+- フェーズを 1 つ終えるごとに、成果物を run dir に書き、最終メッセージを次のどれか **1 行だけ** にして停止する:
   - `PHASE <name> DONE — <成果物の絶対パス>`
   - `BLOCKED: <理由>` (ユーザーにしか出せない入力が要る、破壊的操作が必要、タスク記述が根本的に成立しない、のいずれかのときだけ)
-- 届くメッセージは 5 種類で、扱いは次のとおり:
+  - `REBASE-CONFLICT — <控えた衝突ファイルの絶対パス>` (載せ直しの衝突を解消できなかったときだけ。下記 finalize と rebase_fix)
+- 届くメッセージは 6 種類で、扱いは次のとおり:
   1. `<phase> verified PASS. Proceed to phase <next>.` → そのフェーズへ進む。既にそのフェーズ以降にいる場合は、新しい作業をせず現在の状態のプロトコル行を再送して停止する。
   2. 修正指示 (required_fixes) → 同じフェーズの成果物と (implement / pr_fix なら) 実装を修正し、同じ形式で停止する。
-  3. `<phase> verified PASS. Finalize the task (finish mode: <mode>, base: <branch>).` (`base:` は無いこともある) → 下記「タスク完了処理 (finalize)」を行い、`FINALIZED — <commit hash または PR URL>` の 1 行で停止する。
+  3. `<phase> verified PASS. Finalize the task (finish mode: <mode>, base: <branch>).` (`base:` は無いこともある。`rebase: off` が付くことがある) → 下記「タスク完了処理 (finalize)」を行い、`FINALIZED — <commit hash または PR URL>` の 1 行で停止する。
   4. `PR feedback. Address the findings in <path> as phase "pr_fix".` → 下記「PR フィードバック対応 (pr_fix)」へ進む。
-  5. それ以外 (status check・再開指示など) → 新しい作業を始めず、現在フェーズが未完なら完了させ、プロトコル行で停止する。
+  5. `Rebase conflict. Rebase the branch onto origin/<base> and resolve the conflicts as phase "rebase_fix". conflict capture: <path> / triage: <path>.` → 下記「コンフリクトの解消 (rebase_fix)」へ進む。
+  6. それ以外 (status check・再開指示など) → 新しい作業を始めず、現在フェーズが未完なら完了させ、プロトコル行で停止する。
 - **どのメッセージを受けても、明示的な verified-PASS 指示なしに次のフェーズへ進んではならない。**
 
 ## 進め方
@@ -90,13 +92,44 @@ Before writing the report, audit each claim against an actual tool result from y
 5. `<run dir>/pr-fix-<findings と同じ連番>.md` に書く: findings の各項目 (id / チェック名) ごとの対応内容と根拠、変更ファイル一覧、実行したコマンドと実出力、対応しなかった項目とその理由。対応で挙動を変えたときに足したテストは、ここへの記載をもって plan 記載と同等に扱う (plan.md は書き換えない)。
 6. `PHASE pr_fix DONE — <成果物の絶対パス>` で停止する。**この時点ではコミットも push もしない** (検証 PASS 後の finalize でまとめて行う)。
 
+## コンフリクトの解消 (rebase_fix)
+
+基点が動いてコンフリクトした PR を、新しい基点へ載せ直すフェーズ。衝突の控えとトリアージレポートのパスを渡されて始まる。`<n>` は同じタスクで何回目かの連番 (run dir の既存 `rebase-fix-*.md` から決める)。
+
+**このフェーズの危険は、解消したつもりで相手側の変更を捨てることである。** 差分の上では「解決済み」に見えるので、捨てたことは誰にも見えない。
+
+1. 渡されたトリアージレポートと控えを読み、`git -C <target project> fetch origin` してから `git rebase origin/<base>` を始める。
+2. 衝突を 1 つずつ解消する。**`-X ours` / `-X theirs` / `--ours` / `--theirs` のような一括採用はしない** — 片側を丸ごと捨てる操作であり、捨てた事実が成果物にも差分にも残らない。相手側が何を変えたのかを `git log <旧基点>..origin/<base>` と `git show` で確かめ、**両側の意図を残す**形で書く。
+3. **判断のつかない衝突が 1 つでもあれば、そこで止める**: `git rebase --abort` して、どのファイルのどこがなぜ判断できないかを `<run dir>/rebase-fix-<n>.md` に書き、`REBASE-CONFLICT — <そのファイルの絶対パス>` で停止する。無理に解いたものを検証ゲートに投げない (通ってしまう形に整えることは、ここでは容易である)。
+4. 解消し終えたら `git rebase --continue` で最後まで進め、**plan の検証手順と、過去の pr-fix-`<m>`.md に記載したテストを通しで実行する。** 新しい基点の上で通ることを確かめる — 通らないなら解消はまだ終わっていない (相手側の変更に合わせて自分の変更を直すのはこのフェーズの範囲内で、必要ならコミットを 1 つ足してよい)。
+5. `<run dir>/rebase-fix-<n>.md` に書く: 衝突したファイルごとに**どちらの意図をどう残したか**、相手側の変更の要約、実行した検証コマンドと実出力、旧 tip と新しい tip の sha。
+6. `PHASE rebase_fix DONE — <成果物の絶対パス>` で停止する。**push はしない** (検証 PASS 後の finalize で行う)。
+
 ## タスク完了処理 (finalize)
 
 report または pr_fix の検証 PASS 後、finalize 指示を受けたときだけ行う (finish mode が `none` なら指示は来ない)。再開指示で finalize から始める場合も同じ手順。
 
 - ステージするのは直前フェーズの成果物 (implementation.md / pr-fix-<n>.md) の変更ファイル一覧にあるファイル **だけ**。`.task-pipeline/` とトラッカーのソースファイルは、タスク本文が求めない限りコミットに含めない。
+- **直前フェーズが `rebase_fix` のときは、新しいコミットを作らない** (解消は載せ直したコミットに畳み込まれていて、working tree は clean である)。この場合は下の載せ直し確認も飛ばして (既に `origin/<base>` の上に居る)、push から始める:
+  - リモートに同名ブランチがある → `git push --force-with-lease=<現在のブランチ>:<rebase-fix-<n>.md に控えた旧 tip> origin <現在のブランチ>` の後、`gh pr comment <PR URL> --body <載せ直しの要約>` を 1 回投稿する (本文末尾に `<!-- task-pipeline:pr-fix -->`。要約は「`origin/<base>` に載せ直した」と、衝突したファイルごとの解消方針)。**force push は PR の履歴を黙って書き換えるので、このコメントを省かない** — レビュアーは自分が読んだ差分が消えたことに気づけない。
+  - 無い → 通常どおり `git push -u origin <現在のブランチ>` → `gh pr create`。
+- 同じく、finalize を再開したときに直前フェーズの変更が**既にコミット済み**なら、コミットを作り直さずに push へ進む。
 - `commit`: 現在のブランチ (worktree なら `task-pipeline/<task id>`) に 1 コミット。メッセージはタスクタイトル、本文に run dir の report.md への参照、末尾に `Co-Authored-By: Claude <noreply@anthropic.com>`。
 - `pr`: 同様にコミットしてから `git push -u origin <現在のブランチ>` → `gh pr create` (title = タスクタイトル、body = report.md の要約と証拠パス、末尾に `🤖 Generated with [Claude Code](https://claude.com/claude-code)`)。**ブランチの切り替えも作成もしない** — 既に正しいブランチに居る。`gh pr create` には、finalize 指示に `base:` が付いていれば `--base <その値>` を付ける。無ければリモートの既定ブランチのままでよい — 分岐元を自分で推測しない。
+- **`pr` では、push の直前に基点が最新かを確かめる。** finalize 指示に `base:` が付いているときだけ行い、無ければ何もしない (分岐元を推測しない)。`rebase: off` が付いていたらこの手順ごと飛ばす。コミットを作った**後**、push の前に:
+  1. `git -C <target project> fetch origin`
+  2. `git merge-base --is-ancestor origin/<base> HEAD` が真 → 既に最新なので、通常どおり push する。
+  3. 偽なら、リモートに同名ブランチがあるかで分かれる (`git rev-parse --verify -q origin/<現在のブランチ>`):
+     - **無い** (初回 push) → `git rebase origin/<base>` してから通常どおり `git push -u origin <現在のブランチ>`。
+     - **有り、かつ `git merge-base --is-ancestor origin/<現在のブランチ> HEAD` が真** (リモート側は自分の履歴の一部 = pr_fix の押し直し) → 旧 tip (`git rev-parse origin/<現在のブランチ>`) を控えてから `git rebase origin/<base>`。push は `git push --force-with-lease=<現在のブランチ>:<控えた旧 tip> origin <現在のブランチ>` にする (引数無しの `--force-with-lease` は直前の `fetch` で保護が無効になっている)。
+     - **有り、かつ偽** (リモートに自分の持っていないコミットがある = 誰かが直接押した) → **載せ直さない。** 通常どおり push し、撥ねられたらその出力を理由に `BLOCKED` で停止する。**他人の作業を履歴の書き換えで消してはならない。**
+  4. 載せ直せたら、**plan の検証手順 (pr_fix なら pr-fix-`<n>`.md に記載したテストも) を 1 回だけ回し直す。** 検証ゲートが PASS を出したのは載せ直す前の木であり、基点が動けば結果は変わりうる。落ちたら `git reset --hard <載せ直す前の HEAD>` で載せ直しを取り消し、**古い基点のまま push して**、落ちたコマンドと実出力を成果物と PR 本文 (pr_fix なら `gh pr comment`) に書く — 「新しい `<base>` の上ではこれが落ちる」はレビュアーが最初に知るべき情報である。**push しない選択はしない** (完成した作業を人に届けることを優先する)。
+  5. **コンフリクトしたら、ここでは解消しない。** 次の順で控えを取ってから戻し、停止する:
+     - `git -C <target project> diff --diff-filter=U` の出力を `<run dir>/rebase/conflict-<UTC 時刻>.diff` に、`git diff --name-only --diff-filter=U` の一覧・旧 tip・`origin/<base>` の sha を同じディレクトリの `.md` に書く (**abort すると失われるので必ず先に控える**)
+     - `git -C <target project> rebase --abort`
+     - `REBASE-CONFLICT — <控えた .diff の絶対パス>` の 1 行で停止する
+
+     オーケストレーターがトリアージしたうえで、解消を `rebase_fix` フェーズとして指示し直すか、`rebase: off` 付きの finalize を送り直してくる (古い基点のまま push する)。**ここで push を強行しないのは、解消できる衝突なら解消したものを出したいからで、`BLOCKED` にしないのは、出来上がった作業が握り潰されないためである。**
 - `pr` で **このブランチに既に PR がある場合** (pr_fix 後の finalize) は、`gh pr create` を呼ばない。直前フェーズの変更ファイル一覧が空なら (全指摘に「対応しない (理由付き)」で応えた場合に起こる)、commit / push は行わず下記の `gh pr comment` の投稿だけをして、既存の PR URL で `FINALIZED` する。変更があるときのコミットメッセージは `PR フィードバック対応: <対応内容の要約>` とし、push した後に `gh pr comment <PR URL> --body <対応の要約>` を 1 回だけ投稿する (指摘ごとに対応 / 非対応と理由を数行。レビュアーが再確認する起点になる)。**本文の末尾に `<!-- task-pipeline:pr-fix -->` を必ず入れる** — 次の追従がこのコメントを自分の投稿だと見分けて、指摘と取り違えないための目印である。返す URL は既存の PR URL。
 - `gh` が認証まわりで即失敗する (`interactive IO not available` 等) ときは、**まずエイリアスを疑う**。`gh` がパスワードマネージャのプラグイン等にエイリアスされていると、非対話セッションでは承認プロンプトを出せずに失敗する一方、実体のバイナリは認証済みで動くことがある。`which -a gh | grep '^/' | head -1` で実体のパスを取り、それで 1 回やり直してから諦めること。
 - 成功したら `FINALIZED — <commit hash または PR URL>` で停止する。commit / push / PR 作成が失敗したら、実際の出力を理由に含めて `BLOCKED: <理由>` で停止する。
