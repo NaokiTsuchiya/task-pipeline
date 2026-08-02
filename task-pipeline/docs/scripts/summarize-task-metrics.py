@@ -51,6 +51,24 @@ def main():
     bucket(lambda r: r.get('repo') or '?', "repo 別")
     bucket(lambda r: r.get('finish_mode') or '?', "finish_mode 別")
 
+    def breakdown(keyfn, title):
+        g = defaultdict(list)
+        for r in rows:
+            if r['outcome'] == 'finalized' and r.get('elapsed_seconds') is not None:
+                g[keyfn(r)].append(r)
+        print(f"=== {title}: PR作成までの内訳 (executor実作業 / verifier検証 / オーケストレーター折り返し) ===")
+        for k, rs in sorted(g.items(), key=lambda x: str(x[0])):
+            n = len(rs)
+            avg = lambda field: sum(r[field] for r in rs) / n / 60
+            tot = sum(r['elapsed_seconds'] for r in rs) / n / 60
+            print(f"  {str(k):20s} n={n:3d}  total={tot:5.1f}m  "
+                  f"exec={avg('executor_seconds'):5.1f}m  verify={avg('verifier_seconds'):5.1f}m  "
+                  f"overhead={avg('orchestrator_overhead_seconds'):5.1f}m")
+        print()
+
+    breakdown(lambda r: r.get('repo') or '?', "repo 別")
+    breakdown(model_key, "model 別")
+
 
 if __name__ == '__main__':
     main()
