@@ -1,8 +1,8 @@
 # バックログ
 
+- [ ] verifier-fixes-at-once
 - [ ] readme-list-sync
 - [ ] test-harness-foundation
-- [ ] verifier-fixes-at-once
 - [ ] state-cli-foundation
 
 ## In Review
