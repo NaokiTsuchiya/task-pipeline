@@ -1,0 +1,30 @@
+{
+  "tracker": "markdown",
+  "source": "./TASKS.md",
+  "updated_at": "2026-07-16T09:12:00Z",
+  "stalled": null,
+  "stalled_since": null,
+  "queue": [
+    {
+      "id": "t-1a2b3c4d",
+      "title": "タスクのタイトル",
+      "status": "approved",
+      "gate": "full",
+      "phase": null,
+      "attempts": 0,
+      "session": null,
+      "executor": null,
+      "executor_last_event_at": null,
+      "takeover_at": null,
+      "blocked_reason": null,
+      "worktree": null,
+      "base": null,
+      "review": null
+    }
+  ],
+  "candidates": [{ "id": "t-9z8y", "title": "未承認タスク", "priority": "high", "updated_at": "2026-07-16T09:00:00Z", "reason": "順位の理由" }],
+  "relisted": [{ "id": "t-1a2b3c4d", "seen_at": "2026-07-16T09:10:00Z" }],
+  "promoted": ["gh-88"],
+  "withdrawn_branches": [{ "id": "t-1a2b3c4d", "branch": "task-pipeline/t-1a2b3c4d", "base": "main", "worktree": "/abs/path/.claude/worktrees/task-pipeline/t-1a2b3c4d", "at": "2026-07-16T09:12:00Z", "reason": "PR 取り下げ後にユーザーが queue から外した" }],
+  "history": ["2026-07-16T09:12Z done t-1a2b3c4d (.task-pipeline/runs/t-1a2b3c4d/report.md)"]
+}

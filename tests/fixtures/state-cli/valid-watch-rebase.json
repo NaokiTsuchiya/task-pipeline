@@ -1,0 +1,68 @@
+{
+  "tracker": "markdown",
+  "source": "./TASKS.md",
+  "updated_at": "2026-08-02T09:00:00Z",
+  "stalled": "depleted",
+  "stalled_since": "2026-08-02T08:00:00Z",
+  "schema_version": 1,
+  "queue": [
+    {
+      "id": "t-full",
+      "title": "フル装備のタスク",
+      "status": "in_review",
+      "gate": "light",
+      "phase": null,
+      "attempts": 2,
+      "session": "sess-abc",
+      "executor": "agent-xyz",
+      "executor_last_event_at": "2026-08-02T08:55:00Z",
+      "takeover_at": null,
+      "blocked_reason": null,
+      "worktree": "/abs/path/.claude/worktrees/task-pipeline/t-full",
+      "base": "main",
+      "review": {
+        "ref": "https://github.com/example/repo/pull/42",
+        "branch": "task-pipeline/t-full",
+        "tip": "abc123def456",
+        "base": "main",
+        "watch": {
+          "state": "watching",
+          "proc": "bg-1",
+          "proc_started_at": "2026-08-02T08:00:00Z",
+          "sig": "sig-1",
+          "head": "abc123def456",
+          "ci": "pending",
+          "handled": ["c1", "c2"],
+          "fix_pending": false,
+          "pending_ids": [],
+          "findings": null,
+          "fix_attempts": 1,
+          "errors": 0,
+          "checked_at": "2026-08-02T08:59:00Z",
+          "note": null
+        },
+        "rebase": {
+          "blocked_onto": "def456abc789",
+          "reason": "conflict",
+          "at": "2026-08-02T08:30:00Z",
+          "kind": "overlap",
+          "cause": "同じファイルへの重複変更",
+          "report": "/abs/path/.task-pipeline/runs/t-full/rebase/report.md",
+          "resolve_pending": true,
+          "from_tip": "old-tip-sha"
+        },
+        "withdrawn": false,
+        "withdrawn_asked": false
+      }
+    }
+  ],
+  "candidates": [
+    { "id": "t-cand", "title": "候補タスク", "priority": "high", "updated_at": "2026-08-02T07:00:00Z", "reason": "優先度が高い" }
+  ],
+  "relisted": [{ "id": "t-relisted", "seen_at": "2026-08-02T06:00:00Z" }],
+  "promoted": ["t-promoted-1", "t-promoted-2"],
+  "withdrawn_branches": [
+    { "id": "t-withdrawn", "branch": "task-pipeline/t-withdrawn", "base": "main", "worktree": "/abs/path/.claude/worktrees/task-pipeline/t-withdrawn", "at": "2026-08-02T05:00:00Z", "reason": "PR 取り下げ後にユーザーが queue から外した" }
+  ],
+  "history": ["2026-08-02T09:00Z in_review t-full (PR #42)"]
+}

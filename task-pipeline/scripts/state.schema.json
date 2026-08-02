@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "queueItem": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "status": { "type": "string", "enum": ["approved", "in_progress", "in_review", "done", "blocked"] },
+        "gate": { "type": "string", "enum": ["full", "light"] },
+        "phase": { "type": ["string", "null"], "enum": [null, "research", "research+plan", "plan", "implement", "report", "finalize", "pr_fix", "rebase_fix"] },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "session": { "type": ["string", "null"] },
+        "executor": { "type": ["string", "null"] },
+        "executor_last_event_at": { "type": ["string", "null"] },
+        "takeover_at": { "type": ["string", "null"] },
+        "blocked_reason": { "type": ["string", "null"] },
+        "worktree": { "type": ["string", "null"] },
+        "base": { "type": ["string", "null"] },
+        "review": { "$ref": "#/$defs/review" }
+      },
+      "required": ["id", "title", "status", "gate", "phase", "attempts", "session", "executor", "executor_last_event_at", "takeover_at", "blocked_reason", "worktree", "base", "review"],
+      "additionalProperties": false
+    },
+    "review": {
+      "type": ["object", "null"],
+      "properties": {
+        "ref": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "tip": { "type": ["string", "null"] },
+        "base": { "type": ["string", "null"] },
+        "watch": { "$ref": "#/$defs/reviewWatch" },
+        "rebase": { "$ref": "#/$defs/reviewRebase" },
+        "withdrawn": { "type": "boolean" },
+        "withdrawn_asked": { "type": "boolean" }
+      },
+      "required": ["ref"],
+      "additionalProperties": false
+    },
+    "reviewWatch": {
+      "type": "object",
+      "properties": {
+        "state": { "type": "string", "enum": ["watching", "stopped"] },
+        "proc": { "type": ["string", "null"] },
+        "proc_started_at": { "type": ["string", "null"] },
+        "sig": { "type": ["string", "null"] },
+        "head": { "type": ["string", "null"] },
+        "ci": { "type": ["string", "null"], "enum": [null, "passing", "failing", "pending", "none"] },
+        "handled": { "type": "array", "items": { "type": "string" } },
+        "fix_pending": { "type": "boolean" },
+        "pending_ids": { "type": "array", "items": { "type": "string" } },
+        "findings": { "type": ["string", "null"] },
+        "fix_attempts": { "type": "integer", "minimum": 0 },
+        "errors": { "type": "integer", "minimum": 0 },
+        "checked_at": { "type": ["string", "null"] },
+        "note": { "type": ["string", "null"] }
+      },
+      "required": ["state", "proc", "proc_started_at", "sig", "head", "ci", "handled", "fix_pending", "pending_ids", "findings", "fix_attempts", "errors", "checked_at", "note"],
+      "additionalProperties": false
+    },
+    "reviewRebase": {
+      "type": "object",
+      "properties": {
+        "blocked_onto": { "type": "string" },
+        "reason": { "type": "string", "enum": ["dirty", "diverged", "conflict", "push"] },
+        "at": { "type": "string" },
+        "kind": { "type": "string", "enum": ["superseded", "overlap", "adjacent", "structural", "other"] },
+        "cause": { "type": "string" },
+        "report": { "type": "string" },
+        "resolve_pending": { "type": "boolean" },
+        "from_tip": { "type": "string" }
+      },
+      "required": ["blocked_onto", "reason", "at"],
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "tracker": { "type": "string" },
+    "source": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "stalled": { "type": ["string", "null"], "enum": [null, "depleted", "max_open"] },
+    "stalled_since": { "type": ["string", "null"] },
+    "queue": { "type": "array", "items": { "$ref": "#/$defs/queueItem" } },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "priority": { "type": "string" },
+          "updated_at": { "type": "string" },
+          "reason": { "type": "string" }
+        },
+        "required": ["id", "title"],
+        "additionalProperties": false
+      }
+    },
+    "relisted": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "seen_at": { "type": "string" }
+        },
+        "required": ["id", "seen_at"],
+        "additionalProperties": false
+      }
+    },
+    "promoted": { "type": "array", "items": { "type": "string" } },
+    "withdrawn_branches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "branch": { "type": "string" },
+          "base": { "type": "string" },
+          "worktree": { "type": "string" },
+          "at": { "type": "string" },
+          "reason": { "type": "string" }
+        },
+        "required": ["id", "branch", "base", "worktree", "at", "reason"],
+        "additionalProperties": false
+      }
+    },
+    "history": { "type": "array", "items": { "type": "string" } },
+    "schema_version": { "type": "integer", "minimum": 0 }
+  },
+  "required": ["tracker", "source", "updated_at", "queue", "candidates", "relisted", "promoted", "history"],
+  "additionalProperties": false
+}

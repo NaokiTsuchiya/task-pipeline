@@ -1,0 +1,34 @@
+{
+  "tracker": "markdown",
+  "source": "./TASKS.md",
+  "updated_at": "2026-07-16T09:12:00Z",
+  "queue": [
+    {
+      "id": "t-1a2b3c4d",
+      "title": "タスクのタイトル",
+      "status": "done",
+      "gate": "full",
+      "phase": null,
+      "attempts": 0,
+      "session": null,
+      "executor": null,
+      "executor_last_event_at": "2026-07-16T09:00:00Z",
+      "takeover_at": null,
+      "blocked_reason": null,
+      "worktree": "/abs/path/.claude/worktrees/task-pipeline/t-1a2b3c4d",
+      "base": "main",
+      "review": {
+        "ref": "06889d9d902d62cbfdd716d2ef8d3c6f171bd999",
+        "branch": "task-pipeline/t-1a2b3c4d",
+        "tip": "06889d9d902d62cbfdd716d2ef8d3c6f171bd999",
+        "base": "main"
+      }
+    }
+  ],
+  "candidates": [
+    { "id": "t-9z8y", "title": "未承認タスク", "updated_at": "2026-07-16T09:00:00Z" }
+  ],
+  "relisted": [],
+  "promoted": ["gh-88"],
+  "history": ["2026-07-16T09:12Z done t-1a2b3c4d (.task-pipeline/runs/t-1a2b3c4d/report.md)"]
+}
