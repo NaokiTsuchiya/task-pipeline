@@ -1,5 +1,7 @@
 # Fable への依頼プロンプト: `/loop` タスク実行パイプライン skill の構築
 
+> 2026-07-22 時点の依頼文の記録。現行仕様は task-pipeline/SKILL.md・task-prep/SKILL.md を見よ。
+
 ---
 
 ## 背景と目的
