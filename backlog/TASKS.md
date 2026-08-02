@@ -1,7 +1,7 @@
 # バックログ
 
 - [ ] readme-list-sync
-- [ ] scripts-test-harness
+- [ ] test-harness-foundation
 - [ ] verifier-fixes-at-once
 - [ ] state-cli-foundation
 

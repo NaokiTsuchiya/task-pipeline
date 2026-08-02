@@ -1,6 +1,16 @@
 # 実行スクリプトのテストハーネスを作り、確定済みの 2 バグを直す
 
+分解済み: test-harness-foundation, watch-pr-signature-window, aggregate-scripts-phase-token
+
 依存: install-agents-symlink-resolution
+
+> **2026-08-02 に分解済み。** 元の要求 3 (`install.sh` のケース) は、依存先 `install-agents-symlink-resolution` の実装コミット `6dba3eb` が `tests/install-sh.test.sh` (236 行、C1〜C14) を持ち込んだため**既に満たされている** — この issue を起こした `c52a68b` より後の出来事である。残りを 3 件に分けた:
+>
+> - `test-harness-foundation` — `tests/run.sh` + モック gh + `watch-pr.sh` のケース (既存の install-sh テストを束ねる)
+> - `watch-pr-signature-window` — 窓外変化を署名に載せる修正
+> - `aggregate-scripts-phase-token` — 集計 2 本のテストと `research+plan` 正規表現バグ
+>
+> 以下は分解前の本文である (背景の調査記録として残す)。
 
 ## 背景 / 現状
 
