@@ -26,16 +26,22 @@
   verifier_count      上記の検証呼び出し回数
   orchestrator_overhead_seconds  elapsed_seconds - executor_seconds - verifier_seconds
                        (オーケストレーターが通知を受けて次のサブエージェントを判断・起動するまでの折り返し時間)
+  diff_title      finish_mode=pr なら PR タイトル、commit ならコミットの一行目 (無ければ null)
+  diff_files_changed / diff_insertions / diff_deletions
+                  実際の変更規模。pr は `gh pr view --json`、commit はローカル `git show --stat` から取得
+                  (対象コミット/PRが見つからない・オフライン等で失敗したら null のまま)
 
 使い方:
-  collect-task-metrics.py <session.jsonl> [<session.jsonl> ...] [--out PATH] [--dry-run]
+  collect-task-metrics.py <session.jsonl> [<session.jsonl> ...] [--out PATH] [--dry-run] [--no-diff-stats]
 
   相対パスは ~/.claude/projects/ 起点。--out 省略時は ~/.claude/task-pipeline/metrics.jsonl。
   同じ (session, task_id) は既存ファイルにあればスキップする (増分収集・再実行安全)。
+  --no-diff-stats を付けると git show / gh pr view を呼ばない (オフライン・高速収集したいとき用)。
 """
 import json
 import os
 import re
+import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -61,6 +67,62 @@ def repo_of(cwd):
         return None
     m = REPO_RE.search(cwd)
     return m.group(1) if m else os.path.basename(cwd)
+
+
+REPO_ROOT_RE = re.compile(r'(.*?/github\.com/[^/]+/[^/]+)')
+STAT_LINE_RE = re.compile(
+    r'(\d+) files? changed(?:, (\d+) insertions?\(\+\))?(?:, (\d+) deletions?\(-\))?')
+
+
+def repo_root_of(cwd):
+    """cwd (worktree の中の可能性あり) から <...>/github.com/<owner>/<repo> のルートを取り出す。
+
+    task-pipeline は worktree 上で実行されるが、merge 後に worktree 自体は消えていることが多い。
+    その場合でもメインチェックアウト (owner/repo 直下) には commit が残っているはずなのでそちらを見る。
+    """
+    if not cwd:
+        return None
+    m = REPO_ROOT_RE.match(cwd)
+    return m.group(1) if m else None
+
+
+def diff_stats_for_commit(repo_root, commit):
+    if not repo_root or not commit or not os.path.isdir(repo_root):
+        return None
+    try:
+        out = subprocess.run(
+            ['git', '-C', repo_root, 'show', '--stat', '--format=%s', commit],
+            capture_output=True, text=True, timeout=15, check=True).stdout
+    except Exception:
+        return None
+    lines = [l for l in out.splitlines() if l.strip()]
+    if not lines:
+        return None
+    sm = STAT_LINE_RE.search(lines[-1])
+    return {
+        'title': lines[0],
+        'files_changed': int(sm.group(1)) if sm else None,
+        'insertions': int(sm.group(2) or 0) if sm else None,
+        'deletions': int(sm.group(3) or 0) if sm else None,
+    }
+
+
+def diff_stats_for_pr(pr_url):
+    if not pr_url:
+        return None
+    try:
+        out = subprocess.run(
+            ['gh', 'pr', 'view', pr_url, '--json', 'title,additions,deletions,changedFiles'],
+            capture_output=True, text=True, timeout=20, check=True).stdout
+        d = json.loads(out)
+    except Exception:
+        return None
+    return {
+        'title': d.get('title'),
+        'files_changed': d.get('changedFiles'),
+        'insertions': d.get('additions'),
+        'deletions': d.get('deletions'),
+    }
 
 
 def read_subagent_transcript(session_dir, task_id):
@@ -106,7 +168,7 @@ def read_subagent_transcript(session_dir, task_id):
     }
 
 
-def process(path):
+def process(path, fetch_diff_stats=True):
     session_model = None
     launch_ts = {}      # tool_use_id -> timestamp
     launch_model = {}   # tool_use_id -> explicit model override (or None)
@@ -261,6 +323,13 @@ def process(path):
         session_dir = path[:-len('.jsonl')] if path.endswith('.jsonl') else path
         sub = read_subagent_transcript(session_dir, task_id)
 
+        diff = None
+        if fetch_diff_stats:
+            if finish_mode == 'pr':
+                diff = diff_stats_for_pr(pr_url)
+            elif finish_mode == 'commit':
+                diff = diff_stats_for_commit(repo_root_of(cwd), commit)
+
         rows.append({
             'repo': repo_of(cwd),
             'session': os.path.basename(path),
@@ -284,6 +353,10 @@ def process(path):
             'pr_url': pr_url,
             'commit': commit,
             'blocked_events': blocked_events,
+            'diff_title': diff['title'] if diff else None,
+            'diff_files_changed': diff['files_changed'] if diff else None,
+            'diff_insertions': diff['insertions'] if diff else None,
+            'diff_deletions': diff['deletions'] if diff else None,
         })
     return rows
 
@@ -292,6 +365,7 @@ def main():
     args = sys.argv[1:]
     out = DEFAULT_OUT
     dry_run = False
+    fetch_diff_stats = True
     files = []
     i = 0
     while i < len(args):
@@ -301,12 +375,14 @@ def main():
             out = args[i]
         elif a == '--dry-run':
             dry_run = True
+        elif a == '--no-diff-stats':
+            fetch_diff_stats = False
         else:
             files.append(a)
         i += 1
 
     if not files:
-        sys.exit('usage: collect-task-metrics.py <session.jsonl> [...] [--out PATH] [--dry-run]')
+        sys.exit('usage: collect-task-metrics.py <session.jsonl> [...] [--out PATH] [--dry-run] [--no-diff-stats]')
 
     existing_keys = set()
     if os.path.exists(out):
@@ -321,7 +397,7 @@ def main():
     new_rows = []
     for f in files:
         p = f if os.path.isabs(f) else os.path.join(PROJECTS_BASE, f)
-        for row in process(p):
+        for row in process(p, fetch_diff_stats=fetch_diff_stats):
             key = (row['session'], row['task_id'])
             if key in existing_keys:
                 continue
@@ -337,8 +413,10 @@ def main():
         vf = round(r['verifier_seconds'] / 60, 1)
         oh = (round(r['orchestrator_overhead_seconds'] / 60, 1)
               if r.get('orchestrator_overhead_seconds') is not None else None)
+        diff = (f" diff={r['diff_files_changed']}f+{r['diff_insertions']}/-{r['diff_deletions']}"
+                if r.get('diff_files_changed') is not None else '')
         print(f"  [{r['repo']}] {task:30s} model={model:15s} "
-              f"outcome={r['outcome']:10s} elapsed={elapsed}m (exec={ex}m verify={vf}m overhead={oh}m)")
+              f"outcome={r['outcome']:10s} elapsed={elapsed}m (exec={ex}m verify={vf}m overhead={oh}m){diff}")
 
     if dry_run:
         print(f"(dry-run: not writing to {out})")
