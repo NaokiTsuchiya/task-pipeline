@@ -21,6 +21,11 @@
   tokens_processed subagent transcript を message.id 重複排除して積み上げた実処理量。ファイルが無ければ null
   pr_url          finish_mode=pr のときの PR URL
   blocked_events  BLOCKED / SECURITY WARNING を含むイベントの (phase, timestamp, snippet) 一覧
+  executor_seconds    start_ts〜end_ts の間、executor 自身が処理していた秒数の合計 (duration_ms 合計)
+  verifier_seconds    同じ区間で "Verify ... <slug> ..." 系の検証サブエージェントが処理していた秒数の合計
+  verifier_count      上記の検証呼び出し回数
+  orchestrator_overhead_seconds  elapsed_seconds - executor_seconds - verifier_seconds
+                       (オーケストレーターが通知を受けて次のサブエージェントを判断・起動するまでの折り返し時間)
 
 使い方:
   collect-task-metrics.py <session.jsonl> [<session.jsonl> ...] [--out PATH] [--dry-run]
@@ -33,6 +38,7 @@ import os
 import re
 import sys
 from collections import defaultdict
+from datetime import datetime
 
 DEFAULT_OUT = os.path.expanduser('~/.claude/task-pipeline/metrics.jsonl')
 PROJECTS_BASE = os.path.expanduser('~/.claude/projects')
@@ -41,6 +47,7 @@ NOTIF_RE = re.compile(
     r'<task-notification>.*?<task-id>([^<]+)</task-id>.*?<tool-use-id>([^<]+)</tool-use-id>'
     r'.*?<result>(.*?)</result>\s*<usage><subagent_tokens>(\d+)</subagent_tokens>'
     r'<tool_uses>(\d+)</tool_uses><duration_ms>(\d+)</duration_ms></usage>', re.S)
+USAGE_SYNC_RE = re.compile(r'subagent_tokens:\s*(\d+)\ntool_uses:\s*(\d+)\nduration_ms:\s*(\d+)')
 SLUG_RE = re.compile(r'runs/([a-zA-Z0-9_.-]+)/')
 PHASE_RE = re.compile(r'PHASE\s+(\w+(?:\+\w+)*)\s+DONE')
 PR_URL_RE = re.compile(r'(https://github\.com/[^\s)"\']+/pull/\d+)')
@@ -104,7 +111,9 @@ def process(path):
     launch_ts = {}      # tool_use_id -> timestamp
     launch_model = {}   # tool_use_id -> explicit model override (or None)
     cwd = None
-    events = defaultdict(list)  # task_id -> [(ts, tu_id, result, tokens)]
+    events = defaultdict(list)  # task_id -> [(ts, tu_id, result, tokens, duration_ms)]
+    sync_launches = []   # (tool_use_id, ts, description) for non-background Agent/Task calls
+    sync_results = {}    # tool_use_id -> (result_ts, duration_ms)
 
     raw_chunks = []
     with open(path) as fh:
@@ -125,14 +134,31 @@ def process(path):
                     for c in cont:
                         if isinstance(c, dict) and c.get('type') == 'tool_use' and c.get('name') in ('Agent', 'Task'):
                             inp = c.get('input', {}) or {}
-                            if inp.get('run_in_background'):
-                                launch_ts[c['id']] = j.get('timestamp')
-                                launch_model[c['id']] = inp.get('model')
+                            # run_in_background は省略/null で背景実行される個体もある (セッションにより
+                            # 挙動が違う)。ここではフラグを問わず全 Agent/Task 呼び出しの起動時刻を
+                            # 記録しておき、実際に task-notification の tool-use-id と一致したものだけを
+                            # 後段で「そのタスクの起動」として使う (誤検出の余地はない: tool_use id は一意)。
+                            launch_ts[c['id']] = j.get('timestamp')
+                            launch_model[c['id']] = inp.get('model')
+                            desc = inp.get('description') or (inp.get('prompt') or '')[:80]
+                            sync_launches.append((c['id'], j.get('timestamp'), desc))
             elif j.get('type') == 'queue-operation' and j.get('operation') == 'enqueue':
                 m = NOTIF_RE.search(j.get('content', ''))
                 if m:
-                    task_id, tu_id, result, tok = m.group(1), m.group(2), m.group(3), int(m.group(4))
-                    events[task_id].append((j.get('timestamp'), tu_id, result, tok))
+                    task_id, tu_id, result, tok, dur = m.group(1), m.group(2), m.group(3), int(m.group(4)), int(m.group(6))
+                    events[task_id].append((j.get('timestamp'), tu_id, result, tok, dur))
+            elif j.get('type') == 'user':
+                msg = j.get('message', {})
+                cont = msg.get('content')
+                if isinstance(cont, list):
+                    for c in cont:
+                        if isinstance(c, dict) and c.get('type') == 'tool_result':
+                            cc = c.get('content')
+                            texts = ([x.get('text', '') for x in cc if isinstance(x, dict) and x.get('type') == 'text']
+                                     if isinstance(cc, list) else ([cc] if isinstance(cc, str) else []))
+                            um = USAGE_SYNC_RE.search('\n'.join(texts))
+                            if um:
+                                sync_results[c.get('tool_use_id')] = (j.get('timestamp'), int(um.group(3)))
 
     raw_text = ''.join(raw_chunks)
 
@@ -140,7 +166,7 @@ def process(path):
     for task_id, evs in events.items():
         evs.sort(key=lambda e: e[0])
         slug = None
-        for _, _, result, _ in evs:
+        for _, _, result, _, _ in evs:
             sm = SLUG_RE.search(result)
             if sm:
                 slug = sm.group(1)
@@ -150,7 +176,7 @@ def process(path):
             continue
         start_ts = None
         model = None
-        for _, tu_id, _, _ in evs:
+        for _, tu_id, _, _, _ in evs:
             if tu_id in launch_ts:
                 start_ts = launch_ts[tu_id]
                 model = launch_model[tu_id]
@@ -161,13 +187,17 @@ def process(path):
 
         phase_counts = defaultdict(int)
         tokens = 0
+        executor_ms = 0
         end_ts = evs[-1][0]
         outcome = 'in_progress'
         pr_url = None
         commit = None
         blocked_events = []
         finalized_ts = None
-        for ts, _, result, tok in evs:
+        for ts, _, result, tok, dur in evs:
+            if finalized_ts is None:
+                # start_ts〜最初の FINALIZED までの区間だけを「PR作成までの実作業時間」として数える
+                executor_ms += dur
             tokens += tok
             pm = PHASE_RE.search(result)
             if pm:
@@ -181,7 +211,7 @@ def process(path):
                 cm = COMMIT_RE.search(result)
                 pr_url = um.group(1) if um else None
                 commit = cm.group(1) if (cm and not um) else None
-        if outcome != 'finalized' and any('BLOCKED' in r for _, _, r, _ in evs):
+        if outcome != 'finalized' and any('BLOCKED' in r for _, _, r, _, _ in evs):
             outcome = 'blocked'
         elif outcome == 'in_progress':
             # executor 自身の notification に BLOCKED が出ない場合でも、tracker adapter が
@@ -194,11 +224,39 @@ def process(path):
         stop_ts = finalized_ts or end_ts
         elapsed = None
         try:
-            from datetime import datetime
             elapsed = (datetime.fromisoformat(stop_ts.replace('Z', '+00:00'))
                        - datetime.fromisoformat(start_ts.replace('Z', '+00:00'))).total_seconds()
         except Exception:
             pass
+
+        # start_ts〜stop_ts の間に、slug を含み "verify" と言及するサブエージェント呼び出しを
+        # 検証コストとして拾う (フェーズごとの独立検証。SKILL.md の phase-gate 設計)
+        verifier_ms = 0
+        verifier_count = 0
+        try:
+            lo = datetime.fromisoformat(start_ts.replace('Z', '+00:00'))
+            hi = datetime.fromisoformat(stop_ts.replace('Z', '+00:00'))
+            slug_re = re.compile(re.escape(slug), re.I)
+            for tu_id, launch_ts_str, desc in sync_launches:
+                if not (slug_re.search(desc) and re.search(r'verif', desc, re.I)):
+                    continue
+                try:
+                    lt = datetime.fromisoformat(launch_ts_str.replace('Z', '+00:00'))
+                except Exception:
+                    continue
+                if not (lo <= lt <= hi):
+                    continue
+                res = sync_results.get(tu_id)
+                if res:
+                    verifier_ms += res[1]
+                    verifier_count += 1
+        except Exception:
+            pass
+
+        executor_seconds = executor_ms / 1000
+        verifier_seconds = verifier_ms / 1000
+        orchestrator_overhead_seconds = (
+            elapsed - executor_seconds - verifier_seconds if elapsed is not None else None)
 
         session_dir = path[:-len('.jsonl')] if path.endswith('.jsonl') else path
         sub = read_subagent_transcript(session_dir, task_id)
@@ -216,6 +274,10 @@ def process(path):
             'start_ts': start_ts,
             'end_ts': stop_ts,
             'elapsed_seconds': elapsed,
+            'executor_seconds': executor_seconds,
+            'verifier_seconds': verifier_seconds,
+            'verifier_count': verifier_count,
+            'orchestrator_overhead_seconds': orchestrator_overhead_seconds,
             'phase_counts': dict(phase_counts),
             'tokens': tokens,
             'tokens_processed': sub['processed_tokens'] if sub else None,
@@ -271,8 +333,12 @@ def main():
         task = r['task'] or '(no-slug)'
         model = ','.join(r['model_actual']) if r.get('model_actual') else (r['model'] or '?')
         elapsed = round(r['elapsed_seconds'] / 60, 1) if r['elapsed_seconds'] is not None else None
+        ex = round(r['executor_seconds'] / 60, 1)
+        vf = round(r['verifier_seconds'] / 60, 1)
+        oh = (round(r['orchestrator_overhead_seconds'] / 60, 1)
+              if r.get('orchestrator_overhead_seconds') is not None else None)
         print(f"  [{r['repo']}] {task:30s} model={model:15s} "
-              f"outcome={r['outcome']:10s} elapsed={elapsed}m")
+              f"outcome={r['outcome']:10s} elapsed={elapsed}m (exec={ex}m verify={vf}m overhead={oh}m)")
 
     if dry_run:
         print(f"(dry-run: not writing to {out})")
