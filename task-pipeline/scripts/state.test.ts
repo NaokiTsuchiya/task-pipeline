@@ -2021,6 +2021,24 @@ Deno.test("T-V-finalize-start-2: success from pr_fix", async () => {
   assertEquals(item.phase, "finalize");
 });
 
+Deno.test("T-V-finalize-start-2b: success from rebase_fix", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "rebase_fix" }),
+  ]);
+  await expectOk(dir, [
+    "finalize-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--from",
+    "rebase_fix",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.phase, "finalize");
+});
+
 Deno.test("T-V-finalize-start-3: phase mismatch -> conflict", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [
@@ -2191,6 +2209,107 @@ Deno.test("T-V-in-review-7: phase mismatch -> conflict", async () => {
     dir,
     ["in-review", "--state-dir", dir, "--id", "t-1"],
     EXIT_CODES.conflict,
+  );
+});
+
+Deno.test("T-V-in-review-8: --clear-session true nulls session alongside a fresh review write", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "finalize", session: "sess-1" }),
+  ]);
+  await expectOk(dir, [
+    "in-review",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--commits",
+    "1",
+    "--ref",
+    "abc123",
+    "--branch",
+    "task-pipeline/t-1",
+    "--base",
+    "main",
+    "--tip",
+    "abc123",
+    "--clear-session",
+    "true",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.status, "in_review");
+  assertEquals(item.session, null);
+});
+
+Deno.test("T-V-in-review-9: omitting --clear-session leaves session unchanged", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "finalize", session: "sess-1" }),
+  ]);
+  await expectOk(dir, [
+    "in-review",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--commits",
+    "0",
+    "--ref",
+    "https://x/pull/1",
+    "--branch",
+    "task-pipeline/t-1",
+    "--base",
+    "main",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.session, "sess-1");
+});
+
+Deno.test("T-V-in-review-10: --clear-session with a non-'true' value -> usage, unchanged", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "finalize", session: "sess-1" }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "in-review",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--commits",
+      "0",
+      "--ref",
+      "https://x/pull/1",
+      "--branch",
+      "task-pipeline/t-1",
+      "--base",
+      "main",
+      "--clear-session",
+      "false",
+    ],
+    EXIT_CODES.usage,
+  );
+});
+
+Deno.test("T-V-in-review-11: --clear-session with a non-'true' value (numeric) -> usage, unchanged", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "finalize", session: "sess-1" }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "in-review",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--clear-session",
+      "1",
+    ],
+    EXIT_CODES.usage,
   );
 });
 
@@ -2508,6 +2627,117 @@ Deno.test("T-V-watch-set-10: no field flags -> usage", async () => {
     ["watch-set", "--state-dir", dir, "--id", "t-1"],
     EXIT_CODES.usage,
   );
+});
+
+Deno.test("T-V-watch-set-11: --session unconditionally overwrites top-level session (even from a different non-null value)", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      session: "dead-session",
+      review: reviewOf({ watch: watchOf() }),
+    }),
+  ]);
+  await expectOk(dir, [
+    "watch-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--proc",
+    "proc-1",
+    "--session",
+    "sess-new",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.session, "sess-new");
+  const watch = (item.review as Record<string, unknown>).watch as Record<
+    string,
+    unknown
+  >;
+  assertEquals(watch.proc, "proc-1");
+});
+
+Deno.test("T-V-watch-set-11b: --session null clears session without touching watch.state", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      session: "sess-old",
+      review: reviewOf({ watch: watchOf({ state: "watching" }) }),
+    }),
+  ]);
+  await expectOk(dir, [
+    "watch-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "null",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.session, null);
+  const watch = (item.review as Record<string, unknown>).watch as Record<
+    string,
+    unknown
+  >;
+  assertEquals(watch.state, "watching");
+});
+
+Deno.test("T-V-watch-set-12: --session combined with --state stopped -> usage, unchanged", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      session: "s1",
+      review: reviewOf({ watch: watchOf() }),
+    }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "watch-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--state",
+      "stopped",
+      "--session",
+      "sess-new",
+    ],
+    EXIT_CODES.usage,
+  );
+});
+
+Deno.test("T-V-watch-set-13: --session null combined with --state stopped -> ok (both mean null, not a conflict)", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      session: "s1",
+      review: reviewOf({ watch: watchOf({ state: "watching" }) }),
+    }),
+  ]);
+  await expectOk(dir, [
+    "watch-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--state",
+    "stopped",
+    "--session",
+    "null",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.session, null);
+  const watch = (item.review as Record<string, unknown>).watch as Record<
+    string,
+    unknown
+  >;
+  assertEquals(watch.state, "stopped");
 });
 
 Deno.test("T-V-fix-pending-1: success sets fix_pending/pending_ids/findings", async () => {

@@ -47,8 +47,10 @@ stdout に必ず **1 行の JSON**。
   `null` として書き込む (実際の proc id / sha / URL がリテラル文字列 `"null"` になることは
   運用上想定していない)。フラグ自体を省略すると、そのフィールドは書き換えない。
 - **真偽フラグ**: `--bump`/`--clear`/`--drop-withdrawn-branch`/`--preserve-handled`/
-  `--reset-attempts`/`--errors-inc`/`--errors-reset` は、フラグを渡すときは必ず値
-  `true` を伴う (`--bump true`)。それ以外の値は `usage`。フラグを渡さなければ偽として扱う。
+  `--reset-attempts`/`--errors-inc`/`--errors-reset`/`--clear-session` は、フラグを渡すときは
+  必ず値 `true` を伴う (`--bump true`)。それ以外の値は `usage` (`T-V-in-review-10`/
+  `T-V-in-review-11` が `--clear-session false`/`--clear-session 1` を `usage`・state.json
+  不変で固定している)。フラグを渡さなければ偽として扱う。
 - **`--lock-retry-ms <n>`/`--lock-max-retries <n>`**: 全ての書き込み系 verb (下記すべて) が
   共通で受け付ける (既定はそれぞれ 10000/3、`init`/`history-append` と同じ)。
 - 前提違反は `conflict` (対象は存在する) か `missing` (`--id` の指す対象が存在しない) のいずれか
@@ -270,11 +272,13 @@ state.ts dequeue --state-dir <dir> --id <id> \
 ### `finalize-start`
 
 ```
-state.ts finalize-start --state-dir <dir> --id <id> --from <report|pr_fix> \
+state.ts finalize-start --state-dir <dir> --id <id> --from <report|pr_fix|rebase_fix> \
   [--lock-retry-ms <n>] [--lock-max-retries <n>]
 ```
 
-`--from` は `report`/`pr_fix` のみ (それ以外は `usage`)。
+`--from` は `report`/`pr_fix`/`rebase_fix` のみ (それ以外は `usage`)。`rebase_fix` は
+解決サイクル (載せ直しの衝突解消) が PASS したときに、report/pr_fix と同じく finalize を
+経て in-review へ戻るために要る。
 前提: `status=="in_progress" && phase==<from>` (`conflict`)。
 効果: `phase→"finalize", attempts→0`。
 成功: `{"ok": true, "id": "<id>", "phase": "finalize"}`。
@@ -284,6 +288,7 @@ state.ts finalize-start --state-dir <dir> --id <id> --from <report|pr_fix> \
 ```
 state.ts in-review --state-dir <dir> --id <id> \
   [--commits <n> --ref <s> --branch <s> --base <s> [--tip <sha>]] \
+  [--clear-session true] \
   [--lock-retry-ms <n>] [--lock-max-retries <n>]
 ```
 
@@ -293,7 +298,11 @@ state.ts in-review --state-dir <dir> --id <id> \
 前提: `status=="in_progress" && phase=="finalize"` (`conflict`)。
 効果: `status→"in_review", phase→null, attempts→0`。上記4フラグを指定したときだけ
 `review→{ref, branch, tip: (commits>=1 ? tip : null), base}` を書く (省略時は既存の
-`review` を一切変更しない — `pr_fix`/`rebase_fix` からの復帰専用)。
+`review` を一切変更しない — `pr_fix`/`rebase_fix` からの復帰専用)。`--clear-session true`
+を渡すと、同じ書き込みで `session→null` も行う (レビュー待ちにしたタスクに `watch-init` を
+呼ばない経路 — `ref` が PR URL でないとき — で使う。揮発資源がもう無いタスクに `session` を
+残すと、そのセッションが他の作業で生きている間、他セッションからは「所有中」に見えてマージの
+回収が heartbeat 失効 [最大90分] まで遅れるため)。
 成功: `{"ok": true, "id": "<id>", "status": "in_review"}`。
 
 ### 追従
@@ -320,18 +329,29 @@ state.ts watch-set --state-dir <dir> --id <id> \
   [--proc <id|null>] [--sig <s|null>] [--head <s|null>] \
   [--ci <passing|failing|pending|none|null>] [--checked-at <iso|null>] \
   [--errors-inc true] [--errors-reset true] [--note <s|null>] \
-  [--state <watching|stopped>] \
+  [--state <watching|stopped>] [--session <s|null>] \
   [--lock-retry-ms <n>] [--lock-max-retries <n>]
 ```
 
 最低1つのフィールドフラグが必須 (すべて省略は `usage`)。`--errors-inc`/`--errors-reset` は
-排他 (両方指定は `usage`)。
+排他 (両方指定は `usage`)。`--session <非null値>` と `--state stopped` の同時指定も `usage`
+(`--state stopped` が既に `session→null` を行うため、両立し得ない値を同時に渡す形になる。
+`T-V-watch-set-12` が固定)。`--session null` と `--state stopped` はどちらも null を意味する
+ので同時指定してもよく、exit 0 で `session→null, review.watch.state→"stopped"` になる
+(`T-V-watch-set-13` が受理側として固定)。
 前提: `review.watch!=null` (`conflict`)。
 効果: 指定したフィールドだけ書く。**不変条件**: `--proc` に非null値を渡すと
 `proc_started_at→now` も同時に、`--proc null` なら `proc_started_at→null` も同時に書く
 (`--proc` 省略時は `proc_started_at` を変更しない)。`--state stopped` を渡すと、トップレベル
-`session→null` も同じ書き込みで行う (`--state watching` または `--state` 省略では `session`
-を変更しない)。`--errors-inc` は現在の `errors` に+1、`--errors-reset` は `errors→0`。
+`session→null` も同じ書き込みで行う (`--state watching` または `--state` 省略では `--session`
+を渡さない限り `session` を変更しない)。`--session <s>` (nullable フラグ) を渡すと、
+トップレベル `session→<s>` (または `--session null` で `session→null`) を同じ書き込みで
+無条件に上書きする。非null値での用途は watch プロセスを別セッションが張り直すとき (前の所有
+セッションが死んでいても `session` は非null のままなので、`touch-executor` の条件付き代入では
+上書きできない)。null での用途は、揮発資源を手放すが `review.watch.state` は `watching` の
+まま変えたくないとき (`watch-init` 直後に修正サイクル手順0で拾い直す場合など。`--state stopped`
+は `watch.state` も変えてしまうので使えない)。`--errors-inc` は現在の `errors` に+1、
+`--errors-reset` は `errors→0`。
 成功: `{"ok": true, "id": "<id>"}`。
 
 ### `fix-pending`
