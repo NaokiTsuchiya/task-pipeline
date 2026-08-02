@@ -31,3 +31,6 @@
 3. 持ち越しが避けられない場合に判定 JSON へ理由を 1 行残す規定がある。
 4. `task-pipeline/SKILL.md` の 349 行 (リトライ上限) に差分が無い (`git diff -- task-pipeline/SKILL.md` に該当行が現れない)。
 5. `verifier.md` の既存の判定基準 (PASS/FAIL の条件、フェーズ別の見どころ、宣言の再判定) を弱めていない — 追加のみで、既存の要求文の削除が無いことを diff で確認できる。
+
+<!-- task-pipeline:gate=light -->
+

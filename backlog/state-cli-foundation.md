@@ -14,6 +14,16 @@
 
 このアイテムは 3 分割の 1 件目で、**遷移 verb を載せる土台だけ**を作る (verb 群は `state-cli-verbs`、SKILL.md の書き換えは `skill-state-cli-migration`)。
 
+## 実装言語を Deno にした理由 (2026-08-02 に実測して決定)
+
+`deno 2.7.14` / `node 25.9.0` / `python3 3.14.4` はいずれも導入済みで、その中から Deno を選んだ:
+
+- **`deno test` / `fmt` / `lint` / `check` が同梱**なので、テストの土台を別に用意しなくてよい (`test-harness-foundation` の `tests/run.sh` とは独立に走る)。
+- **`--allow-read=<state dir> --allow-write=<state dir>` で、CLI が state ディレクトリの外を触れないことを機械的に保証できる。** このリポジトリが `agents/task-pipeline-verifier.md` で verifier の tools を絞っているのと同じ発想で、行動境界を宣言ではなく仕組みで裏づけられる。
+- **JSON Schema を第一級の成果物にしつつ、実行時の依存をゼロにできる。** スキーマは `state.schema.json` に置き、実行時は stdlib だけの構造チェック、`npm:ajv` はテスト専用にする (オフラインでも state 操作が止まらない)。
+
+Python を採らなかったのは、`jsonschema` が未インストールで追加依存になること (`python3 -c "import jsonschema"` が `ModuleNotFoundError`、2026-08-02 確認) と、テストランナーを自前で用意することになるためである。
+
 ## 要求
 
 1. `task-pipeline/scripts/state.ts` (Deno / TypeScript) を追加する。**実行時の外部依存はゼロ** (`npm:` / `jsr:` の参照を持たない)。実行形は `deno run --allow-read=<state dir> --allow-write=<state dir> state.ts <verb> --state-dir <dir> [...]`。
