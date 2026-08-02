@@ -14,6 +14,11 @@ tests_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 repo_dir=$(CDPATH='' cd -- "$tests_dir/.." && pwd -P) || exit 1
 state_ts=$repo_dir/task-pipeline/scripts/state.ts
 state_test_ts=$repo_dir/task-pipeline/scripts/state.test.ts
+# state-cli-verbs で追加: 所有権判定 (classifySessionOwnership/isTouchable) は
+# state-schema.ts と同型の別ファイルに切り出してあるので、こちらも fmt/lint/check/test の
+# 対象に含める。
+state_ownership_ts=$repo_dir/task-pipeline/scripts/state-ownership.ts
+state_ownership_test_ts=$repo_dir/task-pipeline/scripts/state-ownership.test.ts
 
 if ! command -v deno >/dev/null 2>&1; then
     printf 'SKIP  state-cli tests — deno not found\n'
@@ -22,6 +27,8 @@ fi
 
 [ -f "$state_ts" ] || { printf 'state.ts not found: %s\n' "$state_ts" >&2; exit 1; }
 [ -f "$state_test_ts" ] || { printf 'state.test.ts not found: %s\n' "$state_test_ts" >&2; exit 1; }
+[ -f "$state_ownership_ts" ] || { printf 'state-ownership.ts not found: %s\n' "$state_ownership_ts" >&2; exit 1; }
+[ -f "$state_ownership_test_ts" ] || { printf 'state-ownership.test.ts not found: %s\n' "$state_ownership_test_ts" >&2; exit 1; }
 
 fail=0
 
@@ -37,10 +44,10 @@ run_step() {
     fi
 }
 
-run_step "deno fmt --check" deno fmt --check "$state_ts" "$state_test_ts"
-run_step "deno lint" deno lint "$state_ts" "$state_test_ts"
-run_step "deno check" deno check "$state_ts" "$state_test_ts"
-run_step "deno test" deno test --allow-read --allow-write --allow-env --allow-run "$state_test_ts"
+run_step "deno fmt --check" deno fmt --check "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
+run_step "deno lint" deno lint "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
+run_step "deno check" deno check "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
+run_step "deno test" deno test --allow-read --allow-write --allow-env --allow-run "$state_test_ts" "$state_ownership_test_ts"
 
 printf '\n%s\n' "----------------------------------------"
 if [ "$fail" -eq 0 ]; then
