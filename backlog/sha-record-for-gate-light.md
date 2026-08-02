@@ -2,9 +2,9 @@
 
 ## 背景
 
-`gate-light-trust-issue-facts.md` (保留中) で、`gate: light` タスクの research フェーズが issue 本文とほぼ同じ内容を再調査しているだけ、という問題を確認した。将来的にこれを「issue本文の事実主張と現在のHEADの機械的diffで判定する」形に変えたいが、この機械判定には**裏取り時点のcommit shaがissue本文に記録されている**ことが前提になる。
+`task-pipeline/docs/gate-light-research-trust-2026-08.md` で、`gate: light` タスクの research フェーズが issue 本文とほぼ同じ内容を再調査しているだけ、という問題を確認した。設計は同ドキュメントの「採った方向 (2026-08-03)」で確定済み: executor が issue 本文の事実主張を `git diff <裏取り時点のsha> HEAD -- <本文が名指すパス>` の空で引き継ぎ、verifier が同じ diff を自分で再実行して確かめる。この機械照合には**裏取り時点のcommit shaがissue本文に記録されている**ことが前提になる。
 
-本 issue はその前提だけを先に用意する。sha を実際に検証・判定に使う変更（verifier/executorの改訂、blocked化の分岐など）は対象外— `gate-light-trust-issue-facts.md` は構造的な欠陥が2回のレビューで見つかっており (declaration:overturned が verdict:PASS と両立してしまう、棚卸しの差し戻しループが閉じていない、diff対象が自己申告に戻る、後方互換が無い 等)、改めて設計し直す必要がある。まずsha記録だけを導入し、後方互換問題 (「導入時点で既存のgate:light issueが全部sha未記録になる」) を先に解消しておく。
+本 issue はその前提だけを先に用意する。sha を実際に引き継ぎに使う変更 (executor.md / verifier.md の改訂) は `backlog/gate-light-research-carryover.md` (本 issue に依存) が担う。まずsha記録だけを導入し、後方互換問題 (「導入時点で既存のgate:light issueが全部sha未記録になる」) を先に解消しておく。
 
 ## 要求
 
