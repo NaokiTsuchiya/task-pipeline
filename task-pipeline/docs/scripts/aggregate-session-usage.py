@@ -29,7 +29,9 @@ def classify_prompt(p):
 
 
 def verifier_phase(p):
-    m = re.search(r'phase:\s*(\w+)', p)
+    # \w+(?:\+\w+)* — 統合フェーズの 1 トークン research+plan も拾う (単純トークンの
+    # 分類結果は変わらない: +\w+ が 0 回マッチするだけなので \w+ 単体と同一)
+    m = re.search(r'phase:\s*(\w+(?:\+\w+)*)', p)
     return m.group(1) if m else '?'
 
 
@@ -39,7 +41,8 @@ def task_of_prompt(p):
 
 
 def executor_phase_from_result(r):
-    m = re.search(r'PHASE\s+(\w+)\s+DONE', r)
+    # 同じ理由で research+plan を 1 トークンとして拾う (verifier_phase 参照)
+    m = re.search(r'PHASE\s+(\w+(?:\+\w+)*)\s+DONE', r)
     if m: return m.group(1)
     if 'FINALIZED' in r: return 'finalize'
     if 'BLOCKED' in r: return 'blocked-stop'
