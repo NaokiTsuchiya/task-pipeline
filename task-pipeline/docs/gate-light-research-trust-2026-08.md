@@ -1,7 +1,8 @@
 # gate: light タスクの research が issue 本文を再掲するだけになっている件 (2026-08)
 
-まだ設計が固まっていない。ここに観測事実とレビューで見つかった落とし穴を記録し、深く設計するときの
-出発点にする。着手可能なところ (sha 記録) だけ `backlog/sha-record-for-gate-light.md` に切り出し済み。
+2026-08-03 の検討で設計方針が固まった (下記「採った方向」)。前提の sha 記録は
+`backlog/sha-record-for-gate-light.md`、本体は `backlog/gate-light-research-carryover.md` に切り出し済み。
+観測事実と、却下した 2 案のレビュー記録は、同型の設計をやり直さないためにそのまま残す。
 
 ## 観測 (RayDiContext #114, 2026-08-02)
 
@@ -54,16 +55,56 @@ task-prep の棚卸しの除外ルールに例外を追加する) 設計にし�
   不整合)。本来の動機 (research.md が issue 本文の再掲になっている) は executor.md 側の書き方を
   変えない限り解消しない。
 
+## 採った方向 (2026-08-03): verifier の基準ではなく executor の書き方と労力を変える
+
+冒頭の問題は実は 2 つの別の冗長性が混ざっている: (1) **成果物の冗長性** = research.md が issue 本文を
+書き写している、(2) **労力の冗長性** = executor が task-prep の裏取りを再実行している。案1・案2 の
+共通の失敗は、この 2 つをまとめて「信頼の判定をゲートの分岐 (基準の緩和、blocked 化) に接続する」形で
+解こうとしたこと。採った設計は逆に、**verifier の基準を一切緩めず**、sha diff を「research.md の中の、
+verifier が機械的に再現できる 1 主張」に格下げする:
+
+- **段1 (全タスク共通・書き方規律)**: issue 本文が事実主張を根拠 (コマンドと結果) 付きで既に含むとき、
+  research.md はそれを再掲しない。書くのは「本文 §X の主張を現 HEAD で確認した」という参照と、
+  本文に無い新情報 (制約、競合状況、不明点の解消) だけ。
+- **段2 (gate:light + sha 記録があるときだけ・労力削減)**: 本文の `裏取り時点: <sha>` を使い、
+  `git diff <sha> HEAD -- <本文が名指すパス>` が**空**なら、その主張の再実行 (grep のやり直し等) を
+  省略してよい。research.md には diff コマンドと結果を書く。**対象パスは issue 本文が明示的に
+  名指すもの (grep のスコープ、ファイル名) に限る** — スコープを本文から決められない主張
+  (リポジトリ全域に及ぶ「他に呼び出し元は無い」等) は引き継げず、再検証する。
+- **verifier 側の追加は 1 点だけ**: 参照による記述も判定対象に含め、引き継ぎ根拠の diff は
+  **verifier 自身が同じコマンドを実行して**確かめる。「最低 2 か所は自分で開く」のサンプルは
+  **引き継がれた主張を優先する**。自己申告はどこにも入らない — verifier は `git diff` を自分で
+  1 回打つだけで裏が取れる。
+
+これで案2 の欠陥は構造的に発生しない: blocked 分岐を作らないので PASS∧overturned の混同も
+差し戻しループも無い。diff 対象は本文名指しパスなので自己申告に戻らない。sha 未記録の既存 issue は
+段2 が不発になるだけ (段1 は効く) で FAIL しない — 後方互換あり。「統合で減るのはゲートの回数で
+あって基準ではない」とも衝突しない — 減るのは executor の労力であって verifier の基準ではない。
+
+**差し戻し機構 (blocked 化 → task-prep 返し) は作らない (決定)**。誤宣言のコストは実測で FAIL 往復
+1 回分 (`research-plan-merge-2026-08.md` run 1: 統合ゲートが覆して required_fixes を返し、同フェーズ内で
+回復した)。一方、機構の費用は gh の assignee 解除・ラベル語彙・棚卸し例外を 2 ファイルにまたいで増設し、
+「パイプラインは gate-light / priority-* を付け外ししない」という読み書き分離を破ること。まれな 1 往復の
+節約に常設の複雑さは割に合わない。誤宣言が頻発するなら、task-prep 側の宣言条件を直す (リスク軸の
+判定例を足したときと同じやり方) のが正しい対処である。
+
+残る実質的なトレードオフは、**task-prep の裏取り自体が誤っていた場合に、executor の再実行という
+冗長な網が消える**こと。手当ては上記のサンプル優先 (verifier は引き継ぎ主張を優先的に開く) と、
+下流ゲートの現行防御 (implement は検証手順を verifier が自分で実行、report は task 要求を最終状態へ
+直接照合)。gate:light の宣言条件がもともと「issue 執筆時点で裏取り済み」を前提にしている以上、これは
+信頼の置き場を明示的に task-prep へ移す判断である。なお sha が HEAD の祖先でなくても問題ない —
+`git diff <sha> HEAD -- <paths>` は履歴によらず内容の同一性を見るので、空 = スコープ内のファイルが
+同一、で引き継ぎ根拠として十分。sha がローカルで解決できないときだけ段2 を放棄して通常 research に落ちる。
+
 ## 次にここへ来たら
 
-- sha 記録 (`backlog/sha-record-for-gate-light.md`) が実装されていれば、それを土台に「sha diff で
-  判定する」設計を再検討してよい。ただし対象パスは **issue 本文が明示したものに限定**し、
-  research.md の引用は使わないこと。
-- blocked 化の分岐を作るなら、**`verdict: FAIL` かつ `declaration: overturned` のときだけ**にする
-  (PASS したタスクを巻き込まない)。
-- 差し戻しループを閉じるなら、gh の assignee 解除・ラベル運用まで含めて設計すること
-  (`task-pipeline/references/adapters/gh.md` と `task-prep/references/trackers/gh.md` の両方が対象)。
-- 本来の動機に戻るなら、verifier.md だけでなく executor.md の research 節の書き方 (issue 本文を
-  引き写さない指示) も対象に含めること。
+- 実装は `backlog/gate-light-research-carryover.md` (依存: `sha-record-for-gate-light`)。対象は
+  executor.md (research / research+plan 節) と verifier.md (research 節 1 点) だけで、SKILL.md・
+  アダプタ・task-prep は触らない。
+- verifier.md への追記は省略できない — 段1 だけ入れて verifier を放置すると、薄くなった research.md を
+  フレッシュな verifier が「記述が無い」と誤 FAIL する。
+- 効果測定は `research-plan-merge-2026-08.md` と同じ方式が流用できる: #114 型の素材で段2 有り/無しの
+  research+plan を並べ、統合ゲートの verdict と weighted を比較する。
 - 「事実の再検証」と「今回の変更の分析 (テスト網羅の最低ライン・エントリポイント洗い出し)」は別物。
-  後者は plan の材料であり、issue 本文があってもなくても research.md が行う — ここを混同しないこと。
+  引き継ぎが適用されるのは前者だけで、後者は plan の材料であり、issue 本文があってもなくても
+  research.md が行う — ここを混同しないこと。
