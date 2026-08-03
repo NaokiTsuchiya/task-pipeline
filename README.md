@@ -85,11 +85,11 @@ gh label create in-review -c 1D76DB -d "レビュー待ち"
 gh label create blocked   -c B60205 -d "進行不能"
 ```
 
-候補になるのは「open で、状態ラベルがどちらも付いておらず、assignee も PR の紐付けも無い issue」。**承認順は issue 番号順ではない** — `priority-high` / 指定なし / `priority-low` の 3 段に分けたうえで、段の中だけをトリアージが並べた順になる。着手すると自分にアサインされる（着手中のラベルは付けない — セッションが落ちたとき候補に戻れなくなるため）。
+候補になるのは「open で、状態ラベルがどちらも付いておらず、assignee も PR の紐付けも無い issue」。**承認順は issue 番号順ではない** — `priority-high` / 指定なし / `priority-low` の 3 段に分けたうえで、段の中だけをトリアージが並べた順になる。着手すると自分にアサインされる（着手中のラベルは付けず assignee を使うのは、同じ `source` に複数のセッション/エージェントが同時に `task-pipeline` を回しても、他のセッションが着手済みの issue を `no:assignee` フィルタで候補から除外できるため。セッションが落ちたときの自動リカバリはこの方式でも無く、復帰は下記のとおり手動になる）。
 
 作業を終えたときの表現は 2 通り。**`finish=pr` なら PR 本文に `Fixes #<番号>` が入って issue に紐付き、ラベルは付かない** — 紐付いた PR は issue のタイムラインに出るのでラベルは重複でしかなく、しかもマージした瞬間に issue が自動 close されて Done になる。PR が無いとき (`finish=none` / `commit`) だけ `in-review` ラベルと参照コメントが付く。
 
-**Done はあなたが issue を close したとき**（PR 経由なら自動、それ以外はマージをローカル git 履歴から検知して close する）。候補に戻したいときは、ラベルなら手で外す、PR 紐付けなら PR 本文の `Fixes #<番号>` を消す。詳細は [adapters/gh.md](task-pipeline/references/adapters/gh.md)。
+**Done はあなたが issue を close したとき**（PR 経由なら自動、それ以外はマージをローカル git 履歴から検知して close する）。候補に戻したいときは、ラベルと **assignee** を手で外す、PR 紐付けなら PR 本文の `Fixes #<番号>` を消す (これに加えて assignee も外す)。詳細は [adapters/gh.md](task-pipeline/references/adapters/gh.md)。
 
 ### markdown (ローカルバックログ)
 

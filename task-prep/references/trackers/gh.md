@@ -13,7 +13,7 @@
 | 準備完了 (パイプライン候補) | ラベル `ready` |
 
 - task-pipeline は **`/loop /task-pipeline gh ?label=ready`** で起動する。`ready` ラベルがそのまま依存ゲートになる。フィルタなしの起動ではラベルに関係なく open issue 全部が候補になってしまうので、接続コマンドの案内では `?label=ready` を必ず付ける。
-- `ready` と `pending-deps` は相互排他。task-pipeline の状態ラベル (`in-review` / `blocked`) には**触らない**。例外は 1 つ: 深掘りが `blocked` の理由 (パイプラインの blocked コメント) を解消して ready 基準を満たしたときは、`blocked` を外す — 外さないと `?label=ready` でも候補に戻らない。外すことも承認時に提示する。
+- `ready` と `pending-deps` は相互排他。task-pipeline の状態ラベル (`in-review` / `blocked`) には**触らない**。例外は 1 つ: 深掘りが `blocked` の理由 (パイプラインの blocked コメント) を解消して ready 基準を満たしたときは、`blocked` を外す。**このとき assignee も併せて外す必要がある** — `in_progress` を一度でも経由した issue は assignee が付いたままなので、ラベルだけ外しても `no:assignee` フィルタに引っかかって `?label=ready` でも候補に戻らない (`task-pipeline/references/adapters/gh.md` の復帰手順を参照)。外すことも承認時に提示する。
 - `未確定:` が残る issue にはどちらのラベルも付けない (依存ではなく人を待っているので、昇格スキャンの対象にしない)。
 - ラベルは事前作成不要 — 存在しないラベルを `issue_write` で付けると GitHub が自動生成する (色は既定グレー)。色や説明を付けたいときだけ手で作る。裏返すと、**`ready` を 1 件も付けたことがないリポジトリでは `?label=ready` 起動が「ラベルがありません」エラーで止まる** — ready 0 件で書き込みを終えた報告では接続コマンドを案内せず、昇格待ちである旨を伝える。
 - `issue_write` の `labels` は**追加ではなく全置換**。必ず `issue_read (method: get_labels)` で現状を読み、このファイルのラベル以外を保った集合を計算して渡す。
