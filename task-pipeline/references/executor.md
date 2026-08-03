@@ -49,7 +49,7 @@ You are operating autonomously. The user is not watching and cannot answer quest
 
 上記の各項目は、issue 本文 (タスクファイル本文) に無い情報を書くことが前提である。issue 本文が事実主張を根拠 (コマンドと結果) 付きで既に含むときは、research.md はそれを再掲しない。書くのは「本文のどの主張を現 HEAD で確認したか」の参照と、本文に無い新情報 (制約、競合状況、不明点の解消、本文執筆後の変化) だけである。この書き方の規律は、後述の research+plan 統合フェーズの research.md にも同じく適用される。
 
-**引き継ぎ (gate: light + sha 記録があるときだけ)**: タスクの gate が light で、タスク本文に裏取り時点の sha を記録する行があるとき — gh 由来なら本文のプレーンテキスト行 `裏取り時点: <sha>`、markdown 由来ならアイテム本文の HTML コメント `<!-- task-pipeline:gate-verified-at=<sha> -->` (書式は `backlog/sha-record-for-gate-light.md` に記録がある) — 次の手順で事実主張の再検証を省略してよい:
+**引き継ぎ (gate: light + sha 記録があるときだけ)**: タスクの gate が light で、タスク本文に裏取り時点の sha を記録する行があるとき — gh 由来なら本文のプレーンテキスト行 `裏取り時点: <sha>`、markdown 由来ならアイテム本文の HTML コメント `<!-- task-pipeline:gate-verified-at=<sha> -->` — 次の手順で事実主張の再検証を省略してよい:
 
 1. sha 行が本文に無ければ、通常どおり research を行う (この手順は不発、上記の転記禁止だけが効く)。
 2. sha 行があっても `git -C <target project> cat-file -e <sha>` が失敗する (ローカルで解決できない) なら、この手順を放棄して通常の research を行う。

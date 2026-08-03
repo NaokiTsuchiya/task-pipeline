@@ -1,7 +1,7 @@
 # gate: light タスクの research が issue 本文を再掲するだけになっている件 (2026-08)
 
-2026-08-03 の検討で設計方針が固まった (下記「採った方向」)。前提の sha 記録は
-`backlog/sha-record-for-gate-light.md`、本体は `backlog/gate-light-research-carryover.md` に切り出し済み。
+2026-08-03 の検討で設計方針が固まった (下記「採った方向」)。前提の sha 記録は backlog アイテム
+`sha-record-for-gate-light`、本体は `gate-light-research-carryover` に切り出し済み (いずれも Done)。
 観測事実と、却下した 2 案のレビュー記録は、同型の設計をやり直さないためにそのまま残す。
 
 ## 観測 (RayDiContext #114, 2026-08-02)
@@ -98,7 +98,7 @@ verifier が機械的に再現できる 1 主張」に格下げする:
 
 ## 次にここへ来たら
 
-- 実装は `backlog/gate-light-research-carryover.md` (依存: `sha-record-for-gate-light`)。対象は
+- 実装は backlog アイテム `gate-light-research-carryover` (依存: `sha-record-for-gate-light`)。対象は
   executor.md (research / research+plan 節) と verifier.md (research 節 1 点) だけで、SKILL.md・
   アダプタ・task-prep は触らない。
 - verifier.md への追記は省略できない — 段1 だけ入れて verifier を放置すると、薄くなった research.md を
