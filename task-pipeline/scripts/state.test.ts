@@ -761,6 +761,72 @@ Deno.test("T-L4: lock aged 11min is stale -> single-winner recovery, no corrupti
   assert(!lockExists, "lock should be released after both callers finish");
 });
 
+Deno.test({
+  name:
+    "T-L5: lock removed externally before release -> NotFound tolerated, verb still succeeds",
+  fn: async () => {
+    const dir = await tempDir();
+    await writeStateFile(dir, JSON.stringify(minimalValidState()));
+    const child = spawnCli(
+      ["history-append", "--state-dir", dir, "--line", "hello"],
+      {
+        allowRead: [dir],
+        allowWrite: [dir],
+        allowEnv: ["STATE_CLI_TEST_PAUSE_BEFORE_RENAME_MS"],
+        env: { STATE_CLI_TEST_PAUSE_BEFORE_RENAME_MS: "3000" },
+      },
+    );
+    await new Promise((r) => setTimeout(r, 500)); // tmp 書き込み後・rename 前で待つ頃合い
+    // 別セッションが stale lock を回収した想定 (mv+削除の結果、lock は既に無い)。
+    await Deno.remove(`${dir}/lock`, { recursive: true });
+    const { code, stdout } = await child.output();
+    const out = new TextDecoder().decode(stdout).trim();
+    assertEquals(code, 0, out);
+    const parsed = parseJson(out);
+    assertEquals(parsed.ok, true, out);
+    assertEquals(parsed.history_length, 1, out);
+    const final = JSON.parse(await Deno.readTextFile(`${dir}/state.json`));
+    assertEquals(final.history, ["hello"]);
+  },
+  sanitizeResources: false,
+  sanitizeOps: false,
+});
+
+Deno.test({
+  name:
+    "T-L6: lock release blocked by real permission error -> permission propagates (not swallowed as NotFound)",
+  fn: async () => {
+    const dir = await tempDir();
+    await writeStateFile(dir, JSON.stringify(minimalValidState()));
+    const child = spawnCli(
+      ["history-append", "--state-dir", dir, "--line", "hello"],
+      {
+        allowRead: [dir],
+        allowWrite: [dir],
+        allowEnv: ["STATE_CLI_TEST_PAUSE_BEFORE_LOCK_RELEASE_MS"],
+        env: { STATE_CLI_TEST_PAUSE_BEFORE_LOCK_RELEASE_MS: "3000" },
+      },
+    );
+    await new Promise((r) => setTimeout(r, 800)); // write は完了し、release の一時停止中のはず
+    // state dir を書き込み不可にし、lock の remove そのものを (NotFound ではなく) 権限エラーで
+    // 失敗させる。write (rename) は既に完了しているので巻き込まれない。
+    await Deno.chmod(dir, 0o500);
+    const { code, stdout } = await child.output();
+    const out = new TextDecoder().decode(stdout).trim();
+    await Deno.chmod(dir, 0o755); // 後始末 (次のテストに影響させない)
+    assertEquals(code, EXIT_CODES.permission, out);
+    const parsed = parseJson(out);
+    assertEquals(parsed.error, "permission", out);
+    try {
+      await Deno.remove(`${dir}/lock`, { recursive: true });
+    } catch {
+      // 無ければ何もしない
+    }
+  },
+  sanitizeResources: false,
+  sanitizeOps: false,
+});
+
 // ---------------------------------------------------------------------------
 // C: 並行性 (lost update・部分書き込み)
 // ---------------------------------------------------------------------------
@@ -1132,6 +1198,183 @@ Deno.test("T-H10: session-touch on a stale id refreshes it instead of deleting i
   const mtime = await statMtime(`${dir}/sessions/s-old`);
   assertEquals(mtime, testNow, "s-old mtime should be refreshed to now");
 });
+
+Deno.test({
+  name:
+    "T-H11: session-touch cleanup skips a stale entry that vanishes before stat (NotFound tolerated)",
+  fn: async () => {
+    const dir = await tempDir();
+    const testNow = Date.now();
+    await makeSessionFile(dir, "victim", testNow, 1500); // 1440分超、掃除対象
+    const child = spawnCli(
+      [
+        "session-touch",
+        "--state-dir",
+        dir,
+        "--id",
+        "toucher",
+        "--cleanup-stale-min",
+        "1440",
+      ],
+      {
+        allowRead: [dir],
+        allowWrite: [dir],
+        allowEnv: [
+          "STATE_CLI_TEST_NOW_MS",
+          "STATE_CLI_TEST_PAUSE_BEFORE_SESSION_STAT_MS",
+        ],
+        env: {
+          STATE_CLI_TEST_NOW_MS: String(testNow),
+          STATE_CLI_TEST_PAUSE_BEFORE_SESSION_STAT_MS: "1500",
+        },
+      },
+    );
+    await new Promise((r) => setTimeout(r, 500)); // stat 直前の一時停止中に踏む頃合い
+    await Deno.remove(`${dir}/sessions/victim`);
+    const { code, stdout } = await child.output();
+    const out = new TextDecoder().decode(stdout).trim();
+    assertEquals(code, 0, out);
+    const parsed = parseJson(out);
+    assertEquals(parsed.cleaned, [], out);
+  },
+  sanitizeResources: false,
+  sanitizeOps: false,
+});
+
+Deno.test({
+  name:
+    "T-H12: session-touch cleanup skips a stale entry that vanishes between stat and remove (NotFound tolerated)",
+  fn: async () => {
+    const dir = await tempDir();
+    const testNow = Date.now();
+    await makeSessionFile(dir, "victim", testNow, 1500); // 1440分超、掃除対象
+    const child = spawnCli(
+      [
+        "session-touch",
+        "--state-dir",
+        dir,
+        "--id",
+        "toucher",
+        "--cleanup-stale-min",
+        "1440",
+      ],
+      {
+        allowRead: [dir],
+        allowWrite: [dir],
+        allowEnv: [
+          "STATE_CLI_TEST_NOW_MS",
+          "STATE_CLI_TEST_PAUSE_BEFORE_SESSION_REMOVE_MS",
+        ],
+        env: {
+          STATE_CLI_TEST_NOW_MS: String(testNow),
+          STATE_CLI_TEST_PAUSE_BEFORE_SESSION_REMOVE_MS: "1500",
+        },
+      },
+    );
+    await new Promise((r) => setTimeout(r, 500)); // stat は既に終わり、remove 直前で待つ頃合い
+    await Deno.remove(`${dir}/sessions/victim`);
+    const { code, stdout } = await child.output();
+    const out = new TextDecoder().decode(stdout).trim();
+    assertEquals(code, 0, out);
+    const parsed = parseJson(out);
+    assertEquals(parsed.cleaned, [], out);
+  },
+  sanitizeResources: false,
+  sanitizeOps: false,
+});
+
+Deno.test(
+  "T-H13: session-touch cleanup remove blocked by real permission error -> permission propagates (not swallowed as NotFound)",
+  async () => {
+    const dir = await tempDir();
+    const testNow = Date.now();
+    await Deno.mkdir(`${dir}/sessions`, { recursive: true });
+    // toucher 自身のファイルは先に作っておく (書き込みを避け、掃除ループまで確実に到達させる)
+    await makeSessionFile(dir, "toucher", testNow, 0);
+    await makeSessionFile(dir, "victim", testNow, 1500); // 1440分超、掃除対象
+    await Deno.chmod(`${dir}/sessions`, 0o555); // stat/readdir は通るが remove (unlink) は不可
+    const res = await runCli(
+      [
+        "session-touch",
+        "--state-dir",
+        dir,
+        "--id",
+        "toucher",
+        "--cleanup-stale-min",
+        "1440",
+      ],
+      {
+        allowRead: [dir],
+        allowWrite: [dir],
+        allowEnv: ["STATE_CLI_TEST_NOW_MS"],
+        env: { STATE_CLI_TEST_NOW_MS: String(testNow) },
+      },
+    );
+    await Deno.chmod(`${dir}/sessions`, 0o755); // 後始末 (次のテストに影響させない)
+    assertEquals(res.code, EXIT_CODES.permission, res.stdout + res.stderr);
+    const parsed = parseJson(res.stdout);
+    assertEquals(parsed.error, "permission", res.stdout);
+  },
+);
+
+Deno.test({
+  name:
+    "T-H14: sessions-alive skips an entry that vanishes before stat (NotFound tolerated)",
+  fn: async () => {
+    const dir = await tempDir();
+    const testNow = Date.now();
+    await makeSessionFile(dir, "victim", testNow, 10); // alive 窓内 (何もしなければ alive に載る)
+    const child = spawnCli(
+      ["sessions-alive", "--state-dir", dir, "--alive-max-min", "90"],
+      {
+        allowRead: [dir],
+        allowWrite: [dir],
+        allowEnv: [
+          "STATE_CLI_TEST_NOW_MS",
+          "STATE_CLI_TEST_PAUSE_BEFORE_SESSION_STAT_MS",
+        ],
+        env: {
+          STATE_CLI_TEST_NOW_MS: String(testNow),
+          STATE_CLI_TEST_PAUSE_BEFORE_SESSION_STAT_MS: "1500",
+        },
+      },
+    );
+    await new Promise((r) => setTimeout(r, 500)); // stat 直前の一時停止中に踏む頃合い
+    await Deno.remove(`${dir}/sessions/victim`);
+    const { code, stdout } = await child.output();
+    const out = new TextDecoder().decode(stdout).trim();
+    assertEquals(code, 0, out);
+    const parsed = parseJson(out);
+    assertEquals(parsed.alive, [], out);
+  },
+  sanitizeResources: false,
+  sanitizeOps: false,
+});
+
+Deno.test(
+  "T-H15: sessions-alive stat blocked by real permission error -> permission propagates (not swallowed as NotFound)",
+  async () => {
+    const dir = await tempDir();
+    const testNow = Date.now();
+    await makeSessionFile(dir, "victim", testNow, 10);
+    // read はできる (readDir は通る) が execute (search) が無いので per-entry stat が
+    // EACCES になる — readdir 自体の NotFound/permission 処理 (chmod 000 相当) とは別経路。
+    await Deno.chmod(`${dir}/sessions`, 0o400);
+    const res = await runCli(
+      ["sessions-alive", "--state-dir", dir, "--alive-max-min", "90"],
+      {
+        allowRead: [dir],
+        allowWrite: [dir],
+        allowEnv: ["STATE_CLI_TEST_NOW_MS"],
+        env: { STATE_CLI_TEST_NOW_MS: String(testNow) },
+      },
+    );
+    await Deno.chmod(`${dir}/sessions`, 0o755); // 後始末 (次のテストに影響させない)
+    assertEquals(res.code, EXIT_CODES.permission, res.stdout + res.stderr);
+    const parsed = parseJson(res.stdout);
+    assertEquals(parsed.error, "permission", res.stdout);
+  },
+);
 
 // ---------------------------------------------------------------------------
 // I: init の exclude 冪等性

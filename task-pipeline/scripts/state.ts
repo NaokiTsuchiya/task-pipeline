@@ -77,6 +77,15 @@ const STALE_LOCK_MS = 10 * 60 * 1000;
 //   年齢判定・updated_at の境界値テストを、実時間のブレ無く決定的に書くために使う。
 // STATE_CLI_TEST_PAUSE_BEFORE_RENAME_MS: 原子的書き込みの rename 直前に指定 ms だけ待つ。
 //   部分書き込みが起きないことのテストで、rename 前にプロセスを kill するための猶予を作る。
+// STATE_CLI_TEST_PAUSE_BEFORE_SESSION_STAT_MS: session-touch の掃除ループ / sessions-alive の
+//   両方で、要素ごとの stat 直前に指定 ms だけ待つ。stat 対象が「列挙後・stat 前」に外部から
+//   消えるレースを、決定的に踏むための猶予を作る。
+// STATE_CLI_TEST_PAUSE_BEFORE_SESSION_REMOVE_MS: session-touch の掃除ループで、stale と判定した
+//   要素の remove 直前に指定 ms だけ待つ。remove 対象が「stat 後・remove 前」に外部から消える
+//   レースを、決定的に踏むための猶予を作る。
+// STATE_CLI_TEST_PAUSE_BEFORE_LOCK_RELEASE_MS: releaseLock の remove 直前に指定 ms だけ待つ。
+//   lock 解放が state dir の権限エラーで失敗するケースを、書き込み成功後の解放段階だけに
+//   絞って決定的に作るための猶予。
 // ---------------------------------------------------------------------------
 
 function tryReadEnv(name: string): string | undefined {
@@ -102,6 +111,27 @@ function nowIso(): string {
 
 function readTestPauseMs(): number {
   const raw = tryReadEnv("STATE_CLI_TEST_PAUSE_BEFORE_RENAME_MS");
+  if (raw === undefined) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function readSessionStatPauseMs(): number {
+  const raw = tryReadEnv("STATE_CLI_TEST_PAUSE_BEFORE_SESSION_STAT_MS");
+  if (raw === undefined) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function readSessionRemovePauseMs(): number {
+  const raw = tryReadEnv("STATE_CLI_TEST_PAUSE_BEFORE_SESSION_REMOVE_MS");
+  if (raw === undefined) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+function readLockReleasePauseMs(): number {
+  const raw = tryReadEnv("STATE_CLI_TEST_PAUSE_BEFORE_LOCK_RELEASE_MS");
   if (raw === undefined) return 0;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -245,7 +275,17 @@ async function acquireLock(
 }
 
 async function releaseLock(stateDir: string): Promise<void> {
-  await Deno.remove(joinPath(stateDir, "lock"), { recursive: true });
+  const pauseMs = readLockReleasePauseMs();
+  if (pauseMs > 0) await sleep(pauseMs);
+  try {
+    await Deno.remove(joinPath(stateDir, "lock"), { recursive: true });
+  } catch (e) {
+    // lock は「無くなっていればよい」操作: 別セッションの stale 回収 (mv して削除) が
+    // 自分の release より先に完了していた場合、ここで NotFound になるのは正常。
+    // 既に state.json への書き込みは完了しているので、これを失敗として伝播させてはならない。
+    if (e instanceof Deno.errors.NotFound) return;
+    throw e;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -848,12 +888,32 @@ async function cmdSessionTouch(
   const cleaned: string[] = [];
   for await (const entry of Deno.readDir(sessionsDir)) {
     if (!entry.isFile || entry.name === id) continue;
-    const info = await Deno.stat(joinPath(sessionsDir, entry.name));
+    const statPauseMs = readSessionStatPauseMs();
+    if (statPauseMs > 0) await sleep(statPauseMs);
+    let info: Deno.FileInfo;
+    try {
+      info = await Deno.stat(joinPath(sessionsDir, entry.name));
+    } catch (e) {
+      // 他セッションの同時掃除 (このループ自体、または stale 回収) が自分より先に
+      // この要素を消していた: lock を取らない設計 (docs/state-cli-contract.md の lock
+      // 契約節) の帰結として起こりうる TOCTOU なので、消えている == 目的達成として飛ばす。
+      if (e instanceof Deno.errors.NotFound) continue;
+      throw e;
+    }
     const mtime = info.mtime;
     if (!mtime) continue;
     const ageMin = (nowMs() - mtime.getTime()) / 60_000;
     if (ageMin > cleanupStaleMin) {
-      await Deno.remove(joinPath(sessionsDir, entry.name));
+      const removePauseMs = readSessionRemovePauseMs();
+      if (removePauseMs > 0) await sleep(removePauseMs);
+      try {
+        await Deno.remove(joinPath(sessionsDir, entry.name));
+      } catch (e) {
+        // stat の後、remove の前に他セッションが同じ要素を消していた場合も同様に飛ばす。
+        // 自分が消したわけではないので cleaned には積まない。
+        if (e instanceof Deno.errors.NotFound) continue;
+        throw e;
+      }
       cleaned.push(entry.name);
     }
   }
@@ -881,7 +941,18 @@ async function cmdSessionsAlive(
   const alive: string[] = [];
   for (const entry of entries) {
     if (!entry.isFile) continue;
-    const info = await Deno.stat(joinPath(sessionsDir, entry.name));
+    const statPauseMs = readSessionStatPauseMs();
+    if (statPauseMs > 0) await sleep(statPauseMs);
+    let info: Deno.FileInfo;
+    try {
+      info = await Deno.stat(joinPath(sessionsDir, entry.name));
+    } catch (e) {
+      // readDir で列挙した後、他セッションの session-touch 掃除がこの要素を消していた:
+      // sessions-alive は lock を取らない読み取り専用 verb なので、これは正常な TOCTOU。
+      // 消えている == もう生存していないので、alive に含めず飛ばす。
+      if (e instanceof Deno.errors.NotFound) continue;
+      throw e;
+    }
     const mtime = info.mtime;
     if (!mtime) continue;
     const ageMin = (nowMs() - mtime.getTime()) / 60_000;
