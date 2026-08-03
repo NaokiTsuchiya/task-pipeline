@@ -1,12 +1,11 @@
 # バックログ
 
-- [ ] state-cli-verbs
-- [ ] sha-record-for-gate-light
-
 ## In Review
 
 ## Done
 
+- [x] skill-state-cli-migration
+- [x] sha-record-for-gate-light
 - [x] skill-install-script
 - [x] auto-stub-check-after-mark
 - [x] gh-issue-body-safety
@@ -22,3 +21,5 @@
 - [x] aggregate-scripts-phase-token
 - [x] watch-pr-signature-window
 - [x] state-cli-foundation
+- [x] state-cli-verbs
+- [x] gate-light-research-carryover
