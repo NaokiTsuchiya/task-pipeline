@@ -79,16 +79,16 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
    query($owner:String!,$repo:String!,$number:Int!){
      repository(owner:$owner,name:$repo){ pullRequest(number:$number){
        reviewDecision
-       reviewThreads(first:100){nodes{isResolved isOutdated
+       reviewThreads(last:100){nodes{isResolved isOutdated
          comments(last:20){nodes{databaseId author{login} path line url body}}}}
        reviews(last:50){nodes{databaseId state author{login} url body}}
        comments(last:50){nodes{databaseId author{login} url body}}
      }}}' -F owner=<owner> -F repo=<repo> -F number=<番号>
    ```
 
-   **取得窓は署名側 (`~/.claude/skills/task-pipeline/scripts/watch-pr.sh` 48-50 行) が変化を検知しうる範囲に合わせてある。狭めてはならない。** 署名は PR 直下コメント `last:50` / レビュー `last:50` / スレッド `first:100` × スレッド内コメント `last:20` の updatedAt と件数を見ており、ここを狭めると**署名は動いたのに観測に載らない変化**が生まれ、`clean` 判定でその変化だけが消費される (署名は先に進むので、同じ指摘が再び検知されることはない)。とくに**スレッド内コメントは新しい側 (`last`) を取ること** — 古い側 5 件だけでは、6 件以上に育ったスレッドへの新しい返信が丸ごと見えない。
+   **取得窓は署名側 (`~/.claude/skills/task-pipeline/scripts/watch-pr.sh` の `reviewThreads(last:100)` を含む実クエリ、61-63 行) が変化を検知しうる範囲に合わせてある。狭めてはならない。** 署名は PR 直下コメント `last:50` / レビュー `last:50` / スレッド `last:100` × スレッド内コメント `last:20` の updatedAt と件数を見ており、ここを狭めると**署名は動いたのに観測に載らない変化**が生まれ、`clean` 判定でその変化だけが消費される (署名は先に進むので、同じ指摘が再び検知されることはない)。とくに**スレッド内コメントは新しい側 (`last`) を取ること** — 古い側 5 件だけでは、6 件以上に育ったスレッドへの新しい返信が丸ごと見えない。
 
-   残余: 署名側の窓の**外**は観測にも載らないが、署名も動かないので「検知されたのに観測されない」にはならない — PR 直下コメント 51 件目以降・レビュー 51 件目以降・スレッド内 21 件目以降 (いずれも古い側) の本文編集と、101 本目以降のスレッドの変化 (新規スレッド・解決状態を含む) がこれに当たる。これは署名側の窓の問題なので、このファイルの取得窓では塞げない。
+   残余: 署名側の窓の**外**は観測にも載らないが、署名も動かないので「検知されたのに観測されない」にはならない — PR 直下コメント 51 件目以降・レビュー 51 件目以降・スレッド内 21 件目以降 (いずれも古い側) の本文編集 (新規投稿はいずれも totalCount で拾えるので、これは編集に限った残余である) と、スレッド総数が 100 を超えるときの**最も古い側**のスレッドの resolve/unresolve (そのスレッド自体の新規投稿は totalCount で拾える) がこれに当たる。これは署名側の窓の問題なので、このファイルの取得窓では塞げない。
 
    GraphQL が使えなければ `gh pr view <pr url> --json comments,reviews` に落とす (解決済みの判別が付かなくなるので、`handled` による除外だけで重複を防ぐ)。
 
