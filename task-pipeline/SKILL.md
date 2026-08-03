@@ -29,13 +29,13 @@ Pause for the user only when the work genuinely requires them: a destructive or 
   - `rebase` は**マージを回収した後に、まだレビュー待ちの自分の PR を新しい `origin/<base>` へ載せ直すか**。`auto` (省略時): ガードを全部通ったものだけ rebase して force push する (下記「残った PR を新しい基点へ載せ直す」)。`off`: 何もしない (基点が古いままの PR は人がリベースする)。`finish=pr` のときだけ意味を持つ。
 - skill dir: `~/.claude/skills/task-pipeline/`
 - アダプタ定義: `~/.claude/skills/task-pipeline/references/adapters/<tracker>.md`。存在しなければ adapters/ を Glob で列挙して提示し、**ループを止めて** (枯渇時フロー手順 2 と同じ) 終了する。
-- **プロジェクトルート**: このパイプラインが「プロジェクト」と呼ぶのは常に**メイン worktree のルート**であって、起動時のカレントディレクトリではない。`git rev-parse --path-format=absolute --git-common-dir` が返すパス (常にメインリポジトリの `.git`。linked worktree から実行しても同じ) の**親ディレクトリ**をプロジェクトルートとする (これにより、別の worktree から `/loop /task-pipeline` を回しても state とタスク worktree は 1 箇所に集約される)。このコマンドが失敗する (git リポジトリでない) ときだけ、カレントディレクトリをプロジェクトルートとする。
+- **プロジェクトルート**: このパイプラインが「プロジェクト」と呼ぶのは常に**メイン worktree のルート**であって、起動時のカレントディレクトリではない。`git rev-parse --path-format=absolute --git-common-dir` が返すパス (常にメインリポジトリの `.git`。linked worktree から実行しても同じ) の**親ディレクトリ**をプロジェクトルートとする (これにより、別の worktree から `/loop /task-pipeline` を回しても state とタスク worktree は 1 箇所に集約される)。同じコマンドの出力は、下記「毎イテレーションの手順」手順 0 で呼ぶ `state.ts init` の `--git-common-dir` にもそのまま渡す。このコマンドが失敗する (git リポジトリでない) ときは、プロジェクトルートを起動時のカレントディレクトリとし、`--git-common-dir` には state dir 自身の絶対パス (`<プロジェクトルート>/.task-pipeline`) を渡す (`info/exclude` の副作用が state dir の中に閉じ込められ、`<git common dir>/info` が `<state dir>` のサブパスになるので追加の Deno 権限ブラケットも不要になる)。
 - 状態はプロジェクトルートの `.task-pipeline/` 配下:
   - `state.json` — 唯一の状態源。**毎イテレーション必ず読み直す**。コンテキスト内の記憶を状態として使わない。
   - `tasks/<id>.md` — タスク本文 (アダプタサブエージェントが書く)
   - `runs/<id>/` — フェーズ成果物と検証判定
   - `sessions/<session id>` — パイプラインを回しているセッションの heartbeat (下記「セッションの所有権」)
-  `.task-pipeline/` を新規に作るときは、同時に `<git common dir>/info/exclude` に `/.task-pipeline/` を追記する (未記載のときだけ)。ユーザーが追跡している `.gitignore` は書き換えない。
+  `.task-pipeline/` の新規作成と `<git common dir>/info/exclude` への `/.task-pipeline/` 追記 (未記載のときだけ) は、下記「毎イテレーションの手順」手順 0 で呼ぶ `state.ts init` が行う (SKILL.md 側に手作業の指示はもう無い)。ユーザーが追跡している `.gitignore` は書き換えない。
 
 ## コンテキスト規律 (最重要)
 
@@ -97,7 +97,7 @@ state.json への書き込みはすべて上記「CLI (state.ts) の呼び出し
 
 ## 毎イテレーションの手順
 
-0. 必要ツールが遅延ロード状態なら、最初に 1 回の ToolSearch でまとめてロードする (`select:SendMessage` など。ループ停止時は CronList/CronDelete も)。続けて、自分のセッション id と生存セッション一覧を取る (上記「セッションの所有権」の 1 コマンド)。
+0. 必要ツールが遅延ロード状態なら、最初に 1 回の ToolSearch でまとめてロードする (`select:SendMessage` など。ループ停止時は CronList/CronDelete も)。続けて `state.ts init --state-dir <.task-pipeline の絶対パス> --tracker <tracker> --source <source> --git-common-dir <上記「プロジェクトルート」で決めた値>` を呼ぶ (`--allow-read`/`--allow-write` に `<git common dir>/info` を含める。冪等なので毎イテレーション無条件に呼んでよく、`state.json` が既に有るときは `tracker`/`source`/`schema_version`/`queue` を含め何も書き換えない。エラー時の扱いは上記「CLI (state.ts) の呼び出し方」のエラー処理表に従う)。続けて、自分のセッション id と生存セッション一覧を取る (上記「セッションの所有権」の 1 コマンド)。
 1. `state.json` を読む。**`session` が自分以外で、かつその id が生存一覧にあるタスクは、以下のすべての判断から除外する** (上記「セッションの所有権」。生存一覧に無い id のタスクは除外しない — それを除外すると、死んだセッションのタスクを誰も引き取れなくなる)。残ったタスクのうち in_review のものがあれば、先に追従を済ませる: `review.watch.state` が `watching` のタスクは PR の追従 (下記。watch プロセスの生存確認と、届いている通知の処理)、`review.tip` を持つタスクはマージの回収 (下記)。その後:
    - `in_progress` のタスクがある → 飛行中の扱いへ。
    - `approved` のタスクがある → 先頭 1 件をタスク実行へ (**1 セッション 1 タスク**。他セッションが別のタスクを実行中でも、自分の飛行中タスクが無いなら進めてよい)。
