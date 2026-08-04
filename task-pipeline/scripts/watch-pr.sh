@@ -10,9 +10,14 @@
 # このシェルであって Claude ではない。webhook の受け口を持てない環境で、反応の速さだけを
 # webhook と同じにするための仕組みである。
 #
-# 変化の判定は署名の比較で行う。署名 = PR の状態 | head sha | CI ロールアップ |
-# コメント数 | レビュー数 | スレッド総数 | 未解決スレッド数 (取得窓内) | 直近更新時刻。
+# 変化の判定は署名の比較で行う。署名 = PR の状態 | head sha | CI ロールアップ | マージ可否 |
+# 基点状態 | コメント数 | レビュー数 | スレッド総数 | 未解決スレッド数 (取得窓内) | 直近更新時刻。
 # GraphQL 1 回で全部取れるので 1 周 1 リクエスト。
+#
+# 署名にフィールドを足すと、既に張られている旧フォーマットの watch.sig との初回比較は必ず
+# 不一致になる (フィールド数が違うので当然)。これはアップグレード直後に 1 回だけ catch-up 相当の
+# 空観測を招くが、実害は無い (指摘があれば拾えるし、無ければ `clean`/`wait` で終わるだけ) ので
+# 許容する。
 #
 # コメント数・レビュー数・スレッド総数は GraphQL の totalCount (ページング引数と無関係に
 # 全体件数を返す) を使っているので、取得窓 (comments(last:50) / reviews(last:50) /
@@ -57,7 +62,7 @@ fi
 
 query='query($owner:String!,$repo:String!,$number:Int!){
   repository(owner:$owner,name:$repo){ pullRequest(number:$number){
-    state headRefOid
+    state headRefOid mergeable mergeStateStatus
     comments(last:50){totalCount nodes{updatedAt}}
     reviews(last:50){totalCount nodes{updatedAt}}
     reviewThreads(last:100){totalCount nodes{isResolved comments(last:20){nodes{updatedAt}}}}
@@ -67,10 +72,23 @@ query='query($owner:String!,$repo:String!,$number:Int!){
 
 # CI がまだ登録されていない (null) 状態と PENDING を同じ扱いにする。
 # 分けると push 直後に「null -> PENDING」で 1 回無駄に起きる。
+#
+# mergeable/mergeStateStatus も同じ問題を持つ。GitHub がこの 2 つを非同期に計算するため、
+# push 直後や新規 PR では確定するまで一時的に UNKNOWN を返す。素のまま signature に入れると
+# push のたびに「(実際の値) -> UNKNOWN -> (実際の値)」の 2 回の遷移として現れ、push 自体で
+# 起きる 1 回に加えて余計にもう 1 回起きてしまう。rebase 判定に使う実際の値は pr-watcher.md
+# 側が観測のたびに取り直す (このスクリプトは「変化した」ことだけを知らせればよい) ので、
+# ここでは「衝突が確定しているか」「基点遅れが確定しているか」の 1 ビットずつが分かれば足り、
+# それ以外 (UNKNOWN を含む) は既定値へ折り畳む — 上の CI ロールアップの null -> "PENDING" と
+# 同じ「一過性/無関心な値を確定済みの一方の帰結と同じ扱いに畳む」考え方。mergeStateStatus の
+# DIRTY (コンテンツ衝突) は mergeable=CONFLICTING 側で既に拾えるので、ここでの関心事
+# (基点遅れ = BEHIND) 以外は区別しない。
 jq_signature='.data.repository.pullRequest | [
   .state,
   .headRefOid,
   (.commits.nodes[0].commit.statusCheckRollup.state // "PENDING"),
+  (if .mergeable == "CONFLICTING" then "CONFLICTING" else "MERGEABLE" end),
+  (if .mergeStateStatus == "BEHIND" then "BEHIND" else "CLEAN" end),
   (.comments.totalCount | tostring),
   (.reviews.totalCount | tostring),
   (.reviewThreads.totalCount | tostring),
