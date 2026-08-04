@@ -1,9 +1,14 @@
 # バックログ
 
+- [ ] metrics-collect-scan-mode
+
 ## In Review
 
 ## Done
 
+- [x] task-prep-doc-drift-sync
+- [x] pr-watch-window-alignment
+- [x] finalize-flow-doc-fixes
 - [x] skill-state-cli-migration
 - [x] sha-record-for-gate-light
 - [x] skill-install-script
@@ -23,3 +28,8 @@
 - [x] state-cli-foundation
 - [x] state-cli-verbs
 - [x] gate-light-research-carryover
+- [x] markdown-inreview-blocked-return
+- [x] state-init-bootstrap
+- [x] state-cli-lock-race-guards
+- [x] run-sh-skip-visibility
+- [x] adapter-protocol-sync
