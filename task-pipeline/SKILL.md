@@ -271,7 +271,7 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 
 ### 変化を待つ (バックグラウンド)
 
-追従は「定期的に見に行く」のではなく「**変化したら起こされる**」形にする。待つ処理はバックグラウンドのシェルに置き、モデルは何かが動いたときだけ起きる: `TASK_PIPELINE_HEARTBEAT=<.task-pipeline の絶対パス>/sessions/<自分のセッション id> bash ~/.claude/skills/task-pipeline/scripts/watch-pr.sh <PR URL> <task id> 60 21600 '<watch.sig — 渡す条件は下記>'` を **background で** 走らせる。`TASK_PIPELINE_HEARTBEAT` はスクリプトが 1 周ごとに touch するセッション生存印で、セッション id が取れないときだけ省く (**これを渡さないと、in_review で待っている間に所有セッションが死んだと誤判定される** — heartbeat を打てるのはこのプロセスだけ)。スクリプトは PR の署名 (状態・head sha・CI ロールアップ・コメント数・レビュー数・スレッド総数・未解決スレッド数・コメント最終更新時刻) を GraphQL 1 回で取り、変化するまでブロックして終了する。**変化が無い間は 1 度も起きない**。
+追従は「定期的に見に行く」のではなく「**変化したら起こされる**」形にする。待つ処理はバックグラウンドのシェルに置き、モデルは何かが動いたときだけ起きる: `TASK_PIPELINE_HEARTBEAT=<.task-pipeline の絶対パス>/sessions/<自分のセッション id> bash ~/.claude/skills/task-pipeline/scripts/watch-pr.sh <PR URL> <task id> 60 21600 '<watch.sig — 渡す条件は下記>'` を **background で** 走らせる。`TASK_PIPELINE_HEARTBEAT` はスクリプトが 1 周ごとに touch するセッション生存印で、セッション id が取れないときだけ省く (**これを渡さないと、in_review で待っている間に所有セッションが死んだと誤判定される** — heartbeat を打てるのはこのプロセスだけ)。スクリプトは PR の署名 (状態・head sha・CI ロールアップ・マージ可否・基点状態・コメント数・レビュー数・スレッド総数・未解決スレッド数・コメント最終更新時刻) を GraphQL 1 回で取り、変化するまでブロックして終了する。**変化が無い間は 1 度も起きない**。マージ可否・基点状態のフィールドが増えたことで、アップグレード直後は既存の `watch.sig` (旧フォーマット) との比較が必ず 1 回不一致になり、catch-up 相当の空観測が 1 回入る (実害は無い — 詳細は `watch-pr.sh` のコメント)。
 
 - 起動するのは **レビュー待ちに入った直後** と **pr_fix の push 直後**。`state.ts watch-set --id <id> --proc <background shell の id> --sig null` を呼ぶ (`proc_started_at` は `--proc` と同時に自動更新される。レビュー待ちに入った直後は `watch-init` が既に `session` を自分の id にしているので触れなくてよいが、pr_fix の push 直後は起動し直しなので `--session <自分の id>` も添える)。この 2 つの起動では `watch.sig` も null に戻す (push で head が変わるため。**したがって下記の catch-up 観測の対象になる** — 理由は `docs/state-machine.md`)。
 - 毎イテレーション、**in_review で** `watching` のタスクを見て、次の**いずれか**に当てはまれば watch プロセスを起動し直す (`watch.proc` が null / タスクの `session` が非null で生存一覧に無い [他セッション由来なら止めずに null に落とす] / `proc_started_at` から 7 時間以上経っているのに通知が来ていない。pr_fix を回している間は張らない): `state.ts watch-set --id <id> --proc <新しい background shell の id> --session <自分の id> [--sig <既存の値があれば>]` を呼ぶ (`--session` は dead session でも無条件に上書きする)。**`watch.fix_pending` か `review.rebase.resolve_pending` が真のタスクでは起動しない** — 「修正サイクル」/「解決サイクル」の手順 0 から入る。
@@ -309,6 +309,11 @@ Return only the watch JSON.
   - **`approve=auto`**: 尋ねない。queue に残したまま報告に 1 行出し `withdraw-asked` を呼ぶ。`withdraw-remove` は呼ばず、自動で外しもしない (要求が別経路で満たされたかはパイプラインには判定できない)。
   - トラッカー側への書き込みはしない (issue の close/reopen は PR を取り下げた人の判断済み)。
 - `wait` (CI 実行中) / `clean` (CI 通過・未対応の指摘なし) → 何もしない。watch プロセスを起動し直してターンを終える。`clean` は人のマージ待ちである。
+- `rebase` → PR の基点が古い (`mergeStateStatus: BEHIND`) か衝突している (`mergeable: CONFLICTING`) ことを watcher が検知した合図。**`fix` より優先する** (watcher 自身が pr-watcher.md 手順 2 で早期リターンしており、この観測の `comment_ids` は常に空 — 集めていないので `handled` へ入れる対象が無い。取りこぼした指摘があっても、下で force push が起きた瞬間に `watch.sig` が null に戻り、次の catch-up 観測が改めて actionable として拾う)。`state.ts fix-pending` は呼ばない。処理は既存の下記「残った PR を新しい基点へ載せ直す」節の**手順 1〜5 をこのタスク 1 件に限ってその場で行う** (新しい載せ直し経路は作らない):
+  - **`rebase=off` のときはこの節ごと飛ばす** — 載せ直さず、「基点が古い/衝突しているため載せ直しが必要 (`rebase=off` のため未実施)」の旨を 1 行報告するだけにして、watch プロセスを起動し直してターンを終える。
+  - `rebase=off` でなければ、まず `git -C <プロジェクトルート> fetch origin` を行う (「マージ後にプロジェクト側を origin へ追いつかせる」を経ずにこの経路へ来ることがあるため、`origin/<base>` の remote-tracking ref が古いままの可能性がある)。そのうえで同節の手順 1〜5 をこの 1 件に対して行う。**`review.rebase.blocked_onto` が現在の `origin/<base>` の sha と既に一致しているときは、同節の対象条件 3 つ目のガードにより載せ直しも報告も繰り返さない** (前回この基点で試して記録済み、または既に載せ直し済みで動いていない)。
+  - コンフリクトすれば同節の「コンフリクトのトリアージ」→「解決サイクル (`rebase_fix`)」へ通常どおり合流する。
+  - 成功時は同節の手順 5 (`watch.sig` を null にして watch プロセスを起動し直す) がそのまま適用される。ガードで弾かれた/`rebase=off` のときはこのイテレーションでは何もしない (次に `rebase` verdict が来れば同じ扱いを繰り返す)。
 - `fix` → `state.ts fix-pending --id <id> --pending-ids <comment_ids をカンマ区切り> --findings <findings のパス>` を呼んでから、下記の修正サイクルへ。
 - `error` (観測サブエージェントの `error`、または watch スクリプトの終了コード 3 / 4) → `state.ts watch-set --id <id> --errors-inc true --note <エラー内容>` を呼ぶ。**追従は続ける** (一時的な不調が大半)。3 回連続で `error` なら `state.ts watch-set --id <id> --state stopped` を呼び (`session` も同じ書き込みで null)、watch プロセスも起動し直さずに 1 行報告する (ループもタスクも止めない)。`error` 以外になったら `state.ts watch-set --id <id> --errors-reset true` を呼ぶ。3 回に満たないときは: **このイテレーションでは watch プロセスを起動し直さない** (次イテレーションが張り直し経路から再開する)。**観測サブエージェントの `error` では `state.ts watch-set --id <id> --sig null` を呼んで `watch.sig` を取り消す** (張り直すと次の外部変化までブロックし続け、error 中の指摘が失われるため)。**watch スクリプトの終了コード 3/4 では `watch.sig` をそのままにする** (`watch-set --sig` を呼ばない — 次の張り直しでその署名を使えば catch-up より安く済む)。
 どの verdict でも、返ってきた `review_only` が空でなければ: その要旨を 1 行で報告し (findings ファイルが書かれていればパスを添える)、`state.ts review-only --id <id> --ids <報告した id をカンマ区切り>` を呼んで `watch.handled` に足す — 人の判断待ちの指摘を毎回報告し直さない・watcher に再登場させないため。
@@ -372,7 +377,7 @@ done を回収したら、続けて**プロジェクト側のブランチを `or
 
 ### 残った PR を新しい基点へ載せ直す (rebase)
 
-`origin` に追いついたら、続けて**まだレビュー待ちの自分の PR を新しい `origin/<base>` に載せ直す** (`rebase=off` ならこの節ごと飛ばす)。マージした瞬間に残っている open PR の基点は 1 つ古くなり、レビューの差分がずれて CI が古い基点でしか通らなくなりうる。これは PR の履歴を書き換える (force push する) 操作なので、**パイプラインが作った `task-pipeline/<id>` ブランチにだけ**行い、ガードを 1 つでも落としたら**触らずに記録して報告する** (`--continue`/`--force` は使わない)。
+`origin` に追いついたら、続けて**まだレビュー待ちの自分の PR を新しい `origin/<base>` に載せ直す** (`rebase=off` ならこの節ごと飛ばす)。マージした瞬間に残っている open PR の基点は 1 つ古くなり、レビューの差分がずれて CI が古い基点でしか通らなくなりうる。これは PR の履歴を書き換える (force push する) 操作なので、**パイプラインが作った `task-pipeline/<id>` ブランチにだけ**行い、ガードを 1 つでも落としたら**触らずに記録して報告する** (`--continue`/`--force` は使わない)。**この節へは 2 つの経路から入る**: ここで説明する「done 回収時の後処理一式」として queue 全体を走査する経路と、上記「観測」節が verdict `rebase` を受けたときにタスク 1 件に限って入る経路。どちらも以下の対象条件・手順 1〜5 は同じ 1 つの手順であり、複製はしない。
 対象は、queue の **`in_review`** タスクのうち次をすべて満たすもの (他セッション所有のタスクは除外済み。`in_progress` で `pr_fix` を回しているタスクも対象外 — 足元の履歴を書き換えると成果が壊れる):
 
 - `review.ref` が PR URL で、`review.watch.state` が `watching` (取り下げ済み・`stopped` のものは触らない — 既に人の手に渡っている)

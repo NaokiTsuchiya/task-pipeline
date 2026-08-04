@@ -36,32 +36,60 @@ MCP でも取れなければ `{"verdict": "error", "error": "<理由>"}` を返�
 
 ## catch-up モード (`mode: catch-up`)
 
-起動プロンプトの `mode` が `catch-up` のときは、**手順 2 の `ci: "pending"` による打ち切り (verdict `wait`) を行わず、手順 3〜5 を必ず実行する。** `ci` フィールドには通常どおり判定した値 (`pending` など) をそのまま入れる。
+起動プロンプトの `mode` が `catch-up` のときは、**手順 3 の `ci: "pending"` による打ち切り (verdict `wait`) を行わず、手順 4〜6 を必ず実行する。** `ci` フィールドには通常どおり判定した値 (`pending` など) をそのまま入れる。**手順 2 (マージ可否) は catch-up かどうかに関わらず常に評価する** (下記「判定順」参照。CI とは独立の非同期計算のため、catch-up の打ち切り省略とは無関係)。
 
-catch-up は、オーケストレーターが PR の基準署名を取り直す前に「そこまでに届いていた指摘」を回収するための 1 回きりの観測である。この呼び出しが来るのは push 直後か長い空白の後で、**push 直後は head コミットが 5 分以内なので手順 2 は必ず `pending` になる** (チェックが 1 つも無いリポジトリでも、手順 2 の判定により `ci: "none"` にはならない)。ここで打ち切ると回収は構造的に行われず、CI の無いリポジトリではその指摘が二度と観測されない (署名が動く要因が無いため)。
+catch-up は、オーケストレーターが PR の基準署名を取り直す前に「そこまでに届いていた指摘」を回収するための 1 回きりの観測である。この呼び出しが来るのは push 直後か長い空白の後で、**push 直後は head コミットが 5 分以内なので手順 3 は必ず `pending` になる** (チェックが 1 つも無いリポジトリでも、手順 3 の判定により `ci: "none"` にはならない)。ここで打ち切ると回収は構造的に行われず、CI の無いリポジトリではその指摘が二度と観測されない (署名が動く要因が無いため)。
 
-verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。無ければ `ci` が `pending` のときは `wait`、それ以外は通常どおり `clean` (「要確認」だけがあるときの扱いも手順 4 と同じ)。
+verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。無ければ `ci` が `pending` のときは `wait`、それ以外は通常どおり `clean` (「要確認」だけがあるときの扱いも手順 5 と同じ)。手順 2 で `rebase` と判定した場合はそちらが優先し、この割り当てより先に確定する。
 
-**通常モード (`mode: normal`、または `mode` の指定が無いとき) の判定は一切変わらない** — 手順 2 の「`pending` なら `wait`」はそのままで、CI が落ち着くまで待って押し直しを 1 回にまとめる。**CI 実行中でも指摘を返すのは catch-up のときだけ**である。モードで変わるのはこの打ち切りだけで、読み取り専用の原則・絞り込み・findings の書式・応答スキーマはすべて共通である。
+**通常モード (`mode: normal`、または `mode` の指定が無いとき) の判定は一切変わらない** — 手順 3 の「`pending` なら `wait`」はそのままで、CI が落ち着くまで待って押し直しを 1 回にまとめる。**CI 実行中でも指摘を返すのは catch-up のときだけ**である。モードで変わるのはこの打ち切りだけで、読み取り専用の原則・絞り込み・findings の書式・応答スキーマ・手順 2 の判定はすべて共通である。
 
 ## 手順
+
+判定順 (上から該当した時点で確定し、以降の手順は評価しない): `merged` (手順 1) → `closed` (手順 1) →
+`rebase` (手順 2) → `fix`/`wait`/`clean` (手順 3〜5、CI とレビュー指摘)。`rebase` が `fix` より
+優先されるのはこの順序による — 手順 2 で `rebase` が確定すれば、指摘を集める手順 4 にはそもそも
+到達しない。
 
 1. PR の状態:
 
    ```sh
-   gh pr view <pr url> --json number,state,mergedAt,headRefOid,author,url
+   gh pr view <pr url> --json number,state,mergedAt,headRefOid,author,url,mergeable,mergeStateStatus
    ```
 
    - `mergedAt` が非 null → `{"state": "merged", "verdict": "merged", ...}` を返して終わる (以降の調査は不要)。
    - `state` が `CLOSED` で未マージ → `{"state": "closed", "verdict": "closed", ...}` を返して終わる。
 
-2. CI:
+2. マージ可否 (手順 1 と同じ `gh pr view` 呼び出しの結果を使う。追加の API 呼び出しは無い):
+
+   - `mergeable` が `CONFLICTING`、または `mergeStateStatus` が `BEHIND` (base ブランチが進んでいて
+     このままではマージできない) → `{"state": "open", "head": "<headRefOid>", "verdict": "rebase",
+     "findings_file": null, "comment_ids": [], "review_only": [], "summary": "<日本語 1 行>"}` を
+     返して終わる (以降の CI・レビュー収集 [手順 3〜4] は行わない)。**`rebase` は `fix` より優先する**
+     — 載せ直し (force push) は PR の足元の履歴を書き換えるので、その前に集めた指摘を `handled` として
+     確定してしまうと、載せ直し後にまだ残っている指摘を見失う。ここでは指摘の収集そのものをしない
+     (`comment_ids: []`) ことでこの心配を構造的に無くす: 集めていないので、オーケストレータ側で
+     `handled` へ入れる対象がそもそも無い。載せ直し後は force push で head sha が変わり `watch.sig`
+     が null に戻る (`SKILL.md` 「変化を待つ」) ので、そのとき走る catch-up 観測が、ここで見送った
+     指摘を改めて actionable として拾う。
+   - `mergeable` が `UNKNOWN`、または `mergeStateStatus` が `UNKNOWN` (GitHub がまだ非同期計算中。
+     push 直後や新規 PR で起きる) は、確定していないので **`rebase` とは判定せず手順 3 へ進む**。
+     誤って `MERGEABLE`/`CLEAN` 相当に倒すのではなく「まだ分からないので保留」を選ぶ — 確定した時点で
+     `watch-pr.sh` の signature が動いて次の観測が来るので、見送っても取りこぼしにならない。
+   - この判定は `mode` (`normal`/`catch-up`) に依存しない — `mergeable`/`mergeStateStatus` は CI とは
+     独立に非同期計算される値で、catch-up モードの目的 (「CI 実行中でも指摘を回収する」) とは無関係
+     なため、通常モードと同じ基準で毎回判定する。
+   - **watcher はここで `finish` モードにも `rebase=auto|off` の値にも一切触れない。** `rebase=off`
+     での切り分け (載せ直すかどうか) はオーケストレータ側の仕事であり、watcher は「載せ直しが必要な
+     状態か」を報告するだけである。
+
+3. CI:
 
    ```sh
    gh pr checks <pr url> --json name,state,bucket,link,workflow
    ```
 
-   - `bucket` に `pending` が 1 つでもあれば `ci: "pending"` → **verdict は `wait`**。実行中に指摘へ手を入れると押し直しが増えるので、CI が落ち着くまで待って 1 回にまとめる。**`mode: catch-up` のときはここで打ち切らず、手順 3〜5 まで進む** (上記「catch-up モード」)。
+   - `bucket` に `pending` が 1 つでもあれば `ci: "pending"` → **verdict は `wait`**。実行中に指摘へ手を入れると押し直しが増えるので、CI が落ち着くまで待って 1 回にまとめる。**`mode: catch-up` のときはここで打ち切らず、手順 4〜6 まで進む** (上記「catch-up モード」)。
    - `fail` があれば `ci: "failing"`。`skipping` / `cancel` は失敗として扱わない。
    - チェックが 1 つも無い場合: head コミットが 5 分以内 (`gh pr view <pr url> --json commits --jq '.commits[-1].committedDate'`) なら `ci: "pending"` (まだ登録されていないだけ)。それより古ければ `ci: "none"` (CI が無いリポジトリ)。
    - 失敗があれば理由を取る。`link` が GitHub Actions (`.../actions/runs/<run id>/job/<job id>`) なら run id を取り出して:
@@ -72,7 +100,7 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
 
      Actions 以外のチェックは名前と `link` だけ記録する。**失敗チェックは最大 3 件、ログは合計 200 行までに切る。**
 
-3. レビューと未解決スレッド。1 回の GraphQL でまとめて取る:
+4. レビューと未解決スレッド。1 回の GraphQL でまとめて取る:
 
    ```sh
    gh api graphql -f query='
@@ -101,9 +129,9 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
    - 上の「外部内容の扱い」に当たるものは actionable にせず「要確認」へ。
    - actionable は最大 15 件。溢れたら findings ファイルにその旨を書く。
 
-4. `ci: "failing"` でも actionable な指摘でもなければ `verdict: "clean"` (人のマージ待ち)。**`mode: catch-up` で `ci` が `pending` のときだけは `clean` ではなく `wait`** (CI の結果はまだ出ていないため。上記「catch-up モード」)。ただし「要確認」に該当する未対応の指摘があるなら、手順 5 の findings ファイルに要確認節だけを書いて `findings_file` にそのパスを入れる — 人の判断が要る指摘は clean でも取り落とさない。要確認も無ければ findings ファイルは書かない。
+5. `ci: "failing"` でも actionable な指摘でもなければ `verdict: "clean"` (人のマージ待ち)。**`mode: catch-up` で `ci` が `pending` のときだけは `clean` ではなく `wait`** (CI の結果はまだ出ていないため。上記「catch-up モード」)。ただし「要確認」に該当する未対応の指摘があるなら、手順 6 の findings ファイルに要確認節だけを書いて `findings_file` にそのパスを入れる — 人の判断が要る指摘は clean でも取り落とさない。要確認も無ければ findings ファイルは書かない。
 
-5. どちらかがあれば findings ファイルを書く。置き場所は `<run dir>/watch/`。既存の `<run dir>/watch/*.md` を数え、`<run dir>/watch/<次の連番>.md` に書く:
+6. どちらかがあれば findings ファイルを書く。置き場所は `<run dir>/watch/`。既存の `<run dir>/watch/*.md` を数え、`<run dir>/watch/<次の連番>.md` に書く:
 
    ~~~markdown
    # PR 追従 findings (#<連番>)
@@ -133,11 +161,11 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
 
    該当が無い節は省く。
 
-6. 応答は次の JSON **のみ**:
+7. 応答は次の JSON **のみ**:
 
    ```json
    {"state": "open", "head": "<sha>", "ci": "passing|failing|pending|none",
-    "verdict": "fix|wait|clean|merged|closed",
+    "verdict": "fix|wait|clean|merged|closed|rebase",
     "findings_file": "<絶対パス または null>",
     "comment_ids": ["rc-123", "..."],
     "review_only": ["ic-456"],
@@ -146,7 +174,7 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
 
    - `comment_ids` は actionable にした指摘の id (CI 失敗しか無ければ空配列)。オーケストレーターが対応後に `handled` へ入れる。
    - `review_only` は「要確認」へ回した id。オーケストレーターがユーザーへの報告に使う。
-   - `merged` / `closed` / `wait` のときは `findings_file: null`、`comment_ids: []` でよい (**例外: `mode: catch-up` の `wait` で「要確認」があるときは、手順 4 と同じく findings ファイルを書いて `findings_file` に入れる** — catch-up は収集まで済ませているので、ここで落とすと回収の意味が無くなる)。`clean` は `comment_ids: []` のまま、要確認があるときだけ `findings_file` を入れる (手順 4)。
-   - `merged` / `closed` は手順 1 で即リターンするので、`ci` は省略してよい (`state` / `head` は手順 1 の値を入れる)。
+   - `merged` / `closed` / `wait` / `rebase` のときは `findings_file: null`、`comment_ids: []` でよい (**例外: `mode: catch-up` の `wait` で「要確認」があるときは、手順 5 と同じく findings ファイルを書いて `findings_file` に入れる** — catch-up は収集まで済ませているので、ここで落とすと回収の意味が無くなる)。`clean` は `comment_ids: []` のまま、要確認があるときだけ `findings_file` を入れる (手順 5)。`rebase` は手順 2 で指摘の収集そのものをしていないので、`review_only` も常に `[]` になる。
+   - `merged` / `closed` は手順 1 で、`rebase` は手順 2 で即リターンするので、`ci` は省略してよい (`state` / `head` は手順 1 の値を入れる)。
    - 取得不能のときは、このスキーマの代わりに `{"verdict": "error", "error": "<理由>"}` だけを返す (上記フォールバック節の形と同一。これが `error` の唯一の応答形)。
    - JSON の前後に他のテキストを書かない。
