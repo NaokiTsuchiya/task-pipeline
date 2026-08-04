@@ -220,11 +220,17 @@ Return only what the adapter file specifies for this operation.
          ```
          <id> レビュー待ち: <PR URL> — <タイトルを 40 字程度で>
          ```
-         - 送るのは **PR / コミットができた最初の 1 回だけ**。`pr_fix` からの復帰 (下の行) では送らない — 指摘に対応して押し直したことは watch 側の追従で見えており、往復のたびに鳴らすと通知の価値が落ちる。
+         - 送るのは **PR / コミットができた最初の 1 回**、および `pr_fix` / `rebase_fix` からの復帰で押し直した各回 (下記「更新時の通知」)。**最初の 1 回の文面 (上のテンプレート) は変えない。**
          - **ツールが無い環境では何もしない。** 送れなかったことを失敗として扱わず、フェーズも止めない (通知は成果物ではない)。ユーザーが端末の前にいるときは重複なので送られないことがあるが、それも正常である。
          - 通知に載せるのは id・URL・タイトルだけにする。**CI の状態や検証の結果は書かない** — この時点では CI が回り始めてすらいないことがあり、通知は取り消せない。
-       - **rebase_fix からの復帰でここに来たときも `mark` を呼び直さず、通知も送らない。** `state.ts rebase-done --id <id> --tip <新tip>` を呼ぶ (`review.tip` を新しい tip に更新し、`review.rebase` を削除する、を単一の書き込みで行う)。続けて `state.ts watch-set --id <id> --state watching` で `watch.state` を `watching` に戻し、watch を張り直す (`watch.handled` も `fix_attempts` もそのまま保つ — 載せ直しはレビュー指摘への往復ではない)。
-      - **pr_fix からの復帰でここに来たときは、上の `in-review` を呼ぶより前に `state.ts fix-done --id <id>` を呼ぶ** (前提: `status=="in_progress" && phase=="finalize" && review.watch!=null`。`in-review` は `status→in_review, phase→null` に書き換えるため、先に `fix-done` を呼ばないとこの前提が崩れて `conflict` で失敗する。効果: `watch.pending_ids` を重複無しで `watch.handled` へ合流し、`pending_ids→[]`, `findings→null` を単一の原子的書き込みで行う)。**併せて `mark` も呼び直さない** — トラッカー側は in_review のままで何も変わっておらず、呼べば重複コメントになるだけである。`fix-done` の後に `in-review` を呼び、続けて `state.ts watch-set --id <id> --state watching` で `watch.state` を `watching` に戻す (`watch.fix_attempts` は保たれる)。**この `fix-done` → `in-review` の順序を守らないと、いま対応したばかりの指摘が `pending_ids` に残ったまま `handled` に合流せず、次の catch-up 観測で未対応として再浮上する。**
+         - **更新時の通知**: `pr_fix` / `rebase_fix` からの復帰で PR を押し直したときも、それぞれの手順が定める状態の書き込みがすべて成功した後に (下記の該当行) 1 本送る。最初の 1 回と同じ制約 (`PushNotification`, `status: "proactive"`, 200 字未満・1 行・markdown 無し、**CI の状態や検証の結果は書かない**) を引き継いだうえで、次を満たす:
+           - 先頭付近に **更新であって新規作成ではないと判別できる語** を置く (例: `更新`) — レビュアーが「もう見た PR か」を一目で判断できるようにするため。
+           - **PR URL を含める**。
+           - 何が変わったかを 1 語句で添える — `pr_fix` なら対応した指摘の件数、`rebase_fix` なら衝突解消と載せ直し先。
+           - 例: `<id> 更新 (指摘 <n> 件対応): <PR URL>` / `<id> 更新 (載せ直し → <base>): <PR URL>`
+           - **素の force push (下記「残った PR を新しい基点へ載せ直す」) では送らない** — 詳細と理由は同節に書く。
+       - **rebase_fix からの復帰でここに来たときも `mark` は呼び直さない** (トラッカー側は in_review のままで変化していない)。`state.ts rebase-done --id <id> --tip <新tip>` を呼ぶ (`review.tip` を新しい tip に更新し、`review.rebase` を削除する、を単一の書き込みで行う)。続けて `state.ts watch-set --id <id> --state watching` で `watch.state` を `watching` に戻し、watch を張り直す (`watch.handled` も `fix_attempts` もそのまま保つ — 載せ直しはレビュー指摘への往復ではない)。**この 2 つの書き込みが両方成功したら、更新時の通知を 1 本送る** (文面は上記「更新時の通知」の規定に従う。PR URL と「載せ直し先」を含める)。
+      - **pr_fix からの復帰でここに来たときは、上の `in-review` を呼ぶより前に `state.ts fix-done --id <id>` を呼ぶ** (前提: `status=="in_progress" && phase=="finalize" && review.watch!=null`。`in-review` は `status→in_review, phase→null` に書き換えるため、先に `fix-done` を呼ばないとこの前提が崩れて `conflict` で失敗する。効果: `watch.pending_ids` を重複無しで `watch.handled` へ合流し、`pending_ids→[]`, `findings→null` を単一の原子的書き込みで行う)。**併せて `mark` も呼び直さない** — トラッカー側は in_review のままで何も変わっておらず、呼べば重複コメントになるだけである。`fix-done` の後に `in-review` を呼び、続けて `state.ts watch-set --id <id> --state watching` で `watch.state` を `watching` に戻す (`watch.fix_attempts` は保たれる)。**この `fix-done` → `in-review` の順序を守らないと、いま対応したばかりの指摘が `pending_ids` に残ったまま `handled` に合流せず、次の catch-up 観測で未対応として再浮上する。** 続けて `state.ts watch-set --id <id> --state watching` まで成功したら、**更新時の通知を 1 本送る** (文面は上記「更新時の通知」の規定に従う。PR URL と対応した指摘の件数を含める)。
    - **FAIL** → (判定 JSON は verifier が起動時に渡した verdict path へ既に書いている — オーケストレータは書かない) `state.ts phase-fail --id <id> --phase <phase>` を呼んで `attempts` を +1 する。SendMessage で実行エージェントへ「Fix required. Read required_fixes from `<verdict path の絶対パス>` and address them in phase `<phase>`.」を送る (required_fixes の中身をそのまま転記せず、ファイルのパスだけを渡す)。修正・再停止後に **新しい** 検証エージェントで再検証する。
 
 ### worktree
@@ -394,6 +400,7 @@ done を回収したら、続けて**プロジェクト側のブランチを `or
 - **`finish=commit` のタスクは対象外** (PR が無い)。**1 回のマージで対象が複数あれば全部処理する** (独立、1 本落ちても他は続ける)。
 - **同じ載せ直しを、executor も push の直前に行う** (executor.md の finalize)。ここが拾うのは既に出た PR の基点が後から古くなった場合、あちらは押し直す瞬間に既に古い場合 — `pr_fix` 中のマージは worktree 作業中なのでこの節の対象外にし、push 直前の確認が受け止める。
 - **衝突なく載せ直せた木は誰も検証していない。** 壊れていれば CI が落ち、通常の追従が `pr_fix` で直す。**衝突したときだけ**、解消は人の判断に近い変更なので下記の解決サイクルで検証ゲートを通す。
+- **この経路 (素の force push による載せ直し) ではユーザーへの通知は送らない** — diff の意図は変わらず (基点が動くだけで、差分の内容自体はレビュー済みのものと同じ)、1 回のマージで複数の PR を載せ直すと、レビュアーが見直すべき内容が増えていないのに開いている PR の本数だけ通知が鳴ることになる。指摘や衝突への対応で内容そのものが変わる `pr_fix` / `rebase_fix` の更新時通知 (上記「更新時の通知」) とはここが異なる。
 
 #### コンフリクトのトリアージ
 
