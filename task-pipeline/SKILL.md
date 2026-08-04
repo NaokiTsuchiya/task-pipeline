@@ -20,13 +20,14 @@ Pause for the user only when the work genuinely requires them: a destructive or 
 
 ## 引数と場所
 
-- `$ARGUMENTS`: `<tracker> [source] [finish=none|commit|pr] [approve=ask|auto] [max_open=<N>] [rebase=auto|off]` (例: `markdown ./TASKS.md finish=commit`、`gh ?label=ready finish=pr approve=auto`)。`/loop` 経由では毎イテレーション同じ引数で再起動される。
-  - tracker より後ろのトークンは、`finish=` / `approve=` / `max_open=` / `rebase=` で始まるものがそれぞれの設定、それ以外が `source`。
+- `$ARGUMENTS`: `<tracker> [source] [finish=none|commit|pr] [approve=ask|auto] [max_open=<N>] [rebase=auto|off] [max_tasks=<N>]` (例: `markdown ./TASKS.md finish=commit`、`gh ?label=ready finish=pr approve=auto`)。`/loop` 経由では毎イテレーション同じ引数で再起動される。
+  - tracker より後ろのトークンは、`finish=` / `approve=` / `max_open=` / `rebase=` / `max_tasks=` で始まるものがそれぞれの設定、それ以外が `source`。
   - `approve` は承認の取り方。`ask` (省略時): 候補の上位から**ユーザーが 1 件選ぶ**。`auto`: **順位 1 位を自動で採る** (下記「承認」)。`auto` にすると人を待つ定常ポイントが無くなり、パイプラインは ready なタスクを上から消化し続ける — **トラッカー側の ready がそのまま唯一の人間ゲートになる**ので、`?label=ready` のような絞り込み無しで `auto` を使ってはならない。
   - `max_open` は**マージ待ちのまま溜めてよい自分の PR の本数** (既定 2)。この本数に達している間は新しいタスクを着手しない。ただし**上限に達している間も枯渇の判定と追従の打ち切りには到達する** (下記「ペーシングと枯渇」の停滞) — 到達しないと、誰もマージしない限り空の wakeup が無期限に続く。レビューが追いつかないまま PR だけが積み上がるのを防ぐための上限で、`finish=pr` のときだけ意味を持つ。
   - **`source` は省略できる。** その場合はアダプタ起動プロンプトの `source:` を空にして渡し、既定値の解釈はアダプタに委ねる (既定を持たないアダプタはエラーを返す)。state.json の `source` には与えられたまま (省略なら空文字) を記録する。
   - `finish` はタスク完了時のコード変更の扱い。`none` (省略時): working tree に未コミットで残す。`commit`: タスクごとに現在のブランチへコミット。`pr`: タスクごとにブランチを切り、コミット・push して PR を作成し、**以降その PR の CI とレビューコメントを追従する** (下記「PR の追従」)。
   - `rebase` は**マージを回収した後に、まだレビュー待ちの自分の PR を新しい `origin/<base>` へ載せ直すか**。`auto` (省略時): ガードを全部通ったものだけ rebase して force push する (下記「残った PR を新しい基点へ載せ直す」)。`off`: 何もしない (基点が古いままの PR は人がリベースする)。`finish=pr` のときだけ意味を持つ。
+  - `max_tasks` は**このセッションで新しく着手して完了させてよいタスク数の上限** (既定: 無制限。省略時は現行の挙動を一切変えない)。到達したら、揮発資源ゼロの地点でループを止める — コンテキスト肥大を抑え、人が `/clear` してから再開できるようにするための引数 (下記「`max_tasks` による安全停止」)。
 - skill dir: `~/.claude/skills/task-pipeline/`
 - アダプタ定義: `~/.claude/skills/task-pipeline/references/adapters/<tracker>.md`。存在しなければ adapters/ を Glob で列挙して提示し、**ループを止めて** (枯渇時フロー手順 2 と同じ) 終了する。
 - **プロジェクトルート**: このパイプラインが「プロジェクト」と呼ぶのは常に**メイン worktree のルート**であって、起動時のカレントディレクトリではない。`git rev-parse --path-format=absolute --git-common-dir` が返すパス (常にメインリポジトリの `.git`。linked worktree から実行しても同じ) の**親ディレクトリ**をプロジェクトルートとする (これにより、別の worktree から `/loop /task-pipeline` を回しても state とタスク worktree は 1 箇所に集約される)。同じコマンドの出力は、下記「毎イテレーションの手順」手順 0 で呼ぶ `state.ts init` の `--git-common-dir` にもそのまま渡す。このコマンドが失敗する (git リポジトリでない) ときは、プロジェクトルートを起動時のカレントディレクトリとし、`--git-common-dir` には state dir 自身の絶対パス (`<プロジェクトルート>/.task-pipeline`) を渡す (`info/exclude` の副作用が state dir の中に閉じ込められ、`<git common dir>/info` が `<state dir>` のサブパスになるので追加の Deno 権限ブラケットも不要になる)。
@@ -102,6 +103,7 @@ state.json への書き込みはすべて上記「CLI (state.ts) の呼び出し
    - `in_progress` のタスクがある → 飛行中の扱いへ。
    - `approved` のタスクがある → 先頭 1 件をタスク実行へ (**1 セッション 1 タスク**。他セッションが別のタスクを実行中でも、自分の飛行中タスクが無いなら進めてよい)。
    - どちらも無い (state が無い場合を含む) → 承認へ。
+   **`max_tasks` による停止判定**: 上の2つの分岐 (`approved` のタスクがある / どちらも無い) のどちらでも、新しい着手・承認へ進む前に、飛行中の上限・`max_open` の判定より先にこれを行う。詳細と止め方は下記「`max_tasks` による安全停止」。上限に達していれば、以下の判定 (併走の枠・飛行中の上限・`max_open`) を評価せずそちらの手順で止める。達していなければ (`max_tasks` 省略時を含む) 何もせず以下へ進む。
    **併走の枠**: 「1 セッション 1 タスク」が数えるのは**新しいタスク**だけである。1 セッションが同時に持ってよい実行エージェントは **新しいタスク 1 件 + 仕上げ (`pr_fix` / `rebase_fix`) 1 件** までで、この 2 つは互いの枠を塞がない (仕上げは新しい着手ではなく既に出した PR を仕上げる作業。往復には上限 [3 回] があり、別の worktree・別のブランチで動く)。これを分けないと、無関係なタスクの実装フェーズが終わるまでレビューコメントに誰も反応しなくなる。**停止通知は必ず送り元の agentId と各タスクの `executor` を突き合わせて振り分ける**。state.json の書き込みは通常どおり CLI の verb 呼び出しで行う (排他は CLI が内側で担う)。仕上げ同士は併走させない。
    **飛行中の上限**: 新しいタスクの実行を始める前に、**除外した (生きている他セッションが実行中の) in_progress タスクが 2 件以上あるなら始めない**。1 行報告し、dynamic なら ScheduleWakeup 1800 秒を予約してこのイテレーションを終える。プロジェクト全体で飛行中を 2 件までに抑える (人がレビューできる本数まで)。**pr_fix と rebase_fix はこの上限の対象外**。
    **レビュー待ちの上限 (`max_open`、既定 2)**: 同じく新しいタスクを始める前に、**マージ待ちのまま残っている自分の in_review タスク** (`review.ref` が PR URL で、まだ done を回収していないもの) を数える (`finish=pr` のときだけ意味を持つ)。
@@ -492,6 +494,22 @@ done を回収したら、依存の昇格・origin 追いつき・PR 載せ直�
 2. **自分の担当の PR が 1 本も無ければループを止める**: dynamic なら ScheduleWakeup `stop: true`、固定間隔なら CronList で自ジョブを特定して CronDelete。止める前に自分の watch プロセスを止め `state.ts watch-set --id <id> --proc null --session null` を呼ぶ。「自分の担当」は `watch.state` が `watching` のタスクのうち**生きている他セッションが所有しているもの以外すべて** (cron 配下で前イテレーションが持っていた PR も含めて数える — 数えないと自分でジョブを消してから誰も追従しなくなる)。
 3. **自分の担当**の PR が残っているなら**止めずに追従だけを続ける**: 最終報告を出したうえで、dynamic なら 3600 秒で次イテレーションへ (固定間隔なら CronDelete しない。この wakeup は watch プロセスの生存確認だけの保険)。以降も `list` は毎回呼び、**新しい候補が現れたら通常どおり承認を聞く** (`state.ts stalled-set --value null` を呼ぶ)。打ち切り条件は上記「停滞」のみ (別の計時規則は置かない)。
 止める理由: 候補が無いまま起き続けるのは無意味な wakeup とコンテキスト肥大にしかならない (「トラッカーに残っている仕事はすべて消化した」という宣言)。候補が残っているのにキューが空なだけのときは**止めずに承認を聞く**。
+
+### `max_tasks` による安全停止
+
+`max_tasks` は**このセッションが新しく着手して完了させたタスクの件数**の上限で、コンテキストが単調増加する `/loop` を安全な地点で止め、人が `/clear` してから再開できるようにするためにある。**省略時は無制限で、以下は一切発火せず現行の挙動を変えない。**
+
+**カウント**: `<state dir>/task_counts/<自分のセッション id>` というファイル (無ければ0件) に、タスク実行手順1で `state.ts claim` が成功する**たび**にその `<id>` を1行追記する (`mkdir -p "<state dir>/task_counts"` の後 `printf '%s\n' "<id>" >> "<state dir>/task_counts/<自分のセッション id>"` するだけでよい。書くのは自分のセッションだけなので CLI 越しの lock は要らない — `sessions/<id>` の heartbeat と同じ「state dir 配下・自分のファイルだけ触る」規律。**`sessions/` の中には置かない** — `session-touch`/`sessions-alive` は `sessions/` 配下の全ファイルを無条件に対象にするため、紛れ込ませると1440分で掃除されたり `sessions-alive` の一覧に紛れたりする)。**件数はこのファイルの行数** (`wc -l`、無ければ0)。`claim` は新しいタスクの着手だけが通る verb で、`pr_fix`/`rebase_fix` の仕上げは `fix-start`/`rebase-start` を使う (`claim` を経由しない) ため、この行数に仕上げの回数は混ざらない。`CLAUDE_CODE_SESSION_ID` が空で自分の id を主張できない環境では `claim` 自体にセッション id を渡せないため、この判定ごと発火しない (上記「セッションの所有権」と同じ制約)。
+
+**判定**: 毎イテレーションの手順1で、`in_progress` のタスクが無く新しいタスクの着手または承認へ進もうとする直前に、飛行中の上限・`max_open` の判定より先に行う。`max_tasks` が指定されていて上記の行数が `max_tasks` 以上なら、新しい着手にも承認にも進まず、この節の手順で止める。指定が無い、または行数が `max_tasks` 未満なら、この節は何もせず通常どおり以下の判定 (飛行中の上限・`max_open`) に進む。この判定に到達するのは `in_progress` のタスクが1件も無いときだけ (`in_progress` があれば「飛行中の扱い」に分岐し、ここへは来ない) なので、要求している「揮発資源ゼロの地点」を自動的に満たす。**仕上げ (`pr_fix`/`rebase_fix`) が飛行中のタスクは `status: in_progress` なので同じく「飛行中の扱い」に分岐し、この判定へは来ない** — 独自の除外コードを書かずに「仕上げ飛行中は止めない」を満たす。
+
+**止め方**: 枯渇時フロー手順2と**全く同じ手順**を踏む (新しい停止経路は作らない)。「自分の担当」の定義も同じ (`watch.state` が `watching` のタスクのうち、生きている他セッションが所有しているもの以外すべて)。自分の担当の watch プロセスを止めて `state.ts watch-set --id <id> --proc null --session null` を呼んでから、dynamic なら ScheduleWakeup `stop: true`、固定間隔なら CronList で自ジョブを特定して CronDelete する。
+
+**最終報告**: 通常の停止報告に加えて次を含める:
+- **再開コマンド**: このセッションを起動した引数をそのまま使う `/loop /task-pipeline <tracker> <source> ...` を具体的な文字列で示す (state.json には引数を保存していないので、このセッション自身が起動時に受け取った `$ARGUMENTS` から組み立てる — 今回の起動時点の情報を使うだけであり、コンテキストの記憶を状態として使うことにはあたらない)。
+- **その前に `/clear` する案内**: 上記のコマンドを打つ**前に** `/clear` すること (このセッションのコンテキストを手放してから再開する、が `max_tasks` の目的そのものである)。
+- **残っている候補の件数**: state.json の `candidates` の件数と `queue` の `status: "approved"` の件数。
+- **レビュー待ち・追従中の PR の一覧**: `queue` の `status: "in_review"` かつ `review.ref` が非null のタスクを、id・ref・(あれば) `review.watch.state` を添えて列挙する。
 
 ## 報告規律
 
