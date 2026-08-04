@@ -17,6 +17,11 @@
   end_ts          最初の FINALIZED (= PR 作成 or コミット) 時刻。無ければ最後のイベント時刻
   elapsed_seconds start_ts -> end_ts の経過秒 (outcome=finalized のときのみ意味を持つ)
   phase_counts    フェーズ名 -> 出現回数 (2以上は手戻り・リトライ)
+  fail_reasons    このタスクの verdicts (<repo_root>/.task-pipeline/runs/<task>/verdicts/) から
+                   verdict=="FAIL" の判定を集めた一覧: [{"phase":, "attempt":, "required_fixes":}, ...]
+                   (ファイル名昇順)。分類はしない生の required_fixes をそのまま運ぶ。FAIL が無ければ []。
+                   verdicts ディレクトリが無い・読めない・JSON が壊れているときは null
+                   (stderr に警告して収集は継続する)
   tokens          このタスクの全フェーズ合計 subagent_tokens (停止時コンテキストサイズの合計、処理総量ではない)
   tokens_processed subagent transcript を message.id 重複排除して積み上げた実処理量。ファイルが無ければ null
   pr_url          finish_mode=pr のときの PR URL
@@ -65,6 +70,7 @@ NOTIF_RE = re.compile(
     r'<tool_uses>(\d+)</tool_uses><duration_ms>(\d+)</duration_ms></usage>', re.S)
 USAGE_SYNC_RE = re.compile(r'subagent_tokens:\s*(\d+)\ntool_uses:\s*(\d+)\nduration_ms:\s*(\d+)')
 SLUG_RE = re.compile(r'runs/([a-zA-Z0-9_.-]+)/')
+FAIL_ATTEMPT_RE = re.compile(r'-(\d+)\.json$')
 PHASE_RE = re.compile(r'PHASE\s+(\w+(?:\+\w+)*)\s+DONE')
 PR_URL_RE = re.compile(r'(https://github\.com/[^\s)"\']+/pull/\d+)')
 COMMIT_RE = re.compile(r'FINALIZED\s*—\s*([0-9a-f]{7,40})\b')
@@ -94,6 +100,41 @@ def repo_root_of(cwd):
         return None
     m = REPO_ROOT_RE.match(cwd)
     return m.group(1) if m else None
+
+
+def read_fail_reasons(repo_root, slug):
+    """<repo_root>/.task-pipeline/runs/<slug>/verdicts を走査し、verdict=="FAIL" の判定を
+    ファイル名昇順で [{"phase":, "attempt":, "required_fixes":}, ...] に組み立てて返す。
+
+    phase は verdict JSON 本文の "phase" キーをそのまま使う (pr_fix/rebase_fix でもファイル名の
+    連番 <n> を含まない実測値と一致させるため — ファイル名だけが `pr_fix-<n>-<attempt>.json` の
+    3要素になる)。attempt はファイル名末尾の `-<数字>.json` から取る (JSON 本文には attempt が無い)。
+
+    FAIL が1件も無ければ []。verdicts ディレクトリが無い・読めない・中の JSON が1つでも壊れて
+    いるときは、収集全体を止めずに None を返し、stderr に1行警告する (収集器は機械的な転記に
+    徹し、分類はしない — 部分的に読めた分だけを返す拾い上げはしない)。
+    """
+    if not repo_root or not slug:
+        return None
+    vdir = os.path.join(repo_root, '.task-pipeline', 'runs', slug, 'verdicts')
+    try:
+        names = sorted(fn for fn in os.listdir(vdir) if fn.endswith('.json'))
+        fail_reasons = []
+        for fn in names:
+            with open(os.path.join(vdir, fn)) as fh:
+                data = json.load(fh)
+            if data.get('verdict') == 'FAIL':
+                m = FAIL_ATTEMPT_RE.search(fn)
+                fail_reasons.append({
+                    'phase': data.get('phase'),
+                    'attempt': int(m.group(1)) if m else None,
+                    'required_fixes': data.get('required_fixes') or [],
+                })
+        return fail_reasons
+    except Exception as e:
+        print(f"collect-task-metrics: fail_reasons unavailable for task {slug!r} "
+              f"({vdir}): {e}", file=sys.stderr)
+        return None
 
 
 def diff_stats_for_commit(repo_root, commit):
@@ -365,12 +406,16 @@ def process(path, fetch_diff_stats=True):
         session_dir = path[:-len('.jsonl')] if path.endswith('.jsonl') else path
         sub = read_subagent_transcript(session_dir, task_id)
 
+        repo_root = repo_root_of(cwd)
+
         diff = None
         if fetch_diff_stats:
             if finish_mode == 'pr':
                 diff = diff_stats_for_pr(pr_url)
             elif finish_mode == 'commit':
-                diff = diff_stats_for_commit(repo_root_of(cwd), commit)
+                diff = diff_stats_for_commit(repo_root, commit)
+
+        fail_reasons = read_fail_reasons(repo_root, slug)
 
         rows.append({
             'repo': repo_of(cwd),
@@ -390,6 +435,7 @@ def process(path, fetch_diff_stats=True):
             'verifier_count': verifier_count,
             'orchestrator_overhead_seconds': orchestrator_overhead_seconds,
             'phase_counts': dict(phase_counts),
+            'fail_reasons': fail_reasons,
             'tokens': tokens,
             'tokens_processed': sub['processed_tokens'] if sub else None,
             'pr_url': pr_url,
