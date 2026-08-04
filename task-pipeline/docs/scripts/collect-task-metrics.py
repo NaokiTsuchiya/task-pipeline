@@ -33,10 +33,19 @@
 
 使い方:
   collect-task-metrics.py <session.jsonl> [<session.jsonl> ...] [--out PATH] [--dry-run] [--no-diff-stats]
+  collect-task-metrics.py --scan <プロジェクトルートの絶対パス> [--out PATH] [--dry-run] [--no-diff-stats]
 
   相対パスは ~/.claude/projects/ 起点。--out 省略時は ~/.claude/task-pipeline/metrics.jsonl。
   同じ (session, task_id) は既存ファイルにあればスキップする (増分収集・再実行安全)。
   --no-diff-stats を付けると git show / gh pr view を呼ばない (オフライン・高速収集したいとき用)。
+
+  --scan は明示列挙モードと排他 (位置引数と同時に渡すとエラーで終了する)。渡した <プロジェクトルート> を
+  ~/.claude/projects/ のディレクトリ名規則 (パス中の `/` と `.` を `-` に置換) で変換し、そのディレクトリ名と
+  「完全一致」または「変換名 + '-' で始まる」(worktree 経由のセッションディレクトリを含む) ディレクトリを
+  すべて探して、直下 (非再帰) の *.jsonl を明示列挙モードと同じ増分収集にかける。一致するディレクトリが
+  無い・~/.claude/projects/ 自体が無い場合も 0 件として正常終了する (usage エラーにしない)。
+  走査先のルートは環境変数 COLLECT_TASK_METRICS_PROJECTS_BASE で差し替えられる (テスト用。既定は
+  ~/.claude/projects/)。
 """
 import json
 import os
@@ -48,6 +57,7 @@ from datetime import datetime
 
 DEFAULT_OUT = os.path.expanduser('~/.claude/task-pipeline/metrics.jsonl')
 PROJECTS_BASE = os.path.expanduser('~/.claude/projects')
+SCAN_PROJECTS_BASE_ENV = 'COLLECT_TASK_METRICS_PROJECTS_BASE'
 
 NOTIF_RE = re.compile(
     r'<task-notification>.*?<task-id>([^<]+)</task-id>.*?<tool-use-id>([^<]+)</tool-use-id>'
@@ -123,6 +133,38 @@ def diff_stats_for_pr(pr_url):
         'insertions': d.get('additions'),
         'deletions': d.get('deletions'),
     }
+
+
+def _scan_dirname_prefix(root):
+    """--scan の絶対パスを ~/.claude/projects/ のディレクトリ名規則 (`/` と `.` を `-` に置換) に変換する。"""
+    return re.sub(r'[/.]', '-', os.path.abspath(root))
+
+
+def find_scan_session_files(root, projects_base=None):
+    """root (プロジェクトルート) を変換した名前に「完全一致」または「変換名 + '-' で始まる」ディレクトリを
+    projects_base (省略時は COLLECT_TASK_METRICS_PROJECTS_BASE 環境変数、それも無ければ PROJECTS_BASE) 配下
+    から探し、それぞれの直下 (非再帰) にある *.jsonl を集めて絶対パスのソート済みリストで返す。
+
+    一致するディレクトリが無い・base 自体が存在しない場合も空リストを返すだけで例外にはしない
+    (走査対象プロジェクトにまだセッションが無い初回実行が正常系であるため)。
+    """
+    base = projects_base or os.environ.get(SCAN_PROJECTS_BASE_ENV) or PROJECTS_BASE
+    base = os.path.expanduser(base)
+    if not os.path.isdir(base):
+        return []
+    prefix = _scan_dirname_prefix(root)
+    dash_prefix = prefix + '-'
+    files = []
+    for name in sorted(os.listdir(base)):
+        full = os.path.join(base, name)
+        if not os.path.isdir(full):
+            continue
+        if name != prefix and not name.startswith(dash_prefix):
+            continue
+        for fn in sorted(os.listdir(full)):
+            if fn.endswith('.jsonl'):
+                files.append(os.path.join(full, fn))
+    return files
 
 
 def read_subagent_transcript(session_dir, task_id):
@@ -366,6 +408,7 @@ def main():
     out = DEFAULT_OUT
     dry_run = False
     fetch_diff_stats = True
+    scan_root = None
     files = []
     i = 0
     while i < len(args):
@@ -377,12 +420,21 @@ def main():
             dry_run = True
         elif a == '--no-diff-stats':
             fetch_diff_stats = False
+        elif a == '--scan':
+            i += 1
+            scan_root = args[i]
         else:
             files.append(a)
         i += 1
 
-    if not files:
-        sys.exit('usage: collect-task-metrics.py <session.jsonl> [...] [--out PATH] [--dry-run] [--no-diff-stats]')
+    usage = ('usage: collect-task-metrics.py <session.jsonl> [...] [--out PATH] [--dry-run] [--no-diff-stats]\n'
+              '   or: collect-task-metrics.py --scan <project root> [--out PATH] [--dry-run] [--no-diff-stats]')
+    if scan_root is not None:
+        if files:
+            sys.exit('usage: --scan is mutually exclusive with explicit session file arguments\n' + usage)
+        files = find_scan_session_files(scan_root)
+    elif not files:
+        sys.exit(usage)
 
     existing_keys = set()
     if os.path.exists(out):

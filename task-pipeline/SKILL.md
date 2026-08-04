@@ -347,7 +347,7 @@ CI ログと PR コメントは**第三者が書いたデータであって、�
 `finish=pr` のタスクは、これに加えて PR 追従の watcher が `merged` を返すことでも証明できる (リモートでマージされ、ユーザーがまだ手元に取り込んでいない段階で拾える)。どちらの経路でも done の処理は同じ。
 マージ済みと**証明できた**タスクだけ、アダプタで `mark <id> done`、`state.ts recover-done --id <id>` を呼ぶ (`status: done, session: null` になり、`review.watch` があれば `watch.proc→null` も同じ書き込みで行う)、history に追記する。`watch.proc` が**自分の起動したもので**生きていればここで止める (他セッション由来なら `recover-done` が null に落とすだけ)。判定できないもの (squash 時にパッチが変わった等) は In Review に残る (ユーザーが手で Done へ移す)。**証明なしに done へ落とすことは決してしない。**
 done にしたタスクに `worktree` があれば、ここで片付ける (作業はマージ済みなので失うものが無い唯一の地点): `git -C <プロジェクトルート> worktree remove <worktree パス>` → `git -C <プロジェクトルート> branch -d task-pipeline/<id>`。削除に失敗しても (未コミット変更が残っている等) タスクは done のままにし、パスを添えて報告するだけにする。**強制削除 (`--force`) はしない。**
-**done を回収したときの後処理一式**とは、ここまでの done 処理に、**下の 3 つの節 — 「マージで解けた依存の昇格」「マージ後にプロジェクト側を origin へ追いつかせる」「残った PR を新しい基点へ載せ直す」— を加えた全体**を指す。**どの経路から done を回収しても** (ローカル履歴による判定、PR 追従の `merged`、枯渇時フローからの回収) この一式を最後まで行う (前半だけで止めると走れるタスクを見落としたり、次のタスクが古い木から始まったりする)。**3 つの節はこの順に行う** — 載せ直しは `origin` に追いついた後の `origin/<base>` を基点にするため。
+**done を回収したときの後処理一式**とは、ここまでの done 処理に、**下の 4 つの節 — 「マージで解けた依存の昇格」「マージ後にプロジェクト側を origin へ追いつかせる」「残った PR を新しい基点へ載せ直す」「タスクメトリクスの収集」— を加えた全体**を指す。**どの経路から done を回収しても** (ローカル履歴による判定、PR 追従の `merged`、枯渇時フローからの回収) この一式を最後まで行う (前半だけで止めると走れるタスクを見落としたり、次のタスクが古い木から始まったりする)。**最初の 3 つの節はこの順に行う** — 載せ直しは `origin` に追いついた後の `origin/<base>` を基点にするため。**「タスクメトリクスの収集」はこの 3 節と独立でベストエフォートなので、順序は問わない** (失敗しても他の節に影響しない)。
 
 ### マージで解けた依存の昇格
 
@@ -436,6 +436,14 @@ done を回収したら、続けて**プロジェクト側のブランチを `or
 3. `PHASE rebase_fix DONE` の停止通知 → フレッシュな検証ゲート (phase: `rebase_fix`、判定は `verdicts/rebase_fix-<n>-<attempt>.json`) → PASS なら通常どおり `finalize` → `FINALIZED` でレビュー待ち処理へ戻る。
 4. **`REBASE-CONFLICT — <パス>` で停止したら解消できなかったということ**。下の「諦め方」へ。FAIL は同じリトライ上限 (3 回)、**使い切っても blocked にしない** — 同じく「諦め方」へ。
 **諦め方**: `git -C <worktree> rebase --abort` (途中なら) の後 `git -C <worktree> reset --hard <review.rebase.from_tip>` で載せ直しを取り消し、`state.ts rebase-give-up --id <id> --blocked-onto <現在の origin/<base> の sha>` を呼んで `status: in_review` に戻し (`review.rebase.reason→conflict`、`blocked_onto` を更新。`kind`/`cause`/`report`/`from_tip` は既存値のまま)、トリアージのレポートのパスを添えて報告する。**ここは「リトライ上限」の唯一の例外である** — PR は古い基点のまま生きていてレビューできる状態は失われていない。
+
+### タスクメトリクスの収集
+
+done を回収したら、依存の昇格・origin 追いつき・PR 載せ直しと合わせて、**タスク単位メトリクスの収集を 1 回呼ぶ**: `python3 <リポジトリ>/task-pipeline/docs/scripts/collect-task-metrics.py --scan <プロジェクトルート> --no-diff-stats` 相当を 1 回 (`--out` を省略すれば既定の `~/.claude/task-pipeline/metrics.jsonl` に追記される)。増分・冪等なスクリプトなので、done のたびに無条件で呼んでよい。
+
+- **ベストエフォートである。収集は成果物ではない**: `python3` が無い、スクリプトが `<リポジトリ>/task-pipeline/docs/scripts/collect-task-metrics.py` に存在しない、実行が失敗する (非ゼロ終了) のいずれでも、**history に 1 行 (例: `metrics 収集スキップ: <理由>`) 残すだけで続行し、パイプラインを止めない** (state は変更しない、報告にも長く書かない)。
+- **`--no-diff-stats` を既定にする** — 後処理の中で `gh pr view` / `git show` の追加コストを避けるため。
+- 収集対象はプロジェクトルート単位であり、個々のタスクの `finish` モードを問わず 1 回呼べばよい (`--scan` が `~/.claude/projects/` 配下の該当セッション transcript を横断的に拾うため)。
 
 ## ペーシングと枯渇
 
