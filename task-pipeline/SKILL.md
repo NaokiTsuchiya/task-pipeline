@@ -446,6 +446,7 @@ done を回収したら、依存の昇格・origin 追いつき・PR 載せ直�
 - **ベストエフォートである。収集は成果物ではない**: `python3` が無い、スクリプトが `<リポジトリ>/task-pipeline/docs/scripts/collect-task-metrics.py` に存在しない、実行が失敗する (非ゼロ終了) のいずれでも、**history に 1 行 (例: `metrics 収集スキップ: <理由>`) 残すだけで続行し、パイプラインを止めない** (state は変更しない、報告にも長く書かない)。
 - **`--no-diff-stats` を既定にする** — 後処理の中で `gh pr view` / `git show` の追加コストを避けるため。
 - 収集対象はプロジェクトルート単位であり、個々のタスクの `finish` モードを問わず 1 回呼べばよい (`--scan` が `~/.claude/projects/` 配下の該当セッション transcript を横断的に拾うため)。
+- **続けて、レトロ観測のトリガー3 (done 10 件ごと。下記「レトロ観測」) を判定する** — `metrics.jsonl` はこの収集呼び出しでしか増えないので、ここが実質的な「done 回収のたび」の判定タイミングになる。
 
 ## ペーシングと枯渇
 
@@ -491,7 +492,8 @@ done を回収したら、依存の昇格・origin 追いつき・PR 載せ直�
    - 状態の意味: `deps` = 依存待ち、`unanswered` = 人の答え待ち、`underspecified` = 本文が要求として詰まっていない、`other` = それ以外。返った JSON をそのまま内訳にする。`truncated` が真なら (30 件超で件数と id しか見ていない) 絞ったことを報告に明示する。
    - **書き込ませない** (昇格はマージの回収で済んでいる)。**task-prep が入っていない環境では調査ごと飛ばす** (`test -f ~/.claude/skills/task-prep/SKILL.md` の終了コードで判定)。出口の案内を 1 行添える: `/task-prep` (棚卸し) か `/task-scout` (コードベースの実査)。
    - トラッカーが状態の表現を持たない場合は件数だけでよい。レビュー待ち (in_review) は ref 付きで、回収済み (done) と blocked (理由付き) も一覧にする。追従中の PR があれば CI 状態と `watch.fix_attempts` も添える。
-2. **自分の担当の PR が 1 本も無ければループを止める**: dynamic なら ScheduleWakeup `stop: true`、固定間隔なら CronList で自ジョブを特定して CronDelete。止める前に自分の watch プロセスを止め `state.ts watch-set --id <id> --proc null --session null` を呼ぶ。「自分の担当」は `watch.state` が `watching` のタスクのうち**生きている他セッションが所有しているもの以外すべて** (cron 配下で前イテレーションが持っていた PR も含めて数える — 数えないと自分でジョブを消してから誰も追従しなくなる)。
+   - **同じ「最初の 1 回」に限り、レトロ観測のトリガー 1 も行う** (下記「レトロ観測」)。返った改善候補とサマリーファイルのパスを、この最終報告に追記する。
+2. **自分の担当の PR が 1 本も無ければループを止める**: **止める前に、まずレトロ観測のトリガー 2 (下記「レトロ観測」) を行う。**続けて自分の watch プロセスを止め `state.ts watch-set --id <id> --proc null --session null` を呼び、dynamic なら ScheduleWakeup `stop: true`、固定間隔なら CronList で自ジョブを特定して CronDelete する。「自分の担当」は `watch.state` が `watching` のタスクのうち**生きている他セッションが所有しているもの以外すべて** (cron 配下で前イテレーションが持っていた PR も含めて数える — 数えないと自分でジョブを消してから誰も追従しなくなる)。**この手順を参照する停止経路 (「停滞」の追従打ち切り、「アダプタの呼び方」のアダプタ不通) はすべてこのレトロ呼び出しを含めて実行したことになる** (`max_tasks` による安全停止だけは対象外。下記「`max_tasks` による安全停止」)。
 3. **自分の担当**の PR が残っているなら**止めずに追従だけを続ける**: 最終報告を出したうえで、dynamic なら 3600 秒で次イテレーションへ (固定間隔なら CronDelete しない。この wakeup は watch プロセスの生存確認だけの保険)。以降も `list` は毎回呼び、**新しい候補が現れたら通常どおり承認を聞く** (`state.ts stalled-set --value null` を呼ぶ)。打ち切り条件は上記「停滞」のみ (別の計時規則は置かない)。
 止める理由: 候補が無いまま起き続けるのは無意味な wakeup とコンテキスト肥大にしかならない (「トラッカーに残っている仕事はすべて消化した」という宣言)。候補が残っているのにキューが空なだけのときは**止めずに承認を聞く**。
 
@@ -503,13 +505,63 @@ done を回収したら、依存の昇格・origin 追いつき・PR 載せ直�
 
 **判定**: 毎イテレーションの手順1で、`in_progress` のタスクが無く新しいタスクの着手または承認へ進もうとする直前に、飛行中の上限・`max_open` の判定より先に行う。`max_tasks` が指定されていて上記の行数が `max_tasks` 以上なら、新しい着手にも承認にも進まず、この節の手順で止める。指定が無い、または行数が `max_tasks` 未満なら、この節は何もせず通常どおり以下の判定 (飛行中の上限・`max_open`) に進む。この判定に到達するのは `in_progress` のタスクが1件も無いときだけ (`in_progress` があれば「飛行中の扱い」に分岐し、ここへは来ない) なので、要求している「揮発資源ゼロの地点」を自動的に満たす。**仕上げ (`pr_fix`/`rebase_fix`) が飛行中のタスクは `status: in_progress` なので同じく「飛行中の扱い」に分岐し、この判定へは来ない** — 独自の除外コードを書かずに「仕上げ飛行中は止めない」を満たす。
 
-**止め方**: 枯渇時フロー手順2と**全く同じ手順**を踏む (新しい停止経路は作らない)。「自分の担当」の定義も同じ (`watch.state` が `watching` のタスクのうち、生きている他セッションが所有しているもの以外すべて)。自分の担当の watch プロセスを止めて `state.ts watch-set --id <id> --proc null --session null` を呼んでから、dynamic なら ScheduleWakeup `stop: true`、固定間隔なら CronList で自ジョブを特定して CronDelete する。
+**止め方**: 枯渇時フロー手順2と**全く同じ手順**を踏む (新しい停止経路は作らない)。「自分の担当」の定義も同じ (`watch.state` が `watching` のタスクのうち、生きている他セッションが所有しているもの以外すべて)。自分の担当の watch プロセスを止めて `state.ts watch-set --id <id> --proc null --session null` を呼んでから、dynamic なら ScheduleWakeup `stop: true`、固定間隔なら CronList で自ジョブを特定して CronDelete する。**ただし、手順2に含まれるレトロ観測 (下記「レトロ観測」) はここでは行わない** — `max_tasks` はユーザーが指定した頻度でコンテキストをクリアするための意図的な一時停止であり、パイプラインが継続不能になったわけではない (次のイテレーションで通常どおり再開する)。
 
 **最終報告**: 通常の停止報告に加えて次を含める:
 - **再開コマンド**: このセッションを起動した引数をそのまま使う `/loop /task-pipeline <tracker> <source> ...` を具体的な文字列で示す (state.json には引数を保存していないので、このセッション自身が起動時に受け取った `$ARGUMENTS` から組み立てる — 今回の起動時点の情報を使うだけであり、コンテキストの記憶を状態として使うことにはあたらない)。
 - **その前に `/clear` する案内**: 上記のコマンドを打つ**前に** `/clear` すること (このセッションのコンテキストを手放してから再開する、が `max_tasks` の目的そのものである)。
 - **残っている候補の件数**: state.json の `candidates` の件数と `queue` の `status: "approved"` の件数。
 - **レビュー待ち・追従中の PR の一覧**: `queue` の `status: "in_review"` かつ `review.ref` が非null のタスクを、id・ref・(あれば) `review.watch.state` を添えて列挙する。
+
+## レトロ観測
+
+メトリクス (`~/.claude/task-pipeline/metrics.jsonl`。1 行 = 1 タスク実行、`fail_reasons` を含む。上記「タスクメトリクスの収集」) は蓄積されるだけでは改善アクションに変わらない。**次の 3 トリガーのいずれかで**、read-only のレトロ観測サブエージェント (general-purpose、同期) を 1 体起動し、蓄積分を人が読める要約と構造化された改善候補に変換する。指示は `~/.claude/skills/task-pipeline/references/retro.md` に置き、パスで渡す (上記「コンテキスト規律」)。**モデルは指定しない** (改善候補の抽出は判断そのものが成果物のため — トリアージ・枯渇時の内訳調査と同じ扱い)。
+
+### トリガー
+
+1. **枯渇時フロー**: 最終報告を書く回 (`stalled` が `null` から `"depleted"` に変わる最初の 1 回。上記「枯渇時フロー」手順 1)。
+2. **ループを止めるとき**: 枯渇・停滞打ち切り・アダプタ不通のいずれの停止経路でも。この3つはすべて「枯渇時フロー」手順 2 の停止アクションに合流する (「停滞」の追従打ち切り、「アダプタの呼び方」のアダプタ不通は、どちらも「枯渇時フロー手順2と同じ手順で止める」と規定済み) ので、レトロの呼び出しも手順 2 の 1 箇所に置くだけで 3 経路すべてに伝わる。**`max_tasks` による安全停止では行わない** (上記「`max_tasks` による安全停止」に明記) — ユーザーが指定した頻度でコンテキストをクリアするための意図的な一時停止であり、パイプラインが継続不能になったわけではない。
+3. **done 回収 10 件ごと**: 下記「基準点」の差分が 10 以上になったとき。判定は「タスクメトリクスの収集」の直後に行う。
+
+### 基準点 (「前回どこまで見たか」)
+
+基準点は state.json には持たない (schema 変更を避けるため)。**最新のサマリーファイルそのものに「集計済み行数」を記録し、`metrics.jsonl` の現在行数との差で判定する**:
+
+```sh
+proj=<プロジェクトルート>
+latest=$(find "$proj/docs/metrics" -maxdepth 1 -name '*.md' 2>/dev/null | sort | tail -1)
+seen=0
+if [ -n "$latest" ]; then
+  v=$(grep -o 'retro-metrics-line=[0-9]*' "$latest" | tail -1 | cut -d= -f2)
+  [ -n "$v" ] && seen=$v
+fi
+total=$(wc -l < ~/.claude/task-pipeline/metrics.jsonl 2>/dev/null || echo 0)
+```
+
+`docs/metrics/` のファイル名は `YYYY-MM-DD.md` (UTC 日付) なので、`sort | tail -1` が常に最新のものを選ぶ。マーカーは retro.md がそのファイルの中に書く `<!-- task-pipeline:retro-metrics-line=<N> -->` という 1 行。
+
+- **トリガー 3 の判定**: `total - seen >= 10` なら起動する。`metrics.jsonl` は done 回収時の収集呼び出しでしか増えないので、これが実質的な「done 回収 10 件ごと」になる (1 回の収集呼び出しが複数行を足すことがあるため、`done` の回数と `total` の増分は厳密な 1:1 ではない — issue が許容した近似)。
+- **トリガー 1・2 では、上記の差分の大小を問わず必ず起動する** (`total - seen` が 10 未満でもよい)。ただし `total == seen` (前回から新規のタスク実行が 1 件も無い) のときは、retro.md 側がサマリーへの書き込みをスキップし、空の候補を返す (下記 retro.md の規定)。
+
+### 起動プロンプト
+
+```
+You are a retro observation subagent.
+Do not write to the tracker or the repository, except the one summary file path
+that ~/.claude/skills/task-pipeline/references/retro.md specifies.
+Read ~/.claude/skills/task-pipeline/references/retro.md and follow it.
+trigger: depleted | loop_stop | done_10
+metrics: ~/.claude/task-pipeline/metrics.jsonl / since_line: <上記 seen>
+project root: <プロジェクトルートの絶対パス>
+Write the summary yourself as the reference file specifies, then return only
+the JSON it specifies.
+```
+
+### 結果の扱いと失敗時
+
+返った改善候補は報告に列挙し、`/task-prep <tracker> <source> "<改善候補の要約>"` のような接続コマンドを 1 行添える (実際に流すかは人の判断。トラッカーへは一切書き込まない)。
+
+**ベストエフォート**: `metrics.jsonl` が無い、`docs/metrics/` に書き込めない、サブエージェントがエラーを返す、のいずれでも、`history` に 1 行 (例: `retro スキップ: <理由>`) 残すだけで続行する (上記「タスクメトリクスの収集」と同じ扱い。state は変更しない、パイプラインは止めない)。
 
 ## 報告規律
 
