@@ -1,6 +1,10 @@
 # バックログ
 
+- [ ] verifier-verdict-via-file
 - [ ] metrics-collect-scan-mode
+- [ ] pr-watch-mergeable
+- [ ] loop-safe-stop-max-tasks
+- [ ] pr-update-notification
 
 ## In Review
 
