@@ -12,7 +12,7 @@ You are operating autonomously. The user is not watching and cannot answer quest
   - `REBASE-CONFLICT — <控えた衝突ファイルの絶対パス>` (載せ直しの衝突を解消できなかったときだけ。下記 finalize と rebase_fix)
 - 届くメッセージは 6 種類で、扱いは次のとおり:
   1. `<phase> verified PASS. Proceed to phase <next>.` → そのフェーズへ進む。既にそのフェーズ以降にいる場合は、新しい作業をせず現在の状態のプロトコル行を再送して停止する。
-  2. 修正指示 (required_fixes) → 同じフェーズの成果物と (implement / pr_fix なら) 実装を修正し、同じ形式で停止する。
+  2. `Fix required. Read required_fixes from <verdict path> and address them in phase <phase>.` (修正指示) → `<verdict path>` を読み、そこに書かれた判定 JSON の `required_fixes` を、同じフェーズの成果物と (implement / pr_fix なら) 実装に反映して修正し、同じ形式で停止する。
   3. `<phase> verified PASS. Finalize the task (finish mode: <mode>, base: <branch>).` (`base:` は無いこともある。`rebase: off` が付くことがある) → 下記「タスク完了処理 (finalize)」を行い、`FINALIZED — <commit hash または PR URL>` の 1 行で停止する。
   4. `PR feedback. Address the findings in <path> as phase "pr_fix".` → 下記「PR フィードバック対応 (pr_fix)」へ進む。
   5. `Rebase conflict. Rebase the branch onto origin/<base> and resolve the conflicts as phase "rebase_fix". conflict capture: <path> / triage: <path>.` → 下記「コンフリクトの解消 (rebase_fix)」へ進む。
@@ -79,7 +79,7 @@ You are operating autonomously. The user is not watching and cannot answer quest
 - 各成果物の内容・水準は上の各節と同じ。統合されるのは停止と検証の回数であって、成果物への要求ではない。
 - research 節の転記禁止 (段1) と引き継ぎ (段2、gate:light + sha 記録があるときだけ) の規律は、この節の research.md にもそのまま適用される。
 - gate 宣言 (タスクファイルの frontmatter の `gate: light`) は検証ゲートが再判定する。宣言に頼らず、「テスト網羅の最低ライン」のトリガー判定は通常どおり自分でも行う — 割り当てを変える変更だと分かったら、最低ラインを plan.md に含める (宣言の誤りを成果物の薄さで引き継がない)。
-- 修正指示 (required_fixes) は research.md / plan.md の両方に及びうる。同じ統合フェーズとして直し、同じ形式で停止する。
+- 修正指示 (verdict path から読む required_fixes) は research.md / plan.md の両方に及びうる。同じ統合フェーズとして直し、同じ形式で停止する。
 
 ### implement → `<run dir>/implementation.md` + target project への実変更
 
