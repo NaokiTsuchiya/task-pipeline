@@ -60,9 +60,27 @@ stdout に必ず **1 行の JSON**。
 
 状態機械のノードは `(status, phase)` の合法な組だけで、**`phase` が非 null なのは
 `status` が `in_progress` のとき、かつそのときに限る**。`in_progress` のノードは
-`in_progress/<phase>` と表記する (現在 4 + 8 = 12 ノード)。この節は実装
-(`state-transitions.ts` の `GATE_PHASE_SEQUENCES` / `VERB_LIFECYCLE`) の転写であり、
-`state.test.ts` の T-D4 / T-D3 が一致を検査する (どちらかだけ直すとテストが落ちる)。
+`in_progress/<phase>` と表記する。この節は実装 (`state-transitions.ts` の
+`LIFECYCLE_NODES` / `GATE_PHASE_SEQUENCES` / `VERB_LIFECYCLE`) の転写であり、
+`state.test.ts` の T-D7 / T-D4 / T-D3 が一致を検査する (どちらかだけ直すとテストが
+落ちる)。
+
+ノードの全一覧 (現在 4 + 8 = 12。意味の列は散文で、照合されるのはノード名だけ):
+
+| ノード | 意味 |
+|---|---|
+| `approved` | 承認済み・着手待ち。queue 追加直後と `restore` 後の形 |
+| `in_progress/research` | 調査フェーズを実行中 (gate `full` の先頭) |
+| `in_progress/plan` | 計画フェーズを実行中 |
+| `in_progress/implement` | 実装フェーズを実行中 |
+| `in_progress/report` | 報告フェーズを実行中 (両 gate の最終検証フェーズ) |
+| `in_progress/research+plan` | 調査と計画の統合フェーズを実行中 (gate `light` の先頭) |
+| `in_progress/finalize` | 後処理 (コミット・PR 作成・押し直し) 中。検証ゲート無し |
+| `in_progress/pr_fix` | レビュー指摘への修正を実行中 (仕上げ) |
+| `in_progress/rebase_fix` | 載せ直し衝突の解消を実行中 (仕上げ) |
+| `in_review` | レビュー待ち。`finish=pr` なら `review.watch` (機械 B) が PR を追従 |
+| `done` | マージを証明して回収済み (終端) |
+| `blocked` | パイプラインが自力で進めない。人が `restore` で戻すまで停止 |
 
 フェーズ列は gate ごとに 1 本で、`phase-pass` が通せるのは**この列の隣接ペアだけ**
 (飛び越し・逆行・自己辺・gate 違いの辺・`finalize`/`pr_fix`/`rebase_fix` への出入りは

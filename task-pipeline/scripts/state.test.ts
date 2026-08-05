@@ -30,6 +30,7 @@ import { ALLOWED_FLAGS, EXIT_CODES } from "./state.ts";
 import {
   GATE_PHASE_SEQUENCES,
   GATE_VALUES,
+  LIFECYCLE_NODES,
   PHASE_VALUES,
   VERB_LIFECYCLE,
 } from "./state-transitions.ts";
@@ -5367,6 +5368,17 @@ Deno.test("T-D4: contract フェーズ列 table matches GATE_PHASE_SEQUENCES", a
       `sequence mismatch for gate ${gate}`,
     );
   }
+});
+
+Deno.test("T-D7: contract ノード一覧 matches LIFECYCLE_NODES", async () => {
+  const doc = await Deno.readTextFile(CONTRACT_DOC);
+  const rows = parseMdTable(doc, ["ノード", "意味"]);
+  const docNodes = rows.map(([n]) => n.replaceAll("`", ""));
+  assertEquals(
+    [...docNodes].sort(),
+    [...LIFECYCLE_NODES].sort(),
+    "ノード一覧が LIFECYCLE_NODES と一致しない — フェーズや status を変えたら契約のノード表も更新すること",
+  );
 });
 
 Deno.test("T-D5: SKILL.md contains each gate's current phase sequence", async () => {
