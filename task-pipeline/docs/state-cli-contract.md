@@ -318,8 +318,10 @@ state.ts watch-init --state-dir <dir> --id <id> --session <s> \
 効果: `review.watch` を既定値一式で作る
 (`{state:"watching", proc:null, proc_started_at:null, sig:null, head:null, ci:null,
 handled:[], fix_pending:false, pending_ids:[], findings:null, fix_attempts:0, errors:0,
-checked_at:null, note:null}`)。`--preserve-handled true` のときは、既存
-`review.watch.handled` があればそれを引き継ぐ (無ければ空配列のまま)。加えて `session→<s>`。
+checked_at:null, note:null, review_only:[]}`)。`--preserve-handled true` のときは、既存
+`review.watch.handled` があればそれを引き継ぐ (無ければ空配列のまま)。**`review_only` は
+`--preserve-handled` の対象外で常に `[]` から始まる** (`pending_ids`/`findings` と同じく
+watch-init は毎回まっさらにする)。加えて `session→<s>`。
 成功: `{"ok": true, "id": "<id>"}`。
 
 ### `watch-set`
@@ -399,13 +401,21 @@ state.ts fix-done --state-dir <dir> --id <id> \
 ### `review-only`
 
 ```
-state.ts review-only --state-dir <dir> --id <id> --ids <csv> \
+state.ts review-only --state-dir <dir> --id <id> --items-json <json> \
   [--lock-retry-ms <n>] [--lock-max-retries <n>]
 ```
 
+`--items-json` は `[{"id": "<s>", "updated_at": "<s>"|null}, ...]` 形の JSON 配列。各要素は
+`id` (文字列) と `updated_at` (文字列または `null`) の両方を必須で持つ。JSON として parse
+できない・配列でない・要素が上記の形を満たさない、のいずれも `usage`。
 前提: `status=="in_review" && review.watch!=null` (`conflict`)。
-効果: `watch.handled` に `--ids` を重複無しで合流。
-成功: `{"ok": true, "id": "<id>"}`。
+効果: `watch.review_only` に `--items-json` の各要素を id ごとに upsert する (**`watch.handled`
+は変更しない** — `watch.handled` は `fix-done` を経由して実際に修正したものだけを表す)。既存の
+id と `updated_at` が完全一致していれば版は進んでいないとみなす。id が新規、または
+`updated_at` が前回の記録と異なる (前回・今回のいずれかが `null` の場合を含む — 版が比較でき
+ないので常に「進んだ」扱い) なら、その id を返り値の `new_or_changed` に含める。
+成功: `{"ok": true, "id": "<id>", "new_or_changed": ["<id>", ...], "review_only_total": <n>}`
+(`review_only_total` はこの呼び出し後の `watch.review_only` の件数)。
 
 ### 載せ直し
 

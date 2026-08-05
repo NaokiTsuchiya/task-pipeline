@@ -53,7 +53,8 @@
         "fix_attempts": { "type": "integer", "minimum": 0 },
         "errors": { "type": "integer", "minimum": 0 },
         "checked_at": { "type": ["string", "null"] },
-        "note": { "type": ["string", "null"] }
+        "note": { "type": ["string", "null"] },
+        "review_only": { "type": "array", "items": { "$ref": "#/$defs/reviewOnlyEntry" } }
       },
       "required": ["state", "proc", "proc_started_at", "sig", "head", "ci", "handled", "fix_pending", "pending_ids", "findings", "fix_attempts", "errors", "checked_at", "note"],
       "additionalProperties": false
@@ -71,6 +72,15 @@
         "from_tip": { "type": "string" }
       },
       "required": ["blocked_onto", "reason", "at"],
+      "additionalProperties": false
+    },
+    "reviewOnlyEntry": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "updated_at": { "type": ["string", "null"] }
+      },
+      "required": ["id", "updated_at"],
       "additionalProperties": false
     }
   },
