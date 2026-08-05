@@ -557,6 +557,7 @@ const VERB_CASES: readonly VerbCase[] = [
     invoke: (i, x, s) => applyRestore(i, x, s),
     frame: [
       "status",
+      "gate",
       "phase",
       "attempts",
       "session",
@@ -781,6 +782,18 @@ function assertOutputInvariants(item: Record<string, unknown>): void {
         `${status} implies watch stopped`,
       );
     }
+  }
+  // gate と phase のクロス整合: light のタスクが full 専用フェーズ (light の列に
+  // 含まれない検証フェーズ) に居ることは無い。restore が gate を残すと
+  // claim 後にこの組ができて詰む (ultrareview 指摘の回帰の類型)。
+  if (item.gate === "light") {
+    const fullOnly = GATE_PHASE_SEQUENCES.full.filter(
+      (p) => !(GATE_PHASE_SEQUENCES.light as readonly string[]).includes(p),
+    );
+    assert(
+      !(fullOnly as readonly unknown[]).includes(item.phase),
+      `gate light must not sit on a full-only phase: ${String(item.phase)}`,
+    );
   }
 }
 

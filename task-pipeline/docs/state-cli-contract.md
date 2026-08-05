@@ -729,9 +729,12 @@ state.ts restore --state-dir <dir> --id <id> \
 
 前提: `id` が `relisted` に存在する (`missing`) **かつ** 対応する `queue` エントリの
 `status` が `in_review`/`blocked`/`done` のいずれか (`conflict`)。
-効果: `queue` エントリを `status→"approved", phase→null, attempts→0, session→null,
-executor→null, executor_last_event_at→null, takeover_at→null, blocked_reason→null` に
-(`worktree`/`base`/`review` は変更しない)。ただし `review.watch` が存在すれば
+効果: `queue` エントリを `status→"approved", gate→"full", phase→null, attempts→0,
+session→null, executor→null, executor_last_event_at→null, takeover_at→null,
+blocked_reason→null` に (`worktree`/`base`/`review` は変更しない)。`gate` を初期値に
+戻すのは、`light` のまま `claim` すると `(in_progress/research, gate: light)` という
+どの verb でも進めないノードに着地するため — gate の正はトラッカー側の宣言で、
+再 claim 時の gate 判定 (SKILL.md タスク実行手順 1) が改めて復元する。ただし `review.watch` が存在すれば
 `watch.state→"stopped", watch.proc→null, watch.proc_started_at→null` にする (前回周回の
 watching / proc を抱えたまま approved に再入させない。`handled`/`fix_attempts` の値は残り、
 次の周回の `watch-init --preserve-handled` が仕切り直す)。同じ書き込みで `relisted` から

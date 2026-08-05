@@ -1477,8 +1477,14 @@ export function applyRestore(
     throw new CliError("missing", `id not found in relisted: ${id}`);
   }
   requireFromNode(item, "restore");
+  // gate も初期値 (full) に戻す — 残すと light のタスクが claim 後に
+  // (in_progress/research, gate: light) という死にノードに着地する (light の
+  // フェーズ列に research の辺が無く、set-gate も gate!=full で拒否するため)。
+  // gate の正はトラッカー側の宣言で、再 claim 時のタスク実行手順 1 の機械判定が
+  // 改めて light に切り替えるので、ここで落としても情報は失われない。
   const nextItem = {
     ...withStoppedWatch(atNode(item, "approved")),
+    gate: "full",
     attempts: 0,
     session: null,
     executor: null,

@@ -5672,6 +5672,10 @@ Deno.test("T-SEQ-3: finalize-entry rebase_fix (REBASE-CONFLICT before first PR) 
   assertEquals(watch.state, "watching");
 });
 
+// フィクスチャは gate: light から始める — restore が gate を full に戻さないと、
+// claim 後に (in_progress/research, gate: light) という死にノード (light の列に
+// research の辺が無く set-gate も拒否) に着地し、この列の set-gate が conflict になる
+// (ultrareview 指摘の回帰の固定)。
 Deno.test("T-SEQ-4: restore rerun (light gate) — handled survives via --preserve-handled, fix_attempts resets", async () => {
   const dir = await tempDir();
   await setupQueue(
@@ -5679,6 +5683,7 @@ Deno.test("T-SEQ-4: restore rerun (light gate) — handled survives via --preser
     [
       queueItem({
         status: "in_review",
+        gate: "light",
         worktree: "/wt",
         base: "main",
         session: "s1",
@@ -5698,6 +5703,8 @@ Deno.test("T-SEQ-4: restore rerun (light gate) — handled survives via --preser
     { relisted: [{ id: "t-1", seen_at: "2026-08-01T00:00:00Z" }] },
   );
   await expectOk(dir, ["restore", "--state-dir", dir, "--id", "t-1"]);
+  const restored = await readItem(dir);
+  assertEquals(restored.gate, "full", "restore resets gate to full");
   await expectOk(dir, [
     "claim",
     "--state-dir",
