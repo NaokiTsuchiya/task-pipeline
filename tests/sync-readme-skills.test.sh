@@ -385,7 +385,7 @@ printf '# repo\n\n## skills 一覧\n\n| skill | 内容 |\n|---|---|\n| [old](old
 run_sync "$c12_dir"
 _detail=
 [ "$rc" = 0 ] || _detail="exit=$rc (want 0) out=$(flat "$out") err=$(flat "$err")"
-grep -q '^| \[skill-a\](skill-a/SKILL.md) | 説明です。 |$' "$c12_dir/README.md" || _detail="$_detail skill-a の行が正しく無い: $(cat "$c12_dir/README.md" | tr '\n' '|')"
+grep -q '^| \[skill-a\](skill-a/SKILL.md) | 説明です。 |$' "$c12_dir/README.md" || _detail="$_detail skill-a の行が正しく無い: $(tr '\n' '|' < "$c12_dir/README.md")"
 if [ -z "$_detail" ]; then
     ok "C12a 一覧節が EOF まで続く README → 生成モードで exit 0、表が更新される"
 else
