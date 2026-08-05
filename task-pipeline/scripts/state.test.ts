@@ -2578,6 +2578,7 @@ Deno.test("T-V-watch-init-1: success builds default watch object", async () => {
   assertEquals(watch.state, "watching");
   assertEquals(watch.handled, []);
   assertEquals(watch.review_only, []);
+  assertEquals(watch.answered, []);
   assertEquals(item.session, "s1");
 });
 
@@ -3572,6 +3573,379 @@ Deno.test("T-V-review-only-12: empty items array -> ok, no-op on review_only", a
   ]);
   assertEquals(res.new_or_changed, []);
   assertEquals(res.review_only_total, 1);
+});
+
+// answered-set は review-only と同じ入出力契約 (id/updated_at の upsert・dedup) を持つ新設
+// verb (gh-6: レビュアーの質問への回答投稿を記録し、二重投稿を防ぐ)。ケース番号は
+// T-V-review-only-1..12 と1対1で対応させる。加えて、answered-set は watch.handled にも
+// watch.review_only にも触れないこと (3つの語彙が独立であること) を各ケースで確認する。
+
+Deno.test("T-V-answered-set-1: success upserts into answered, does not touch handled/review_only", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      review: reviewOf({
+        watch: watchOf({
+          handled: ["h1"],
+          review_only: [{ id: "r1", updated_at: "2026-08-02T00:00:00Z" }],
+        }),
+      }),
+    }),
+  ]);
+  const res = await expectOk(dir, [
+    "answered-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--items-json",
+    reviewOnlyItemsJson([
+      { id: "rc-1", updated_at: "2026-08-02T00:00:00Z" },
+      { id: "rc-2", updated_at: null },
+    ]),
+  ]);
+  assertEquals(
+    (res.new_or_changed as string[]).slice().sort(),
+    ["rc-1", "rc-2"],
+  );
+  assertEquals(res.answered_total, 2);
+  const item = await readItem(dir);
+  const watch = (item.review as Record<string, unknown>).watch as Record<
+    string,
+    unknown
+  >;
+  // handled/review_only は answered-set では一切変更されない (語彙の非混入)。
+  assertEquals(watch.handled, ["h1"]);
+  assertEquals(watch.review_only, [
+    { id: "r1", updated_at: "2026-08-02T00:00:00Z" },
+  ]);
+  const answered =
+    (watch.answered as { id: string; updated_at: string | null }[])
+      .slice().sort((a, b) => a.id.localeCompare(b.id));
+  assertEquals(answered, [
+    { id: "rc-1", updated_at: "2026-08-02T00:00:00Z" },
+    { id: "rc-2", updated_at: null },
+  ]);
+});
+
+Deno.test("T-V-answered-set-2: watch null -> conflict", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_review", review: reviewOf() }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "answered-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--items-json",
+      reviewOnlyItemsJson([{ id: "rc-1", updated_at: null }]),
+    ],
+    EXIT_CODES.conflict,
+  );
+});
+
+Deno.test("T-V-answered-set-3: status not in_review -> conflict", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_progress",
+      phase: "pr_fix",
+      review: reviewOf({ watch: watchOf() }),
+    }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "answered-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--items-json",
+      reviewOnlyItemsJson([{ id: "rc-1", updated_at: null }]),
+    ],
+    EXIT_CODES.conflict,
+  );
+});
+
+Deno.test("T-V-answered-set-4: same id + same updated_at -> not in new_or_changed (dedup)", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      review: reviewOf({
+        watch: watchOf({ handled: ["h1"], review_only: [] }),
+      }),
+    }),
+  ]);
+  const args = [
+    "answered-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--items-json",
+    reviewOnlyItemsJson([{ id: "rc-1", updated_at: "2026-08-02T00:00:00Z" }]),
+  ];
+  const first = await expectOk(dir, args);
+  assertEquals(first.new_or_changed, ["rc-1"]);
+  const second = await expectOk(dir, args);
+  assertEquals(second.new_or_changed, []);
+  assertEquals(second.answered_total, 1);
+  const item = await readItem(dir);
+  const watch = (item.review as Record<string, unknown>).watch as Record<
+    string,
+    unknown
+  >;
+  assertEquals(watch.handled, ["h1"]);
+  assertEquals(watch.review_only, []);
+});
+
+Deno.test("T-V-answered-set-5: same id + advanced updated_at -> included again in new_or_changed", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_review", review: reviewOf({ watch: watchOf() }) }),
+  ]);
+  await expectOk(dir, [
+    "answered-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--items-json",
+    reviewOnlyItemsJson([{ id: "rc-1", updated_at: "2026-08-02T00:00:00Z" }]),
+  ]);
+  const second = await expectOk(dir, [
+    "answered-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--items-json",
+    reviewOnlyItemsJson([{ id: "rc-1", updated_at: "2026-08-02T01:00:00Z" }]),
+  ]);
+  assertEquals(second.new_or_changed, ["rc-1"]);
+  const item = await readItem(dir);
+  const watch = (item.review as Record<string, unknown>).watch as Record<
+    string,
+    unknown
+  >;
+  assertEquals(watch.answered, [
+    { id: "rc-1", updated_at: "2026-08-02T01:00:00Z" },
+  ]);
+});
+
+Deno.test("T-V-answered-set-6: updated_at null (unknown version) is always treated as changed", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_review", review: reviewOf({ watch: watchOf() }) }),
+  ]);
+  const args = [
+    "answered-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--items-json",
+    reviewOnlyItemsJson([{ id: "rc-1", updated_at: null }]),
+  ];
+  const first = await expectOk(dir, args);
+  assertEquals(first.new_or_changed, ["rc-1"]);
+  // 前回・今回とも updated_at が null (版が比較不能) -> 版比較できないので毎回 changed 扱い。
+  const second = await expectOk(dir, args);
+  assertEquals(second.new_or_changed, ["rc-1"]);
+  // 既知 (前回は非null) -> 今回 null になったケースも比較不能として changed 扱い。
+  const third = await expectOk(dir, [
+    "answered-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--items-json",
+    reviewOnlyItemsJson([{ id: "rc-2", updated_at: "2026-08-02T00:00:00Z" }]),
+  ]);
+  assertEquals(third.new_or_changed, ["rc-2"]);
+  const fourth = await expectOk(dir, [
+    "answered-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--items-json",
+    reviewOnlyItemsJson([{ id: "rc-2", updated_at: null }]),
+  ]);
+  assertEquals(fourth.new_or_changed, ["rc-2"]);
+});
+
+Deno.test("T-V-answered-set-7: multiple ids in one call are classified independently", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      review: reviewOf({
+        watch: watchOf({
+          answered: [
+            { id: "same", updated_at: "2026-08-02T00:00:00Z" },
+            { id: "changed", updated_at: "2026-08-02T00:00:00Z" },
+          ],
+        }),
+      }),
+    }),
+  ]);
+  const res = await expectOk(dir, [
+    "answered-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--items-json",
+    reviewOnlyItemsJson([
+      { id: "same", updated_at: "2026-08-02T00:00:00Z" }, // 版不変
+      { id: "changed", updated_at: "2026-08-02T02:00:00Z" }, // 版が進んだ
+      { id: "brandnew", updated_at: "2026-08-02T00:00:00Z" }, // 新規
+    ]),
+  ]);
+  assertEquals(
+    (res.new_or_changed as string[]).slice().sort(),
+    ["brandnew", "changed"],
+  );
+  assertEquals(res.answered_total, 3);
+});
+
+Deno.test("T-V-answered-set-8: invalid JSON in --items-json -> usage, unchanged", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_review", review: reviewOf({ watch: watchOf() }) }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "answered-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--items-json",
+      "{not json",
+    ],
+    EXIT_CODES.usage,
+  );
+});
+
+Deno.test("T-V-answered-set-9: --items-json not an array -> usage, unchanged", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_review", review: reviewOf({ watch: watchOf() }) }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "answered-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--items-json",
+      JSON.stringify({ id: "rc-1", updated_at: null }),
+    ],
+    EXIT_CODES.usage,
+  );
+});
+
+Deno.test("T-V-answered-set-10: item missing/invalid id -> usage, unchanged", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_review", review: reviewOf({ watch: watchOf() }) }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "answered-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--items-json",
+      JSON.stringify([{ updated_at: null }]),
+    ],
+    EXIT_CODES.usage,
+  );
+  await expectFailureUnchanged(
+    dir,
+    [
+      "answered-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--items-json",
+      JSON.stringify([{ id: 123, updated_at: null }]),
+    ],
+    EXIT_CODES.usage,
+  );
+});
+
+Deno.test("T-V-answered-set-11: item missing/invalid updated_at -> usage, unchanged", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_review", review: reviewOf({ watch: watchOf() }) }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "answered-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--items-json",
+      JSON.stringify([{ id: "rc-1" }]),
+    ],
+    EXIT_CODES.usage,
+  );
+  await expectFailureUnchanged(
+    dir,
+    [
+      "answered-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--items-json",
+      JSON.stringify([{ id: "rc-1", updated_at: 123 }]),
+    ],
+    EXIT_CODES.usage,
+  );
+});
+
+Deno.test("T-V-answered-set-12: empty items array -> ok, no-op on answered", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      review: reviewOf({
+        watch: watchOf({
+          answered: [{ id: "rc-1", updated_at: "2026-08-02T00:00:00Z" }],
+        }),
+      }),
+    }),
+  ]);
+  const res = await expectOk(dir, [
+    "answered-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--items-json",
+    "[]",
+  ]);
+  assertEquals(res.new_or_changed, []);
+  assertEquals(res.answered_total, 1);
 });
 
 // --- 載せ直し -----------------------------------------------------------------

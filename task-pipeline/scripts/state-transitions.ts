@@ -8,7 +8,7 @@
 // nowIso()/nowMs() (STATE_CLI_TEST_NOW_MS によるテスト決定性込み) で計算した値を
 // 引数として受け取る。ファイルI/O・排他は一切行わない。
 //
-// verb → 実装 (state-cli-contract.md の `### ` 見出しと対応。全42件):
+// verb → 実装 (state-cli-contract.md の `### ` 見出しと対応。全43件):
 //   `init`                     → applyInit
 //   `get`                      → get (前提チェック・書き換え無し。読み取りは state.ts)
 //   `validate`                 → validate (checkState を呼ぶだけ)
@@ -34,6 +34,7 @@
 //   `fix-start`                → applyFixStart
 //   `fix-done`                 → applyFixDone
 //   `review-only`              → applyReviewOnly
+//   `answered-set`             → applyAnsweredSet
 //   `rebase-record`            → applyRebaseRecord
 //   `rebase-resolve-pending`   → applyRebaseResolvePending
 //   `rebase-start`             → applyRebaseStart
@@ -205,6 +206,15 @@ function getReviewOnlyList(
   const raw = watch && Array.isArray(watch.review_only)
     ? watch.review_only
     : [];
+  return raw as ReviewOnlyEntry[];
+}
+
+// watch.answered は gh-6 (レビュアーの質問に PR 上で返信する経路) で新設したフィールドで、
+// review_only と同じく後方互換のため required には入れていない。無ければ空配列として読む。
+function getAnsweredList(
+  watch: Record<string, unknown> | null,
+): ReviewOnlyEntry[] {
+  const raw = watch && Array.isArray(watch.answered) ? watch.answered : [];
   return raw as ReviewOnlyEntry[];
 }
 
@@ -606,9 +616,10 @@ export function applyWatchInit(
     errors: 0,
     checked_at: null,
     note: null,
-    // review_only は --preserve-handled の対象外: pending_ids/findings と同じく
-    // watch-init は常にまっさらから始める。
+    // review_only/answered は --preserve-handled の対象外: pending_ids/findings と同じく
+    // watch-init は常にまっさらから始める (引き継ぎを要求する受け入れ条件は無い)。
     review_only: [],
+    answered: [],
   };
   const next = { ...item, review: { ...review, watch }, session };
   return withReplacedItem(state, index, next);
@@ -805,6 +816,48 @@ export function applyReviewOnly(
   ) => ({ id: rid, updated_at: updatedAt }));
   const total = nextList.length;
   const nextWatch = { ...watch, review_only: nextList };
+  const next = { ...item, review: { ...review, watch: nextWatch } };
+  return {
+    state: withReplacedItem(state, index, next),
+    newOrChanged,
+    total,
+  };
+}
+
+// watch.answered は review_only と同じ入出力契約 (id/updated_at の upsert・dedup) を持つが、
+// 別フィールド・別語彙にする (gh-6)。watch.handled は「pr_fix で実際にコードを直した」ことを
+// 表す語彙、watch.review_only は「人の判断が要ると回した」ことを表す語彙で、どちらとも意味が
+// 違う「質問に回答・投稿済み」をこの2つに混ぜると、次に読む executor/verifier が誤読する。
+// ReviewOnlyResult をそのまま再利用する (戻り値の形が同一のため)。
+export function applyAnsweredSet(
+  item: Record<string, unknown>,
+  index: number,
+  state: Record<string, unknown>,
+  items: ReviewOnlyEntry[],
+): ReviewOnlyResult {
+  const review = getReview(item);
+  const watch = getWatch(item);
+  requirePrecondition(
+    item.status === "in_review" && watch !== null,
+    "status must be in_review and review.watch must be present",
+  );
+  const existing = getAnsweredList(watch);
+  const byId = new Map(existing.map((e) => [e.id, e.updated_at]));
+  const newOrChanged: string[] = [];
+  for (const it of items) {
+    const known = byId.has(it.id);
+    const prev = byId.get(it.id);
+    const changed = !known || prev === null || it.updated_at === null ||
+      prev !== it.updated_at;
+    if (changed) newOrChanged.push(it.id);
+    byId.set(it.id, it.updated_at);
+  }
+  const nextList: ReviewOnlyEntry[] = [...byId.entries()].map((
+    [rid, updatedAt],
+  ) => ({ id: rid, updated_at: updatedAt }));
+  const total = nextList.length;
+  // answered-set は watch.handled にも watch.review_only にも触れない (語彙の非混入)。
+  const nextWatch = { ...watch, answered: nextList };
   const next = { ...item, review: { ...review, watch: nextWatch } };
   return {
     state: withReplacedItem(state, index, next),

@@ -417,6 +417,26 @@ id と `updated_at` が完全一致していれば版は進んでいないとみ
 成功: `{"ok": true, "id": "<id>", "new_or_changed": ["<id>", ...], "review_only_total": <n>}`
 (`review_only_total` はこの呼び出し後の `watch.review_only` の件数)。
 
+### `answered-set`
+
+```
+state.ts answered-set --state-dir <dir> --id <id> --items-json <json> \
+  [--lock-retry-ms <n>] [--lock-max-retries <n>]
+```
+
+`review-only` と同じ入出力契約を、対象フィールドだけ `watch.answered` に変えて持つ (gh-6: レビュ
+アーの質問に回答・投稿したことを記録し、二重投稿を防ぐ)。`--items-json` の形・バリデーション
+(JSON として parse できない・配列でない・要素が `{id, updated_at}` の形を満たさない、のいずれも
+`usage`) と dedup 規則 (id と `updated_at` が完全一致していれば版は進んでいないとみなす。id が
+新規、または `updated_at` が前回の記録と異なる [前回・今回のいずれかが `null` の場合を含む] な
+ら `new_or_changed` に含める) は `review-only` と同一。
+前提: `status=="in_review" && review.watch!=null` (`conflict`)。
+効果: `watch.answered` に `--items-json` の各要素を id ごとに upsert する (**`watch.handled` にも
+`watch.review_only` にも触れない** — 「質問に回答・投稿済み」は「pr_fix でコードを直した」
+[`handled`] とも「人の判断待ちに回した」[`review_only`] とも別の語彙であるため)。
+成功: `{"ok": true, "id": "<id>", "new_or_changed": ["<id>", ...], "answered_total": <n>}`
+(`answered_total` はこの呼び出し後の `watch.answered` の件数)。
+
 ### 載せ直し
 
 ### `rebase-record`
