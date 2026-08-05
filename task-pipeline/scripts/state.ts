@@ -28,17 +28,70 @@
 //   直接実行する場合: deno test --allow-read --allow-write --allow-env --allow-run
 //     task-pipeline/scripts/state.test.ts
 //
-// 実行時の外部依存はゼロ (npm:/jsr: 参照なし)。state-schema.ts (別タスクで実装済み) の
-// checkState だけを import し、スキーマの詳細はここで再実装しない。
+// 実行時の外部依存はゼロ (npm:/jsr: 参照なし)。state-schema.ts の checkState と、
+// state-transitions.ts (42 verb の事前条件チェック・状態オブジェクトの書き換えを持つ
+// 純粋関数群 — Deno 由来の API を一切呼ばない) だけを import する。lock・原子的書き込み・
+// heartbeat・権限・CLI dispatch・終了コードへの変換はこのファイルに残る。
 
 import { checkState } from "./state-schema.ts";
+import {
+  applyApprove,
+  applyBlock,
+  applyCandidatesDrop,
+  applyCandidatesSet,
+  applyClaim,
+  applyDequeue,
+  applyFinalizeStart,
+  applyFixDone,
+  applyFixPending,
+  applyFixStart,
+  applyHistoryAppend,
+  applyInit,
+  applyInReview,
+  applyPhaseFail,
+  applyPhasePass,
+  applyPromotedAdd,
+  applyPromotedDrop,
+  applyRebaseDone,
+  applyRebaseGiveUp,
+  applyRebaseRecord,
+  applyRebaseResolvePending,
+  applyRebaseStart,
+  applyRecoverDone,
+  applyRelistedAdd,
+  applyRelistedDrop,
+  applyRestore,
+  applyReviewOnly,
+  applySetExecutor,
+  applySetGate,
+  applySetTakeover,
+  applySetWorktree,
+  applyStalledSet,
+  applyTouchExecutor,
+  applyWatchInit,
+  applyWatchSet,
+  applyWithdraw,
+  applyWithdrawAsked,
+  applyWithdrawRemove,
+  CliError,
+  type ExitCodeName,
+  finalizeState,
+  get as transitionsGet,
+  isRecord,
+  isSessionAlive,
+  isSessionStale,
+  requireQueueItem,
+  type ReviewOnlyEntry,
+  validate as transitionsValidate,
+  type WatchSetFields,
+} from "./state-transitions.ts";
 
 // ---------------------------------------------------------------------------
 // 終了コード契約 (docs/state-cli-contract.md と state.test.ts の T-D1 で突き合わせる
 // ソース・オブ・トゥルース)
 // ---------------------------------------------------------------------------
 
-export const EXIT_CODES = {
+export const EXIT_CODES: Record<ExitCodeName, number> = {
   usage: 10,
   lock: 11,
   schema: 12,
@@ -49,21 +102,12 @@ export const EXIT_CODES = {
   // 満たさない。「対象が無い」(missing) や「フラグの形状が変」(usage) とは別のビジネスルール
   // 違反で、要求3「前提違反は state を変えずに失敗する」の主対象。
   conflict: 15,
-} as const;
-
-type ExitCodeName = keyof typeof EXIT_CODES;
-
-class CliError extends Error {
-  constructor(public readonly code: ExitCodeName, message: string) {
-    super(message);
-  }
-}
+};
 
 // ---------------------------------------------------------------------------
 // 既定値
 // ---------------------------------------------------------------------------
 
-const DEFAULT_SCHEMA_VERSION = 1;
 const DEFAULT_LOCK_RETRY_MS = 10_000;
 const DEFAULT_LOCK_MAX_RETRIES = 3;
 const DEFAULT_CLEANUP_STALE_MIN = 1440;
@@ -289,35 +333,6 @@ async function releaseLock(stateDir: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// schema_version の正規化: 無ければ末尾に付与、有ればどんな値でも触らない
-// (JS オブジェクトの文字列キーは挿入順を保つ仕様を使い、既存キーの順序・値を変えない)
-// ---------------------------------------------------------------------------
-
-function withSchemaVersion(
-  obj: Record<string, unknown>,
-): Record<string, unknown> {
-  if ("schema_version" in obj) return obj;
-  return { ...obj, schema_version: DEFAULT_SCHEMA_VERSION };
-}
-
-function buildFreshState(
-  tracker: string,
-  source: string,
-): Record<string, unknown> {
-  return {
-    tracker,
-    source,
-    updated_at: nowIso(),
-    queue: [],
-    candidates: [],
-    relisted: [],
-    promoted: [],
-    history: [],
-    schema_version: DEFAULT_SCHEMA_VERSION,
-  };
-}
-
-// ---------------------------------------------------------------------------
 // 書き込み系 verb (init / history-append) が共有する適用ロジック。
 // lock は呼び出し側 (withStateLock、または init の手書きの try/finally) が既に持っている
 // 前提で、読み直し・スキーマ検証・fn 適用・(必要なら) 原子的書き込みだけを行う。
@@ -396,64 +411,12 @@ async function withStateLock(
 }
 
 // ---------------------------------------------------------------------------
-// state-cli-verbs: queue エントリを対象にする verb が共有するヘルパ群。
-//
-// 前提違反は必ず CliError("conflict", ...) (対象は存在するが現在の state がその verb の
-// 前提を満たさない) か CliError("missing", ...) (--id が queue/candidates/promoted/relisted
-// に無い) のどちらかで表す。どちらも withStateLock の fn 内で throw すれば、
-// applyStateChange は書き込みを一切行わずに re-throw する (要求3の本体)。
+// state-cli-verbs: queue エントリを対象にする verb (withQueueLock) と、それ以外の
+// トップレベル配列・新規エントリ追加を対象にする verb (withExistingStateLock) が共有する
+// ロック・書き込みの glue。前提チェックと状態オブジェクトの書き換え本体は
+// state-transitions.ts の対応関数に委譲する (要求3の本体: 前提違反は必ず CliError で
+// 表され、withStateLock/applyStateChange は書き込みを一切行わずに re-throw する)。
 // ---------------------------------------------------------------------------
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function queueArray(
-  state: Record<string, unknown>,
-): Record<string, unknown>[] {
-  return Array.isArray(state.queue)
-    ? (state.queue as Record<string, unknown>[])
-    : [];
-}
-
-function findQueueIndex(state: Record<string, unknown>, id: string): number {
-  return queueArray(state).findIndex((it) => it.id === id);
-}
-
-function requireQueueItem(
-  state: Record<string, unknown>,
-  id: string,
-): { index: number; item: Record<string, unknown> } {
-  const index = findQueueIndex(state, id);
-  if (index === -1) {
-    throw new CliError("missing", `id not found in queue: ${id}`);
-  }
-  return { index, item: queueArray(state)[index] };
-}
-
-function requirePrecondition(cond: boolean, message: string): void {
-  if (!cond) throw new CliError("conflict", message);
-}
-
-function withReplacedItem(
-  state: Record<string, unknown>,
-  index: number,
-  item: Record<string, unknown>,
-): Record<string, unknown> {
-  const q = queueArray(state).slice();
-  q[index] = item;
-  return { ...state, queue: q };
-}
-
-// mutate は queue[index] の書き換えだけでなく、他のトップレベル配列 (relisted/
-// withdrawn_branches 等) も同時に書き換えられるよう、フルの state を受け取りフルの state を
-// 返す形にしてある (restore や withdraw-remove のように、queue エントリと他配列を単一の
-// 原子的書き込みで揃えて動かす verb があるため)。
-function finalizeState(
-  next: Record<string, unknown>,
-): Record<string, unknown> {
-  return withSchemaVersion({ ...next, updated_at: nowIso() });
-}
 
 async function withQueueLock(
   stateDir: string,
@@ -471,60 +434,30 @@ async function withQueueLock(
     }
     const { index, item } = requireQueueItem(current, id);
     const nextState = mutate(item, index, current);
-    return finalizeState(nextState);
+    return finalizeState(nextState, nowIso());
   });
   return result.value;
 }
 
-function getReview(
-  item: Record<string, unknown>,
-): Record<string, unknown> | null {
-  return isRecord(item.review) ? item.review : null;
-}
-
-function getWatch(
-  item: Record<string, unknown>,
-): Record<string, unknown> | null {
-  const review = getReview(item);
-  if (!review) return null;
-  return isRecord(review.watch) ? review.watch : null;
-}
-
-function getRebase(
-  item: Record<string, unknown>,
-): Record<string, unknown> | null {
-  const review = getReview(item);
-  if (!review) return null;
-  return isRecord(review.rebase) ? review.rebase : null;
-}
-
-interface ReviewOnlyEntry {
-  id: string;
-  updated_at: string | null;
-}
-
-// watch.review_only は要求2 (review_only を watch.handled に入れず、恒久的に沈黙させない)
-// で新設したフィールドで、このタスクより前に作られた watch オブジェクトには存在しない
-// (スキーマ上も optional — 後方互換のため required には入れていない)。既存の
-// handled/pending_ids と同じ慣用で、無ければ空配列として読む。
-function getReviewOnlyList(
-  watch: Record<string, unknown> | null,
-): ReviewOnlyEntry[] {
-  const raw = watch && Array.isArray(watch.review_only)
-    ? watch.review_only
-    : [];
-  return raw as ReviewOnlyEntry[];
+// withQueueLock と対になる、トップレベル (queue 以外) の配列・新規 queue エントリ追加を
+// 対象にする verb 用のラッパ (approve/history-append/candidates-*/promoted-*/relisted-*/
+// stalled-set が使う)。「state.json が無ければ missing」の共通チェックと finalizeState の
+// 適用をここに集約する — 元は9箇所が同一メッセージを手書きで繰り返していた。
+async function withExistingStateLock(
+  stateDir: string,
+  opts: { retryMs: number; maxRetries: number },
+  mutate: (current: Record<string, unknown>) => Record<string, unknown>,
+): Promise<LockedApplyResult> {
+  return await withStateLock(stateDir, opts, (current) => {
+    if (current === undefined) {
+      throw new CliError("missing", `state.json not found in ${stateDir}`);
+    }
+    return finalizeState(mutate(current), nowIso());
+  });
 }
 
 function parseCsv(raw: string): string[] {
   return raw === "" ? [] : raw.split(",");
-}
-
-function unionAppend(existing: unknown, additions: string[]): string[] {
-  const base = Array.isArray(existing) ? (existing as string[]) : [];
-  const set = new Set(base);
-  for (const a of additions) set.add(a);
-  return [...set];
 }
 
 function requireEnumFlag(
@@ -815,6 +748,10 @@ function validateSessionId(id: string): void {
 
 // ---------------------------------------------------------------------------
 // verb 実装
+//
+// 各 cmdXxx は「flag 抽出・usage 検証 → lock 越しに state-transitions.ts の対応関数へ
+// 委譲 → 成功 JSON 組み立て」の薄い形。事前条件チェックと状態オブジェクトの書き換え本体は
+// state-transitions.ts 側にある。
 // ---------------------------------------------------------------------------
 
 async function cmdInit(
@@ -839,16 +776,10 @@ async function cmdInit(
     // 一切触られない。単一の lock がこの2ステップ全体を覆うので、init の並行呼び出しでも
     // exclude と state.json の適用がインターリーブしない)。
     await ensureExcludeLine(stateDir, gitCommonDir);
-    result = await applyStateChange(stateDir, (current) => {
-      if (current === undefined) {
-        return buildFreshState(tracker, source);
-      }
-      // 既存ファイルは --tracker/--source の値では書き換えない。schema_version が
-      // 既に有れば (どんな値でも) 一切書き込まない真の no-op、無ければ末尾に付与する
-      // 正規化だけを行う。
-      if ("schema_version" in current) return undefined;
-      return withSchemaVersion(current);
-    });
+    result = await applyStateChange(
+      stateDir,
+      (current) => applyInit(current, tracker, source, nowIso()),
+    );
   } finally {
     await releaseLock(stateDir);
   }
@@ -861,18 +792,14 @@ async function cmdInit(
 }
 
 async function cmdGet(stateDir: string): Promise<unknown> {
-  return await readState(stateDir);
+  return transitionsGet(await readState(stateDir));
 }
 
 async function cmdValidate(
   stateDir: string,
 ): Promise<Record<string, unknown>> {
   const parsed = await readState(stateDir);
-  const check = checkState(parsed);
-  if (!check.ok) {
-    throw new CliError("schema", `${check.path}: ${check.message}`);
-  }
-  return { ok: true };
+  return transitionsValidate(parsed);
 }
 
 async function cmdSessionTouch(
@@ -920,8 +847,7 @@ async function cmdSessionTouch(
     }
     const mtime = info.mtime;
     if (!mtime) continue;
-    const ageMin = (nowMs() - mtime.getTime()) / 60_000;
-    if (ageMin > cleanupStaleMin) {
+    if (isSessionStale(nowMs(), mtime.getTime(), cleanupStaleMin)) {
       const removePauseMs = readSessionRemovePauseMs();
       if (removePauseMs > 0) await sleep(removePauseMs);
       try {
@@ -973,8 +899,9 @@ async function cmdSessionsAlive(
     }
     const mtime = info.mtime;
     if (!mtime) continue;
-    const ageMin = (nowMs() - mtime.getTime()) / 60_000;
-    if (ageMin < aliveMaxMin) alive.push(entry.name);
+    if (isSessionAlive(nowMs(), mtime.getTime(), aliveMaxMin)) {
+      alive.push(entry.name);
+    }
   }
   return { ok: true, alive };
 }
@@ -994,20 +921,10 @@ async function cmdHistoryAppend(
     DEFAULT_LOCK_MAX_RETRIES,
   );
 
-  const result = await withStateLock(
+  const result = await withExistingStateLock(
     stateDir,
     { retryMs, maxRetries },
-    (current) => {
-      if (current === undefined) {
-        throw new CliError("missing", `state.json not found in ${stateDir}`);
-      }
-      const existingHistory = Array.isArray(current.history)
-        ? current.history
-        : [];
-      const history = [...existingHistory, line];
-      const withHistory = { ...current, history, updated_at: nowIso() };
-      return withSchemaVersion(withHistory);
-    },
+    (current) => applyHistoryAppend(current, line),
   );
 
   const history = result.value.history as unknown[];
@@ -1037,34 +954,11 @@ async function cmdApprove(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const title = requireFlag(flags, "title");
-  await withStateLock(stateDir, lockOpts(flags), (current) => {
-    if (current === undefined) {
-      throw new CliError("missing", `state.json not found in ${stateDir}`);
-    }
-    requirePrecondition(
-      findQueueIndex(current, id) === -1,
-      `id already exists in queue: ${id}`,
-    );
-    const entry: Record<string, unknown> = {
-      id,
-      title,
-      status: "approved",
-      gate: "full",
-      phase: null,
-      attempts: 0,
-      session: null,
-      executor: null,
-      executor_last_event_at: null,
-      takeover_at: null,
-      blocked_reason: null,
-      worktree: null,
-      base: null,
-      review: null,
-    };
-    const q = queueArray(current).slice();
-    q.push(entry);
-    return finalizeState({ ...current, queue: q });
-  });
+  await withExistingStateLock(
+    stateDir,
+    lockOpts(flags),
+    (current) => applyApprove(current, id, title),
+  );
   return { ok: true, id };
 }
 
@@ -1074,20 +968,12 @@ async function cmdClaim(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const session = requireFlag(flags, "session");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "approved",
-      `status must be approved, got ${String(item.status)}`,
-    );
-    const next = {
-      ...item,
-      status: "in_progress",
-      phase: "research",
-      attempts: 0,
-      session,
-    };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyClaim(item, index, state, session),
+  );
   return { ok: true, id, status: "in_progress", phase: "research", session };
 }
 
@@ -1096,15 +982,12 @@ async function cmdSetGate(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress" && item.phase === "research" &&
-        item.gate === "full",
-      "status must be in_progress, phase must be research, gate must be full",
-    );
-    const next = { ...item, gate: "light", phase: "research+plan" };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applySetGate(item, index, state),
+  );
   return { ok: true, id, gate: "light", phase: "research+plan" };
 }
 
@@ -1116,28 +999,13 @@ async function cmdSetWorktree(
   const worktree = requireFlag(flags, "worktree");
   const base = requireFlag(flags, "base");
   const drop = boolFlag(flags, "drop-withdrawn-branch");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress",
-      `status must be in_progress, got ${String(item.status)}`,
-    );
-    const next = { ...item, worktree, base };
-    let nextState = withReplacedItem(state, index, next);
-    if (drop) {
-      const wb = Array.isArray(state.withdrawn_branches)
-        ? (state.withdrawn_branches as Record<string, unknown>[])
-        : [];
-      const wbIndex = wb.findIndex((e) => e.id === id);
-      requirePrecondition(
-        wbIndex !== -1,
-        `no withdrawn_branches entry for id: ${id}`,
-      );
-      const nextWb = wb.slice();
-      nextWb.splice(wbIndex, 1);
-      nextState = { ...nextState, withdrawn_branches: nextWb };
-    }
-    return nextState;
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applySetWorktree(item, index, state, worktree, base, drop),
+  );
   return { ok: true, id, worktree, base };
 }
 
@@ -1148,19 +1016,13 @@ async function cmdSetExecutor(
   const id = requireFlag(flags, "id");
   const executor = requireFlag(flags, "executor");
   const session = requireFlag(flags, "session");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress",
-      `status must be in_progress, got ${String(item.status)}`,
-    );
-    const next = {
-      ...item,
-      executor,
-      executor_last_event_at: nowIso(),
-      session,
-    };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applySetExecutor(item, index, state, executor, session, nowIso()),
+  );
   return { ok: true, id, executor, session };
 }
 
@@ -1170,20 +1032,13 @@ async function cmdTouchExecutor(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const sessionIfUnowned = flags.get("session");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress" && item.executor != null,
-      "status must be in_progress and executor must be set",
-    );
-    let next: Record<string, unknown> = {
-      ...item,
-      executor_last_event_at: nowIso(),
-    };
-    if (sessionIfUnowned !== undefined && next.session == null) {
-      next = { ...next, session: sessionIfUnowned };
-    }
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyTouchExecutor(item, index, state, sessionIfUnowned, nowIso()),
+  );
   return { ok: true, id };
 }
 
@@ -1198,14 +1053,12 @@ async function cmdSetTakeover(
     throw new CliError("usage", "exactly one of --at or --clear is required");
   }
   const atValue = hasAt ? flags.get("at")! : null;
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress",
-      `status must be in_progress, got ${String(item.status)}`,
-    );
-    const next = { ...item, takeover_at: atValue };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applySetTakeover(item, index, state, atValue),
+  );
   return { ok: true, id, takeover_at: atValue };
 }
 
@@ -1216,16 +1069,12 @@ async function cmdPhasePass(
   const id = requireFlag(flags, "id");
   const from = requireEnumFlag(flags, "from", PHASE_VALUES);
   const to = requireEnumFlag(flags, "to", PHASE_VALUES);
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress" && item.phase === from,
-      `status must be in_progress and phase must be ${from}, got status=${
-        String(item.status)
-      } phase=${String(item.phase)}`,
-    );
-    const next = { ...item, phase: to, attempts: 0 };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyPhasePass(item, index, state, from, to),
+  );
   return { ok: true, id, phase: to };
 }
 
@@ -1237,15 +1086,9 @@ async function cmdPhaseFail(
   const phase = requireEnumFlag(flags, "phase", PHASE_VALUES);
   let attempts = 0;
   await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress" && item.phase === phase,
-      `status must be in_progress and phase must be ${phase}, got status=${
-        String(item.status)
-      } phase=${String(item.phase)}`,
-    );
-    attempts = (typeof item.attempts === "number" ? item.attempts : 0) + 1;
-    const next = { ...item, attempts };
-    return withReplacedItem(state, index, next);
+    const result = applyPhaseFail(item, index, state, phase);
+    attempts = result.attempts;
+    return result.state;
   });
   return { ok: true, id, attempts };
 }
@@ -1256,20 +1099,12 @@ async function cmdBlock(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const reason = requireFlag(flags, "reason");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress",
-      `status must be in_progress, got ${String(item.status)}`,
-    );
-    const next = {
-      ...item,
-      status: "blocked",
-      blocked_reason: reason,
-      phase: null,
-      session: null,
-    };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyBlock(item, index, state, reason),
+  );
   return { ok: true, id, status: "blocked" };
 }
 
@@ -1278,15 +1113,12 @@ async function cmdDequeue(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress",
-      `status must be in_progress, got ${String(item.status)}`,
-    );
-    const q = queueArray(state).slice();
-    q.splice(index, 1);
-    return { ...state, queue: q };
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyDequeue(item, index, state),
+  );
   return { ok: true, id };
 }
 
@@ -1303,16 +1135,12 @@ async function cmdFinalizeStart(
     "pr_fix",
     "rebase_fix",
   ]);
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress" && item.phase === from,
-      `status must be in_progress and phase must be ${from}, got status=${
-        String(item.status)
-      } phase=${String(item.phase)}`,
-    );
-    const next = { ...item, phase: "finalize", attempts: 0 };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyFinalizeStart(item, index, state, from),
+  );
   return { ok: true, id, phase: "finalize" };
 }
 
@@ -1358,40 +1186,21 @@ async function cmdInReview(
   const tip = flags.get("tip");
   const clearSession = boolFlag(flags, "clear-session");
 
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    requirePrecondition(
-      item.status === "in_progress" && item.phase === "finalize",
-      `status must be in_progress and phase must be finalize, got status=${
-        String(item.status)
-      } phase=${String(item.phase)}`,
-    );
-    let next: Record<string, unknown> = {
-      ...item,
-      status: "in_review",
-      phase: null,
-      attempts: 0,
-    };
-    if (freshGroup) {
-      next = {
-        ...next,
-        review: {
-          ref: ref!,
-          branch: branch!,
-          tip: commits >= 1 ? tip! : null,
-          base: base!,
-        },
-      };
-    }
-    // --clear-session true: レビュー待ちにしたタスクに、もう揮発資源 (実行エージェント /
-    // watch プロセス) が無いとき (ref が PR URL でなく watch-init を呼ばない経路) に session
-    // を同じ書き込みで null に戻す。呼ばずに残すと、この session を持つセッションが生きて
-    // いる限り (このタスクとは無関係な作業をしていても) 他セッションから「所有中なので触ら
-    // ない」と誤認され、マージの回収が heartbeat 失効 (最大90分) まで遅れる。
-    if (clearSession) {
-      next = { ...next, session: null };
-    }
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyInReview(item, index, state, {
+        freshGroup,
+        ref,
+        branch,
+        tip,
+        base,
+        commits,
+        clearSession,
+      }),
+  );
   return { ok: true, id, status: "in_review" };
 }
 
@@ -1404,39 +1213,13 @@ async function cmdWatchInit(
   const id = requireFlag(flags, "id");
   const session = requireFlag(flags, "session");
   const preserve = boolFlag(flags, "preserve-handled");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    requirePrecondition(
-      item.status === "in_review" && review !== null && review.ref != null,
-      "status must be in_review and review.ref must be set",
-    );
-    const existingWatch = getWatch(item);
-    const existingHandled = preserve && existingWatch &&
-        Array.isArray(existingWatch.handled)
-      ? (existingWatch.handled as string[])
-      : [];
-    const watch = {
-      state: "watching",
-      proc: null,
-      proc_started_at: null,
-      sig: null,
-      head: null,
-      ci: null,
-      handled: existingHandled,
-      fix_pending: false,
-      pending_ids: [],
-      findings: null,
-      fix_attempts: 0,
-      errors: 0,
-      checked_at: null,
-      note: null,
-      // review_only は --preserve-handled の対象外: pending_ids/findings と同じく
-      // watch-init は常にまっさらから始める (引き継ぎを要求する受け入れ条件は無い)。
-      review_only: [],
-    };
-    const next = { ...item, review: { ...review, watch }, session };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyWatchInit(item, index, state, session, preserve),
+  );
   return { ok: true, id };
 }
 
@@ -1445,27 +1228,26 @@ async function cmdWatchSet(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
+  const fields: WatchSetFields = { errorsInc: false, errorsReset: false };
   const hasProc = flags.has("proc");
-  const procVal = hasProc ? nullableFlag(flags.get("proc")!) : undefined;
+  if (hasProc) fields.proc = nullableFlag(flags.get("proc")!);
   const hasSig = flags.has("sig");
-  const sigVal = hasSig ? nullableFlag(flags.get("sig")!) : undefined;
+  if (hasSig) fields.sig = nullableFlag(flags.get("sig")!);
   const hasHead = flags.has("head");
-  const headVal = hasHead ? nullableFlag(flags.get("head")!) : undefined;
+  if (hasHead) fields.head = nullableFlag(flags.get("head")!);
   const hasCi = flags.has("ci");
-  let ciVal: string | null | undefined;
   if (hasCi) {
     const raw = flags.get("ci")!;
     if (
-      raw !== "null" && !["passing", "failing", "pending", "none"].includes(raw)
+      raw !== "null" &&
+      !["passing", "failing", "pending", "none"].includes(raw)
     ) {
       throw new CliError("usage", `invalid --ci: ${raw}`);
     }
-    ciVal = raw === "null" ? null : raw;
+    fields.ci = raw === "null" ? null : raw;
   }
   const hasCheckedAt = flags.has("checked-at");
-  const checkedAtVal = hasCheckedAt
-    ? nullableFlag(flags.get("checked-at")!)
-    : undefined;
+  if (hasCheckedAt) fields.checkedAt = nullableFlag(flags.get("checked-at")!);
   const errorsInc = boolFlag(flags, "errors-inc");
   const errorsReset = boolFlag(flags, "errors-reset");
   if (errorsInc && errorsReset) {
@@ -1474,22 +1256,23 @@ async function cmdWatchSet(
       "--errors-inc and --errors-reset are mutually exclusive",
     );
   }
+  fields.errorsInc = errorsInc;
+  fields.errorsReset = errorsReset;
   const hasNote = flags.has("note");
-  const noteVal = hasNote ? nullableFlag(flags.get("note")!) : undefined;
+  if (hasNote) fields.note = nullableFlag(flags.get("note")!);
   const hasState = flags.has("state");
-  let stateVal: string | undefined;
   if (hasState) {
-    stateVal = flags.get("state")!;
+    const stateVal = flags.get("state")!;
     if (!["watching", "stopped"].includes(stateVal)) {
       throw new CliError("usage", `invalid --state: ${stateVal}`);
     }
+    fields.state = stateVal as "watching" | "stopped";
   }
   const hasSession = flags.has("session");
-  const sessionVal = hasSession
-    ? nullableFlag(flags.get("session")!)
-    : undefined;
+  if (hasSession) fields.session = nullableFlag(flags.get("session")!);
   if (
-    hasSession && sessionVal !== null && hasState && stateVal === "stopped"
+    hasSession && fields.session !== null && hasState &&
+    fields.state === "stopped"
   ) {
     throw new CliError(
       "usage",
@@ -1502,38 +1285,12 @@ async function cmdWatchSet(
     throw new CliError("usage", "watch-set requires at least one field flag");
   }
 
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    const watch = getWatch(item);
-    requirePrecondition(watch !== null, "review.watch must be present");
-    const nextWatch: Record<string, unknown> = { ...watch! };
-    if (hasProc) {
-      nextWatch.proc = procVal;
-      nextWatch.proc_started_at = procVal === null ? null : nowIso();
-    }
-    if (hasSig) nextWatch.sig = sigVal;
-    if (hasHead) nextWatch.head = headVal;
-    if (hasCi) nextWatch.ci = ciVal;
-    if (hasCheckedAt) nextWatch.checked_at = checkedAtVal;
-    if (errorsInc) {
-      const cur = typeof watch!.errors === "number" ? watch!.errors : 0;
-      nextWatch.errors = cur + 1;
-    }
-    if (errorsReset) nextWatch.errors = 0;
-    if (hasNote) nextWatch.note = noteVal;
-    if (hasState) nextWatch.state = stateVal;
-    let next: Record<string, unknown> = {
-      ...item,
-      review: { ...review, watch: nextWatch },
-    };
-    if (hasState && stateVal === "stopped") {
-      next = { ...next, session: null };
-    }
-    if (hasSession) {
-      next = { ...next, session: sessionVal };
-    }
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyWatchSet(item, index, state, fields, nowIso()),
+  );
   return { ok: true, id };
 }
 
@@ -1544,22 +1301,13 @@ async function cmdFixPending(
   const id = requireFlag(flags, "id");
   const pendingIds = parseCsv(requireFlag(flags, "pending-ids"));
   const findings = requireFlag(flags, "findings");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    const watch = getWatch(item);
-    requirePrecondition(
-      item.status === "in_review" && watch !== null,
-      "status must be in_review and review.watch must be present",
-    );
-    const nextWatch = {
-      ...watch,
-      fix_pending: true,
-      pending_ids: pendingIds,
-      findings,
-    };
-    const next = { ...item, review: { ...review, watch: nextWatch } };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyFixPending(item, index, state, pendingIds, findings),
+  );
   return { ok: true, id };
 }
 
@@ -1573,44 +1321,10 @@ async function cmdFixStart(
   let started = false;
   let fixAttempts = 0;
   await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    const watch = getWatch(item);
-    requirePrecondition(
-      item.status === "in_review" && watch !== null &&
-        watch.fix_pending === true,
-      "status must be in_review and watch.fix_pending must be true",
-    );
-    const baseAttempts = reset
-      ? 0
-      : (typeof watch!.fix_attempts === "number" ? watch!.fix_attempts : 0);
-    fixAttempts = baseAttempts + 1;
-    started = fixAttempts <= 3;
-    let nextWatch: Record<string, unknown>;
-    let next: Record<string, unknown>;
-    if (started) {
-      nextWatch = { ...watch, fix_attempts: fixAttempts, fix_pending: false };
-      next = {
-        ...item,
-        status: "in_progress",
-        phase: "pr_fix",
-        attempts: 0,
-        session,
-        review: { ...review, watch: nextWatch },
-      };
-    } else {
-      nextWatch = {
-        ...watch,
-        fix_attempts: fixAttempts,
-        state: "stopped",
-        note: "追従上限",
-      };
-      next = {
-        ...item,
-        session: null,
-        review: { ...review, watch: nextWatch },
-      };
-    }
-    return withReplacedItem(state, index, next);
+    const result = applyFixStart(item, index, state, session, reset);
+    started = result.started;
+    fixAttempts = result.fixAttempts;
+    return result.state;
   });
   return { ok: true, id, started, fix_attempts: fixAttempts };
 }
@@ -1620,31 +1334,17 @@ async function cmdFixDone(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    const watch = getWatch(item);
-    requirePrecondition(
-      item.status === "in_progress" && item.phase === "finalize" &&
-        watch !== null,
-      "status must be in_progress, phase must be finalize, and review.watch must be present",
-    );
-    const pendingIds = Array.isArray(watch!.pending_ids)
-      ? (watch!.pending_ids as string[])
-      : [];
-    const nextWatch = {
-      ...watch,
-      handled: unionAppend(watch!.handled, pendingIds),
-      pending_ids: [],
-      findings: null,
-    };
-    const next = { ...item, review: { ...review, watch: nextWatch } };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyFixDone(item, index, state),
+  );
   return { ok: true, id };
 }
 
 // review_only の指摘は、ここでは watch.handled に一切触れず watch.review_only に
-// id ごと upsert するだけにする (要求2)。watch.handled は fix-done を経由して実際に
+// id ごと upsert するだけにする。watch.handled は fix-done を経由して実際に
 // 修正したものだけを表す。同じ版 (updated_at) のまま繰り返し観測された id を毎回
 // 報告し直させないため、この verb は「今回新規に見えた、または前回記録した
 // updated_at から版が進んだ id」を new_or_changed として返す — 呼び出し側 (SKILL.md)
@@ -1691,30 +1391,10 @@ async function cmdReviewOnly(
   let newOrChanged: string[] = [];
   let total = 0;
   await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    const watch = getWatch(item);
-    requirePrecondition(
-      item.status === "in_review" && watch !== null,
-      "status must be in_review and review.watch must be present",
-    );
-    const existing = getReviewOnlyList(watch);
-    const byId = new Map(existing.map((e) => [e.id, e.updated_at]));
-    newOrChanged = [];
-    for (const it of items) {
-      const known = byId.has(it.id);
-      const prev = byId.get(it.id);
-      const changed = !known || prev === null || it.updated_at === null ||
-        prev !== it.updated_at;
-      if (changed) newOrChanged.push(it.id);
-      byId.set(it.id, it.updated_at);
-    }
-    const nextList: ReviewOnlyEntry[] = [...byId.entries()].map((
-      [rid, updatedAt],
-    ) => ({ id: rid, updated_at: updatedAt }));
-    total = nextList.length;
-    const nextWatch = { ...watch, review_only: nextList };
-    const next = { ...item, review: { ...review, watch: nextWatch } };
-    return withReplacedItem(state, index, next);
+    const result = applyReviewOnly(item, index, state, items);
+    newOrChanged = result.newOrChanged;
+    total = result.total;
+    return result.state;
   });
   return {
     ok: true,
@@ -1750,25 +1430,23 @@ async function cmdRebaseRecord(
   }
   const cause = flags.get("cause");
   const report = flags.get("report");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    requirePrecondition(
-      item.status === "in_review" && review !== null,
-      "status must be in_review and review must be present",
-    );
-    const existingRebase = getRebase(item);
-    const nextRebase: Record<string, unknown> = {
-      ...(existingRebase ?? {}),
-      blocked_onto: blockedOnto,
-      reason,
-      at: existingRebase?.at ?? nowIso(),
-    };
-    if (kind !== undefined) nextRebase.kind = kind;
-    if (cause !== undefined) nextRebase.cause = cause;
-    if (report !== undefined) nextRebase.report = report;
-    const next = { ...item, review: { ...review, rebase: nextRebase } };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyRebaseRecord(
+        item,
+        index,
+        state,
+        blockedOnto,
+        reason,
+        kind,
+        cause,
+        report,
+        nowIso(),
+      ),
+  );
   return { ok: true, id };
 }
 
@@ -1778,21 +1456,13 @@ async function cmdRebaseResolvePending(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const fromTip = requireFlag(flags, "from-tip");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    const rebase = getRebase(item);
-    requirePrecondition(
-      item.status === "in_review" && rebase !== null,
-      "status must be in_review and review.rebase must be present",
-    );
-    const nextRebase = {
-      ...rebase,
-      resolve_pending: true,
-      from_tip: fromTip,
-    };
-    const next = { ...item, review: { ...review, rebase: nextRebase } };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyRebaseResolvePending(item, index, state, fromTip),
+  );
   return { ok: true, id };
 }
 
@@ -1802,25 +1472,12 @@ async function cmdRebaseStart(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const session = requireFlag(flags, "session");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    const rebase = getRebase(item);
-    requirePrecondition(
-      item.status === "in_review" && rebase !== null &&
-        rebase.resolve_pending === true,
-      "status must be in_review and review.rebase.resolve_pending must be true",
-    );
-    const nextRebase = { ...rebase, resolve_pending: false };
-    const next = {
-      ...item,
-      status: "in_progress",
-      phase: "rebase_fix",
-      attempts: 0,
-      session,
-      review: { ...review, rebase: nextRebase },
-    };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyRebaseStart(item, index, state, session),
+  );
   return { ok: true, id, status: "in_progress", phase: "rebase_fix" };
 }
 
@@ -1830,18 +1487,12 @@ async function cmdRebaseDone(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const tip = requireFlag(flags, "tip");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    const rebase = getRebase(item);
-    requirePrecondition(
-      review !== null && rebase !== null,
-      "review.rebase must be present",
-    );
-    const nextReview: Record<string, unknown> = { ...review, tip };
-    delete nextReview.rebase;
-    const next = { ...item, review: nextReview };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyRebaseDone(item, index, state, tip),
+  );
   return { ok: true, id, tip };
 }
 
@@ -1851,30 +1502,12 @@ async function cmdRebaseGiveUp(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const blockedOnto = requireFlag(flags, "blocked-onto");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    const rebase = getRebase(item);
-    requirePrecondition(
-      item.status === "in_progress" && item.phase === "rebase_fix" &&
-        review !== null && rebase !== null,
-      "status must be in_progress, phase must be rebase_fix, and review.rebase must be present",
-    );
-    const nextRebase = {
-      ...rebase,
-      reason: "conflict",
-      blocked_onto: blockedOnto,
-      resolve_pending: false,
-    };
-    const next = {
-      ...item,
-      status: "in_review",
-      phase: null,
-      attempts: 0,
-      session: null,
-      review: { ...review, rebase: nextRebase },
-    };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyRebaseGiveUp(item, index, state, blockedOnto),
+  );
   return { ok: true, id, status: "in_review" };
 }
 
@@ -1885,25 +1518,12 @@ async function cmdRecoverDone(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    requirePrecondition(
-      item.status === "in_review" && review !== null && review.tip != null,
-      "status must be in_review and review.tip must be present",
-    );
-    const watch = getWatch(item);
-    let nextReview = review!;
-    if (watch !== null) {
-      nextReview = { ...review, watch: { ...watch, proc: null } };
-    }
-    const next = {
-      ...item,
-      status: "done",
-      session: null,
-      review: nextReview,
-    };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyRecoverDone(item, index, state),
+  );
   return { ok: true, id, status: "done" };
 }
 
@@ -1912,15 +1532,12 @@ async function cmdWithdraw(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    requirePrecondition(
-      item.status === "in_review" && review !== null,
-      "status must be in_review and review must be present",
-    );
-    const next = { ...item, review: { ...review, withdrawn: true } };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyWithdraw(item, index, state),
+  );
   return { ok: true, id };
 }
 
@@ -1930,30 +1547,13 @@ async function cmdWithdrawRemove(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const reason = requireFlag(flags, "reason");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    requirePrecondition(
-      item.status === "in_review" && review !== null &&
-        review.withdrawn === true && item.worktree != null &&
-        item.base != null,
-      "status must be in_review, review.withdrawn must be true, and worktree/base must be set",
-    );
-    const entry = {
-      id,
-      branch: `task-pipeline/${id}`,
-      base: item.base as string,
-      worktree: item.worktree as string,
-      at: nowIso(),
-      reason,
-    };
-    const wb = Array.isArray(state.withdrawn_branches)
-      ? (state.withdrawn_branches as unknown[]).slice()
-      : [];
-    wb.push(entry);
-    const q = queueArray(state).slice();
-    q.splice(index, 1);
-    return { ...state, queue: q, withdrawn_branches: wb };
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyWithdrawRemove(item, index, state, reason, nowIso()),
+  );
   return { ok: true, id };
 }
 
@@ -1962,16 +1562,12 @@ async function cmdWithdrawAsked(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const review = getReview(item);
-    requirePrecondition(
-      item.status === "in_review" && review !== null &&
-        review.withdrawn === true,
-      "status must be in_review and review.withdrawn must be true",
-    );
-    const next = { ...item, review: { ...review, withdrawn_asked: true } };
-    return withReplacedItem(state, index, next);
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyWithdrawAsked(item, index, state),
+  );
   return { ok: true, id };
 }
 
@@ -2002,12 +1598,11 @@ async function cmdCandidatesSet(
       );
     }
   }
-  await withStateLock(stateDir, lockOpts(flags), (current) => {
-    if (current === undefined) {
-      throw new CliError("missing", `state.json not found in ${stateDir}`);
-    }
-    return finalizeState({ ...current, candidates: parsed });
-  });
+  await withExistingStateLock(
+    stateDir,
+    lockOpts(flags),
+    (current) => applyCandidatesSet(current, parsed as unknown[]),
+  );
   return { ok: true, count: (parsed as unknown[]).length };
 }
 
@@ -2016,21 +1611,11 @@ async function cmdCandidatesDrop(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withStateLock(stateDir, lockOpts(flags), (current) => {
-    if (current === undefined) {
-      throw new CliError("missing", `state.json not found in ${stateDir}`);
-    }
-    const arr = Array.isArray(current.candidates)
-      ? (current.candidates as Record<string, unknown>[])
-      : [];
-    const idx = arr.findIndex((c) => c.id === id);
-    if (idx === -1) {
-      throw new CliError("missing", `id not found in candidates: ${id}`);
-    }
-    const next = arr.slice();
-    next.splice(idx, 1);
-    return finalizeState({ ...current, candidates: next });
-  });
+  await withExistingStateLock(
+    stateDir,
+    lockOpts(flags),
+    (current) => applyCandidatesDrop(current, id),
+  );
   return { ok: true, id };
 }
 
@@ -2039,13 +1624,11 @@ async function cmdPromotedAdd(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const ids = parseCsv(requireFlag(flags, "ids"));
-  await withStateLock(stateDir, lockOpts(flags), (current) => {
-    if (current === undefined) {
-      throw new CliError("missing", `state.json not found in ${stateDir}`);
-    }
-    const next = unionAppend(current.promoted, ids);
-    return finalizeState({ ...current, promoted: next });
-  });
+  await withExistingStateLock(
+    stateDir,
+    lockOpts(flags),
+    (current) => applyPromotedAdd(current, ids),
+  );
   return { ok: true, ids };
 }
 
@@ -2054,21 +1637,11 @@ async function cmdPromotedDrop(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withStateLock(stateDir, lockOpts(flags), (current) => {
-    if (current === undefined) {
-      throw new CliError("missing", `state.json not found in ${stateDir}`);
-    }
-    const arr = Array.isArray(current.promoted)
-      ? (current.promoted as string[])
-      : [];
-    const idx = arr.indexOf(id);
-    if (idx === -1) {
-      throw new CliError("missing", `id not found in promoted: ${id}`);
-    }
-    const next = arr.slice();
-    next.splice(idx, 1);
-    return finalizeState({ ...current, promoted: next });
-  });
+  await withExistingStateLock(
+    stateDir,
+    lockOpts(flags),
+    (current) => applyPromotedDrop(current, id),
+  );
   return { ok: true, id };
 }
 
@@ -2078,20 +1651,11 @@ async function cmdRelistedAdd(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const seenAt = requireFlag(flags, "seen-at");
-  await withStateLock(stateDir, lockOpts(flags), (current) => {
-    if (current === undefined) {
-      throw new CliError("missing", `state.json not found in ${stateDir}`);
-    }
-    const arr = Array.isArray(current.relisted)
-      ? (current.relisted as Record<string, unknown>[])
-      : [];
-    requirePrecondition(
-      arr.findIndex((r) => r.id === id) === -1,
-      `id already exists in relisted: ${id}`,
-    );
-    const next = [...arr, { id, seen_at: seenAt }];
-    return finalizeState({ ...current, relisted: next });
-  });
+  await withExistingStateLock(
+    stateDir,
+    lockOpts(flags),
+    (current) => applyRelistedAdd(current, id, seenAt),
+  );
   return { ok: true, id };
 }
 
@@ -2100,21 +1664,11 @@ async function cmdRelistedDrop(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withStateLock(stateDir, lockOpts(flags), (current) => {
-    if (current === undefined) {
-      throw new CliError("missing", `state.json not found in ${stateDir}`);
-    }
-    const arr = Array.isArray(current.relisted)
-      ? (current.relisted as Record<string, unknown>[])
-      : [];
-    const idx = arr.findIndex((r) => r.id === id);
-    if (idx === -1) {
-      throw new CliError("missing", `id not found in relisted: ${id}`);
-    }
-    const next = arr.slice();
-    next.splice(idx, 1);
-    return finalizeState({ ...current, relisted: next });
-  });
+  await withExistingStateLock(
+    stateDir,
+    lockOpts(flags),
+    (current) => applyRelistedDrop(current, id),
+  );
   return { ok: true, id };
 }
 
@@ -2123,33 +1677,12 @@ async function cmdRestore(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const relisted = Array.isArray(state.relisted)
-      ? (state.relisted as Record<string, unknown>[])
-      : [];
-    const rIndex = relisted.findIndex((r) => r.id === id);
-    requirePrecondition(rIndex !== -1, `id not found in relisted: ${id}`);
-    requirePrecondition(
-      item.status === "in_review" || item.status === "blocked" ||
-        item.status === "done",
-      `status must be in_review/blocked/done, got ${String(item.status)}`,
-    );
-    const nextItem = {
-      ...item,
-      status: "approved",
-      phase: null,
-      attempts: 0,
-      session: null,
-      executor: null,
-      executor_last_event_at: null,
-      takeover_at: null,
-      blocked_reason: null,
-    };
-    const nextRelisted = relisted.slice();
-    nextRelisted.splice(rIndex, 1);
-    const withItem = withReplacedItem(state, index, nextItem);
-    return { ...withItem, relisted: nextRelisted };
-  });
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyRestore(item, index, state),
+  );
   return { ok: true, id, status: "approved" };
 }
 
@@ -2165,22 +1698,17 @@ async function cmdStalledSet(
     "null",
   ]);
   const bump = boolFlag(flags, "bump");
-  await withStateLock(stateDir, lockOpts(flags), (current) => {
-    if (current === undefined) {
-      throw new CliError("missing", `state.json not found in ${stateDir}`);
-    }
-    if (value === "null") {
-      return finalizeState({ ...current, stalled: null, stalled_since: null });
-    }
-    const wasNull = current.stalled == null;
-    let stalledSince = current.stalled_since ?? null;
-    if (wasNull || bump) stalledSince = nowIso();
-    return finalizeState({
-      ...current,
-      stalled: value,
-      stalled_since: stalledSince,
-    });
-  });
+  await withExistingStateLock(
+    stateDir,
+    lockOpts(flags),
+    (current) =>
+      applyStalledSet(
+        current,
+        value as "depleted" | "max_open" | "null",
+        bump,
+        nowIso(),
+      ),
+  );
   return { ok: true, value: value === "null" ? null : value };
 }
 
