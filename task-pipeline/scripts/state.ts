@@ -498,6 +498,24 @@ function getRebase(
   return isRecord(review.rebase) ? review.rebase : null;
 }
 
+interface ReviewOnlyEntry {
+  id: string;
+  updated_at: string | null;
+}
+
+// watch.review_only は要求2 (review_only を watch.handled に入れず、恒久的に沈黙させない)
+// で新設したフィールドで、このタスクより前に作られた watch オブジェクトには存在しない
+// (スキーマ上も optional — 後方互換のため required には入れていない)。既存の
+// handled/pending_ids と同じ慣用で、無ければ空配列として読む。
+function getReviewOnlyList(
+  watch: Record<string, unknown> | null,
+): ReviewOnlyEntry[] {
+  const raw = watch && Array.isArray(watch.review_only)
+    ? watch.review_only
+    : [];
+  return raw as ReviewOnlyEntry[];
+}
+
 function parseCsv(raw: string): string[] {
   return raw === "" ? [] : raw.split(",");
 }
@@ -703,7 +721,7 @@ export const ALLOWED_FLAGS: Record<string, ReadonlySet<string>> = {
     ...LOCK_FLAGS,
   ]),
   "fix-done": new Set(["state-dir", "id", ...LOCK_FLAGS]),
-  "review-only": new Set(["state-dir", "id", "ids", ...LOCK_FLAGS]),
+  "review-only": new Set(["state-dir", "id", "items-json", ...LOCK_FLAGS]),
   // --- 載せ直し ---
   "rebase-record": new Set([
     "state-dir",
@@ -1412,6 +1430,9 @@ async function cmdWatchInit(
       errors: 0,
       checked_at: null,
       note: null,
+      // review_only は --preserve-handled の対象外: pending_ids/findings と同じく
+      // watch-init は常にまっさらから始める (引き継ぎを要求する受け入れ条件は無い)。
+      review_only: [],
     };
     const next = { ...item, review: { ...review, watch }, session };
     return withReplacedItem(state, index, next);
@@ -1622,12 +1643,53 @@ async function cmdFixDone(
   return { ok: true, id };
 }
 
+// review_only の指摘は、ここでは watch.handled に一切触れず watch.review_only に
+// id ごと upsert するだけにする (要求2)。watch.handled は fix-done を経由して実際に
+// 修正したものだけを表す。同じ版 (updated_at) のまま繰り返し観測された id を毎回
+// 報告し直させないため、この verb は「今回新規に見えた、または前回記録した
+// updated_at から版が進んだ id」を new_or_changed として返す — 呼び出し側 (SKILL.md)
+// はこれだけを報告する。updated_at が null (版を取得できなかった) の id は比較の
+// しようが無いので、安全側に倒して観測されるたびに毎回 new_or_changed に含める。
+function parseReviewOnlyItems(raw: string): ReviewOnlyEntry[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new CliError(
+      "usage",
+      `invalid --items-json: ${(e as Error).message}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new CliError("usage", "--items-json must be a JSON array");
+  }
+  const items: ReviewOnlyEntry[] = [];
+  for (const it of parsed) {
+    if (!isRecord(it) || typeof it.id !== "string") {
+      throw new CliError("usage", "each item needs a string id");
+    }
+    if (
+      !("updated_at" in it) ||
+      (typeof it.updated_at !== "string" && it.updated_at !== null)
+    ) {
+      throw new CliError(
+        "usage",
+        "each item needs updated_at (string or null)",
+      );
+    }
+    items.push({ id: it.id, updated_at: it.updated_at as string | null });
+  }
+  return items;
+}
+
 async function cmdReviewOnly(
   stateDir: string,
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  const ids = parseCsv(requireFlag(flags, "ids"));
+  const items = parseReviewOnlyItems(requireFlag(flags, "items-json"));
+  let newOrChanged: string[] = [];
+  let total = 0;
   await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
     const review = getReview(item);
     const watch = getWatch(item);
@@ -1635,11 +1697,31 @@ async function cmdReviewOnly(
       item.status === "in_review" && watch !== null,
       "status must be in_review and review.watch must be present",
     );
-    const nextWatch = { ...watch, handled: unionAppend(watch!.handled, ids) };
+    const existing = getReviewOnlyList(watch);
+    const byId = new Map(existing.map((e) => [e.id, e.updated_at]));
+    newOrChanged = [];
+    for (const it of items) {
+      const known = byId.has(it.id);
+      const prev = byId.get(it.id);
+      const changed = !known || prev === null || it.updated_at === null ||
+        prev !== it.updated_at;
+      if (changed) newOrChanged.push(it.id);
+      byId.set(it.id, it.updated_at);
+    }
+    const nextList: ReviewOnlyEntry[] = [...byId.entries()].map((
+      [rid, updatedAt],
+    ) => ({ id: rid, updated_at: updatedAt }));
+    total = nextList.length;
+    const nextWatch = { ...watch, review_only: nextList };
     const next = { ...item, review: { ...review, watch: nextWatch } };
     return withReplacedItem(state, index, next);
   });
-  return { ok: true, id };
+  return {
+    ok: true,
+    id,
+    new_or_changed: newOrChanged,
+    review_only_total: total,
+  };
 }
 
 // --- 載せ直し ---------------------------------------------------------------

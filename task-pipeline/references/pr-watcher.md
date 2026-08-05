@@ -34,6 +34,8 @@ MCP でも取れなければ `{"verdict": "error", "error": "<理由>"}` を返�
 - **レビュースレッドの解決状態 (`isResolved`) が分からない。** 解決済みの指摘を落とせないので、重複防止は `handled` だけが頼りになる。findings に「解決済みかどうかは判定できていない」と書き、executor が対応不要と判断する余地を残す。
 - **CI の失敗ログが取れない** (チェックの名前・状態・URL まで)。ログ抜粋の代わりに「ログは未取得。executor が target project で再現すること」と書く。
 
+`updated_at` (下記「レビューと未解決スレッド」参照) は `get_comments`/`get_review_comments`/`get_reviews` でも概ね取れる想定だが、取れなければ `null` にする (呼び出し側はこれを「版が比較できない」として扱う — 取れないこと自体は `error` にしない)。
+
 ## catch-up モード (`mode: catch-up`)
 
 起動プロンプトの `mode` が `catch-up` のときは、**手順 3 の `ci: "pending"` による打ち切り (verdict `wait`) を行わず、手順 4〜6 を必ず実行する。** `ci` フィールドには通常どおり判定した値 (`pending` など) をそのまま入れる。**手順 2 (マージ可否) は catch-up かどうかに関わらず常に評価する** (下記「判定順」参照。CI とは独立の非同期計算のため、catch-up の打ち切り省略とは無関係)。
@@ -108,9 +110,9 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
      repository(owner:$owner,name:$repo){ pullRequest(number:$number){
        reviewDecision
        reviewThreads(last:100){nodes{isResolved isOutdated
-         comments(last:20){nodes{databaseId author{login} path line url body}}}}
-       reviews(last:50){nodes{databaseId state author{login} url body}}
-       comments(last:50){nodes{databaseId author{login} url body}}
+         comments(last:20){nodes{databaseId author{login} path line url body updatedAt}}}}
+       reviews(last:50){nodes{databaseId state author{login} url body updatedAt}}
+       comments(last:50){nodes{databaseId author{login} url body updatedAt}}
      }}}' -F owner=<owner> -F repo=<repo> -F number=<番号>
    ```
 
@@ -118,7 +120,7 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
 
    残余: 署名側の窓の**外**は観測にも載らないが、署名も動かないので「検知されたのに観測されない」にはならない — PR 直下コメント 51 件目以降・レビュー 51 件目以降・スレッド内 21 件目以降 (いずれも古い側) の本文編集 (新規投稿はいずれも totalCount で拾えるので、これは編集に限った残余である) と、スレッド総数が 100 を超えるときの**最も古い側**のスレッドの resolve/unresolve (そのスレッド自体の新規投稿は totalCount で拾える) がこれに当たる。これは署名側の窓の問題なので、このファイルの取得窓では塞げない。
 
-   GraphQL が使えなければ `gh pr view <pr url> --json comments,reviews` に落とす (解決済みの判別が付かなくなるので、`handled` による除外だけで重複を防ぐ)。
+   GraphQL が使えなければ `gh pr view <pr url> --json comments,reviews` に落とす (解決済みの判別が付かなくなるので、`handled` による除外だけで重複を防ぐ)。この経路の各コメント/レビューは通常 `updatedAt` を含むのでそのまま使う。含まれない・取れない場合は `null` にする (下記手順7の応答スキーマの `review_only[].updated_at` 参照)。
 
    絞り込み:
 
@@ -168,12 +170,12 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
     "verdict": "fix|wait|clean|merged|closed|rebase",
     "findings_file": "<絶対パス または null>",
     "comment_ids": ["rc-123", "..."],
-    "review_only": ["ic-456"],
+    "review_only": [{"id": "ic-456", "updated_at": "<comment/review の updatedAt (ISO8601)。取得できなければ null>"}],
     "summary": "<日本語 1 行>"}
    ```
 
    - `comment_ids` は actionable にした指摘の id (CI 失敗しか無ければ空配列)。オーケストレーターが対応後に `handled` へ入れる。
-   - `review_only` は「要確認」へ回した id。オーケストレーターがユーザーへの報告に使う。
+   - `review_only` は「要確認」へ回した指摘。各要素は判定対象コメント/レビュー本文の `id` とその時点の `updated_at` を持つ (取得できなければ `updated_at: null`)。オーケストレーターはこれを使って同一版の再報告を抑止する — `review_only` はもう `watch.handled` へ合流されないので、GitHub 側でスレッドが解決されない限り、次回以降の観測でも同じ id が返り続ける (これは意図した挙動である)。
    - `merged` / `closed` / `wait` / `rebase` のときは `findings_file: null`、`comment_ids: []` でよい (**例外: `mode: catch-up` の `wait` で「要確認」があるときは、手順 5 と同じく findings ファイルを書いて `findings_file` に入れる** — catch-up は収集まで済ませているので、ここで落とすと回収の意味が無くなる)。`clean` は `comment_ids: []` のまま、要確認があるときだけ `findings_file` を入れる (手順 5)。`rebase` は手順 2 で指摘の収集そのものをしていないので、`review_only` も常に `[]` になる。
    - `merged` / `closed` は手順 1 で、`rebase` は手順 2 で即リターンするので、`ci` は省略してよい (`state` / `head` は手順 1 の値を入れる)。
    - 取得不能のときは、このスキーマの代わりに `{"verdict": "error", "error": "<理由>"}` だけを返す (上記フォールバック節の形と同一。これが `error` の唯一の応答形)。
