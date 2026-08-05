@@ -15,6 +15,7 @@ tests/aggregate-scripts.test.sh から repo_dir を引数に渡されて実行�
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -119,6 +120,88 @@ def main():
             ok(label)
         else:
             ng(label, f"got phase={got!r}")
+
+    # --- ケース SC: スキーマ駆動のフェーズ網羅 ----------------------------------------
+    # state.schema.json の phase enum 全部について、(1) 集計スクリプトの抽出正規表現
+    # \w+(?:\+\w+)* で名前が丸ごと拾える文法に収まっていること、(2) 実際に
+    # aggregate-session-usage.py に通すと各フェーズが自分の名前のまま分類されること、
+    # を機械検査する。フェーズを 1 つ足すと enum が伸び、この 2 検査が自動で新フェーズを
+    # 問う — 過去に research+plan が research に黙って誤分類された事故 (cc16785 で修正)
+    # を、フェーズ追加のたびに再発しうる形からテスト失敗で落ちる形に変える。
+    schema_path = os.path.join(
+        repo_dir, "task-pipeline", "scripts", "state.schema.json")
+    with open(schema_path) as fh:
+        schema = json.load(fh)
+    phases = [p for p in
+              schema["$defs"]["queueItem"]["properties"]["phase"]["enum"]
+              if p is not None]
+    if not phases:
+        ng("SC0 schema phase enum の読み込み", "enum が空")
+
+    token_re = re.compile(r"\w+(?:\+\w+)*", re.ASCII)
+    for p in phases:
+        label = f"SC1 フェーズ名 {p!r} が集計側の抽出文法に収まる"
+        m = token_re.fullmatch(p)
+        if m:
+            ok(label)
+        else:
+            ng(label,
+               "ハイフン等を含む名前は \\w+(?:\\+\\w+)* で途中までしかマッチせず"
+               "黙って誤分類される。aggregate-session-usage.py と "
+               "collect-task-metrics.py の抽出正規表現を先に拡張すること")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        synth = os.path.join(tmp, "synth.jsonl")
+        with open(synth, "w") as fh:
+            for i, p in enumerate(phases):
+                tu = f"tu-schema-{i}"
+                prompt = ("independent verifier subagent\n"
+                          f"phase: {p}\n"
+                          "task: /x/tasks/dummy.md\nrun dir: /x/runs/dummy")
+                fh.write(json.dumps({
+                    "type": "assistant",
+                    "message": {"content": [{
+                        "type": "tool_use", "id": tu, "name": "Task",
+                        "input": {"prompt": prompt}}]},
+                }) + "\n")
+                fh.write(json.dumps({
+                    "type": "user",
+                    "message": {"content": [{
+                        "type": "tool_result", "tool_use_id": tu,
+                        "content": [{
+                            "type": "text",
+                            "text": ("subagent_tokens: 100\ntool_uses: 1\n"
+                                     f"duration_ms: 1000\nagentId: e{i:08x}")}],
+                    }]},
+                }) + "\n")
+        detail_out = os.path.join(tmp, "detail.json")
+        env = dict(os.environ, DETAIL_OUT=detail_out)
+        proc = subprocess.run(
+            [sys.executable, session_script, synth],
+            capture_output=True, text=True, env=env,
+        )
+        if proc.returncode != 0:
+            ng("SC2 合成フィクスチャの実行",
+               f"exit={proc.returncode} stderr={proc.stderr!r}")
+        else:
+            try:
+                with open(detail_out) as fh:
+                    detail = json.load(fh)
+            except Exception as e:  # noqa: BLE001
+                ng("SC2 合成フィクスチャの DETAIL_OUT 読み込み", str(e))
+                detail = {}
+            records = []
+            for recs in detail.values():
+                records.extend(recs)
+            phase_by_tu = {r["tu"]: r["phase"]
+                           for r in records if r["kind"] == "sync"}
+            for i, p in enumerate(phases):
+                got = phase_by_tu.get(f"tu-schema-{i}")
+                label = f"SC2 スキーマ enum の {p!r} が自分の名前のまま分類される"
+                if got == p:
+                    ok(label)
+                else:
+                    ng(label, f"got phase={got!r}")
 
     # --- ケース C (受け入れ条件 4): message.id の重複排除 ------------------------------
     proc = subprocess.run(

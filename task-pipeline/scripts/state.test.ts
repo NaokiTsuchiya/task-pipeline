@@ -27,6 +27,17 @@
 //   V  state-cli-verbs で追加した36 verb (タスク進行・追従・載せ直し・回収と候補・全体)
 
 import { ALLOWED_FLAGS, EXIT_CODES } from "./state.ts";
+import {
+  GATE_PHASE_SEQUENCES,
+  GATE_VALUES,
+  LIFECYCLE_NODES,
+  PHASE_VALUES,
+  REBASE_NODES,
+  resolveRebaseAxis,
+  VERB_LIFECYCLE,
+  VERB_SPEC,
+  WATCH_NODES,
+} from "./state-transitions.ts";
 
 const SCRIPT_URL = new URL("./state.ts", import.meta.url);
 const REPO_ROOT = new URL("../../", import.meta.url);
@@ -35,6 +46,7 @@ const CONTRACT_DOC = new URL(
   "task-pipeline/docs/state-cli-contract.md",
   REPO_ROOT,
 );
+const SKILL_MD = new URL("task-pipeline/SKILL.md", REPO_ROOT);
 
 // ---------------------------------------------------------------------------
 // サブプロセス起動ヘルパ
@@ -1778,7 +1790,9 @@ Deno.test("T-V-set-gate-2: phase already past research -> conflict", async () =>
 
 Deno.test("T-V-set-worktree-1: success sets worktree/base", async () => {
   const dir = await tempDir();
-  await setupQueue(dir, [queueItem({ status: "in_progress" })]);
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "implement" }),
+  ]);
   await expectOk(dir, [
     "set-worktree",
     "--state-dir",
@@ -1817,7 +1831,9 @@ Deno.test("T-V-set-worktree-2: status not in_progress -> conflict", async () => 
 
 Deno.test("T-V-set-worktree-3: --drop-withdrawn-branch true removes matching entry", async () => {
   const dir = await tempDir();
-  await setupQueue(dir, [queueItem({ status: "in_progress" })], {
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "implement" }),
+  ], {
     withdrawn_branches: [{
       id: "t-1",
       branch: "task-pipeline/t-1",
@@ -1846,7 +1862,9 @@ Deno.test("T-V-set-worktree-3: --drop-withdrawn-branch true removes matching ent
 
 Deno.test("T-V-set-worktree-4: --drop-withdrawn-branch true without matching entry -> conflict, unchanged", async () => {
   const dir = await tempDir();
-  await setupQueue(dir, [queueItem({ status: "in_progress" })], {
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "implement" }),
+  ], {
     withdrawn_branches: [],
   });
   await expectFailureUnchanged(
@@ -1870,7 +1888,9 @@ Deno.test("T-V-set-worktree-4: --drop-withdrawn-branch true without matching ent
 
 Deno.test("T-V-set-executor-1: writes executor/executor_last_event_at/session together (AC5)", async () => {
   const dir = await tempDir();
-  await setupQueue(dir, [queueItem({ status: "in_progress" })]);
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "implement" }),
+  ]);
   await expectOk(dir, [
     "set-executor",
     "--state-dir",
@@ -1914,7 +1934,9 @@ Deno.test("T-V-set-executor-2: status not in_progress -> conflict", async () => 
 
 Deno.test("T-V-set-executor-3: missing --session -> usage (no partial-write flag combination exists, AC5)", async () => {
   const dir = await tempDir();
-  await setupQueue(dir, [queueItem({ status: "in_progress" })]);
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "implement" }),
+  ]);
   await expectFailureUnchanged(
     dir,
     [
@@ -1935,6 +1957,7 @@ Deno.test("T-V-touch-executor-1: bumps executor_last_event_at only", async () =>
   await setupQueue(dir, [
     queueItem({
       status: "in_progress",
+      phase: "implement",
       executor: "agent-1",
       executor_last_event_at: "2026-08-01T00:00:00Z",
       session: "s1",
@@ -1952,7 +1975,12 @@ Deno.test("T-V-touch-executor-1: bumps executor_last_event_at only", async () =>
 Deno.test("T-V-touch-executor-2: --session fills when session is null", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [
-    queueItem({ status: "in_progress", executor: "agent-1", session: null }),
+    queueItem({
+      status: "in_progress",
+      phase: "implement",
+      executor: "agent-1",
+      session: null,
+    }),
   ]);
   await expectOk(dir, [
     "touch-executor",
@@ -1972,6 +2000,7 @@ Deno.test("T-V-touch-executor-3: --session does not overwrite an existing sessio
   await setupQueue(dir, [
     queueItem({
       status: "in_progress",
+      phase: "implement",
       executor: "agent-1",
       session: "s-existing",
     }),
@@ -2003,7 +2032,9 @@ Deno.test("T-V-touch-executor-4: executor null -> conflict", async () => {
 
 Deno.test("T-V-set-takeover-1: --at sets takeover_at", async () => {
   const dir = await tempDir();
-  await setupQueue(dir, [queueItem({ status: "in_progress" })]);
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "implement" }),
+  ]);
   await expectOk(dir, [
     "set-takeover",
     "--state-dir",
@@ -2022,6 +2053,7 @@ Deno.test("T-V-set-takeover-2: --clear resets takeover_at to null", async () => 
   await setupQueue(dir, [
     queueItem({
       status: "in_progress",
+      phase: "implement",
       takeover_at: "2026-08-02T00:00:00Z",
     }),
   ]);
@@ -2040,7 +2072,9 @@ Deno.test("T-V-set-takeover-2: --clear resets takeover_at to null", async () => 
 
 Deno.test("T-V-set-takeover-3: neither --at nor --clear -> usage", async () => {
   const dir = await tempDir();
-  await setupQueue(dir, [queueItem({ status: "in_progress" })]);
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "implement" }),
+  ]);
   await expectFailureUnchanged(
     dir,
     ["set-takeover", "--state-dir", dir, "--id", "t-1"],
@@ -2050,7 +2084,9 @@ Deno.test("T-V-set-takeover-3: neither --at nor --clear -> usage", async () => {
 
 Deno.test("T-V-set-takeover-4: both --at and --clear -> usage", async () => {
   const dir = await tempDir();
-  await setupQueue(dir, [queueItem({ status: "in_progress" })]);
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "implement" }),
+  ]);
   await expectFailureUnchanged(
     dir,
     [
@@ -2199,6 +2235,41 @@ Deno.test("T-V-block-1: success sets blocked fields", async () => {
   assertEquals(item.session, null);
 });
 
+// blocked は追従対象外なので、pr_fix 中の block でも watch は停止する (watching のまま
+// 残すと、停止経路の watch-set [前提: in_review] で誰にも止められなくなる)。
+Deno.test("T-V-block-3: blocking a pr_fix task also stops its watch", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_progress",
+      phase: "pr_fix",
+      session: "s1",
+      review: reviewOf({
+        watch: watchOf({ proc: "bg-1", handled: ["c1"], fix_attempts: 1 }),
+      }),
+    }),
+  ]);
+  await expectOk(dir, [
+    "block",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--reason",
+    "verify failed 3 times",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.status, "blocked");
+  const watch = (item.review as Record<string, unknown>).watch as Record<
+    string,
+    unknown
+  >;
+  assertEquals(watch.state, "stopped");
+  assertEquals(watch.proc, null);
+  assertEquals(watch.handled, ["c1"]);
+  assertEquals(watch.fix_attempts, 1);
+});
+
 Deno.test("T-V-block-2: status not in_progress -> conflict", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [queueItem({ status: "approved" })]);
@@ -2211,7 +2282,9 @@ Deno.test("T-V-block-2: status not in_progress -> conflict", async () => {
 
 Deno.test("T-V-dequeue-1: success removes the entry", async () => {
   const dir = await tempDir();
-  await setupQueue(dir, [queueItem({ status: "in_progress" })]);
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "implement" }),
+  ]);
   await expectOk(dir, ["dequeue", "--state-dir", dir, "--id", "t-1"]);
   const state = await readState(dir);
   assertEquals(state.queue, []);
@@ -2554,6 +2627,64 @@ Deno.test("T-V-in-review-11: --clear-session with a non-'true' value (numeric) -
     ],
     EXIT_CODES.usage,
   );
+});
+
+// in-review の 4 フラグ指定 (freshGroup) はグループフィールドだけを書き換え、
+// review.watch / rebase / withdrawn / withdrawn_asked を保持する (issue #13 の固定:
+// 以前は review を丸ごと新しいリテラルで置換し、pr_fix 復帰のたびに fix_attempts の
+// 上限 [issue #15] と handled の再浮上ガードを無効化していた)。
+Deno.test("T-V-in-review-12: fresh group preserves existing watch/rebase/withdrawn (issue #13)", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_progress",
+      phase: "finalize",
+      session: "s1",
+      review: reviewOf({
+        branch: "task-pipeline/t-1",
+        tip: "oldtip",
+        base: "main",
+        watch: watchOf({
+          handled: ["c1", "c2"],
+          fix_attempts: 2,
+          errors: 1,
+          note: "n",
+        }),
+        rebase: rebaseOf(),
+        withdrawn: true,
+        withdrawn_asked: true,
+      }),
+    }),
+  ]);
+  await expectOk(dir, [
+    "in-review",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--commits",
+    "2",
+    "--ref",
+    "https://example.com/pull/1",
+    "--branch",
+    "task-pipeline/t-1",
+    "--base",
+    "main",
+    "--tip",
+    "newtip",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.status, "in_review");
+  const review = item.review as Record<string, unknown>;
+  assertEquals(review.tip, "newtip");
+  const watch = review.watch as Record<string, unknown>;
+  assertEquals(watch.handled, ["c1", "c2"]);
+  assertEquals(watch.fix_attempts, 2);
+  assertEquals(watch.errors, 1);
+  assertEquals(watch.note, "n");
+  assert(review.rebase !== undefined, "rebase must be preserved");
+  assertEquals(review.withdrawn, true);
+  assertEquals(review.withdrawn_asked, true);
 });
 
 // --- 追従 -------------------------------------------------------------------
@@ -2985,6 +3116,33 @@ Deno.test("T-V-watch-set-13: --session null combined with --state stopped -> ok 
   assertEquals(watch.state, "stopped");
 });
 
+// watch-set は in_review 専用 (確認済み欠陥 6 の固定: 以前は status を見ず、飛行中の
+// pr_fix タスクの session を watch 側から null に落とせた)。
+Deno.test("T-V-watch-set-14: in_progress/pr_fix task -> conflict (cannot null session in flight)", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_progress",
+      phase: "pr_fix",
+      session: "s1",
+      review: reviewOf({ watch: watchOf() }),
+    }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "watch-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--session",
+      "null",
+    ],
+    EXIT_CODES.conflict,
+  );
+});
+
 Deno.test("T-V-fix-pending-1: success sets fix_pending/pending_ids/findings", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [
@@ -3128,6 +3286,31 @@ Deno.test("T-V-fix-start-4: fix_pending false -> conflict", async () => {
     queueItem({
       status: "in_review",
       review: reviewOf({ watch: watchOf({ fix_pending: false }) }),
+    }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    ["fix-start", "--state-dir", dir, "--id", "t-1", "--session", "s1"],
+    EXIT_CODES.conflict,
+  );
+});
+
+// 上限到達 (state: stopped) 後の fix-start はラッチされて conflict (確認済み欠陥 9 の
+// 固定: 以前は前提が真のまま残り、呼ぶたびに fix_attempts を加算し続けた)。
+// ユーザーが watch.state を watching に戻したときだけ再び呼べる (--reset-attempts 経路)。
+Deno.test("T-V-fix-start-5: watch stopped (cap latched) -> conflict, no further increment", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      review: reviewOf({
+        watch: watchOf({
+          fix_pending: true,
+          fix_attempts: 4,
+          state: "stopped",
+          note: "追従上限",
+        }),
+      }),
     }),
   ]);
   await expectFailureUnchanged(
@@ -4140,28 +4323,12 @@ Deno.test("T-V-rebase-start-2: resolve_pending false -> conflict", async () => {
   );
 });
 
-// `finalize` フェーズで executor が衝突して止まったタスク (`REBASE-CONFLICT`) は
-// `status: in_progress` かつ `review` が null なので、`rebase-start` では rebase_fix に
-// 入れない。SKILL.md の「解決サイクル」はこの経路に `phase-pass` を使うと定めており、
-// 次の 2 本がその前提 (どちらの verb がどちらで通るか) を固定する。
-Deno.test("T-V-rebase-start-3: review null (finalize phase) -> conflict", async () => {
-  const dir = await tempDir();
-  await setupQueue(dir, [
-    queueItem({
-      status: "in_progress",
-      phase: "finalize",
-      session: "s1",
-      review: null,
-    }),
-  ]);
-  await expectFailureUnchanged(
-    dir,
-    ["rebase-start", "--state-dir", dir, "--id", "t-1", "--session", "s1"],
-    EXIT_CODES.conflict,
-  );
-});
-
-Deno.test("T-V-phase-pass-4: finalize -> rebase_fix succeeds with review null and keeps session", async () => {
+// `finalize` フェーズで executor が衝突して止まったタスク (`REBASE-CONFLICT`) は、
+// `rebase-start` の第 2 の入口 (in_progress/finalize からの直接進入) で rebase_fix に
+// 入る。この入口は review を見ない (最初の PR を出す直前なら review は null)。
+// phase-pass は検証フェーズ列の隣接辺専用になったので、この経路には使えない
+// (T-V-phase-pass-4 が拒否側を固定)。
+Deno.test("T-V-rebase-start-3: finalize entry with review null -> rebase_fix, keeps review null", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [
     queueItem({
@@ -4173,25 +4340,173 @@ Deno.test("T-V-phase-pass-4: finalize -> rebase_fix succeeds with review null an
     }),
   ]);
   await expectOk(dir, [
+    "rebase-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s1",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.status, "in_progress");
+  assertEquals(item.phase, "rebase_fix");
+  assertEquals(item.attempts, 0);
+  assertEquals(item.session, "s1");
+  assertEquals(item.review, null);
+});
+
+Deno.test("T-V-rebase-start-4: finalize entry with existing review keeps watch/rebase and clears resolve_pending", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_progress",
+      phase: "finalize",
+      session: "s1",
+      review: reviewOf({
+        watch: watchOf({ fix_attempts: 2, handled: ["c1"] }),
+        rebase: rebaseOf({ resolve_pending: true }),
+      }),
+    }),
+  ]);
+  await expectOk(dir, [
+    "rebase-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s1",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.status, "in_progress");
+  assertEquals(item.phase, "rebase_fix");
+  const review = item.review as Record<string, unknown>;
+  const watch = review.watch as Record<string, unknown>;
+  const rebase = review.rebase as Record<string, unknown>;
+  assertEquals(watch.fix_attempts, 2);
+  assertEquals(watch.handled, ["c1"]);
+  assertEquals(rebase.resolve_pending, false);
+});
+
+Deno.test("T-V-phase-pass-4: finalize -> rebase_fix is not a phase-pass edge -> conflict", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_progress",
+      phase: "finalize",
+      attempts: 2,
+      session: "s1",
+      review: null,
+    }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "phase-pass",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--from",
+      "finalize",
+      "--to",
+      "rebase_fix",
+    ],
+    EXIT_CODES.conflict,
+  );
+});
+
+// フェーズ順は GATE_PHASE_SEQUENCES の隣接ペアだけが合法 (確認済み欠陥 1 の固定):
+// 飛び越し・自己辺・gate 違いの辺はすべて conflict。
+Deno.test("T-V-phase-pass-5: skipping edge research -> report -> conflict", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "research" }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "phase-pass",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--from",
+      "research",
+      "--to",
+      "report",
+    ],
+    EXIT_CODES.conflict,
+  );
+});
+
+Deno.test("T-V-phase-pass-6: self edge plan -> plan -> conflict", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem({ status: "in_progress", phase: "plan" })]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "phase-pass",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--from",
+      "plan",
+      "--to",
+      "plan",
+    ],
+    EXIT_CODES.conflict,
+  );
+});
+
+Deno.test("T-V-phase-pass-7: full-gate task cannot take the light-gate edge research+plan -> implement", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "research+plan", gate: "full" }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "phase-pass",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--from",
+      "research+plan",
+      "--to",
+      "implement",
+    ],
+    EXIT_CODES.conflict,
+  );
+});
+
+Deno.test("T-V-phase-pass-8: light-gate sequence research+plan -> implement succeeds", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ status: "in_progress", phase: "research+plan", gate: "light" }),
+  ]);
+  await expectOk(dir, [
     "phase-pass",
     "--state-dir",
     dir,
     "--id",
     "t-1",
     "--from",
-    "finalize",
+    "research+plan",
     "--to",
-    "rebase_fix",
+    "implement",
   ]);
   const item = await readItem(dir);
-  assertEquals(item.phase, "rebase_fix");
-  assertEquals(item.attempts, 0);
-  assertEquals(item.status, "in_progress");
-  assertEquals(item.session, "s1");
-  assertEquals(item.review, null);
+  assertEquals(item.phase, "implement");
 });
 
-Deno.test("T-V-rebase-done-1: succeeds from in_progress/rebase_fix origin, deletes rebase block", async () => {
+// 飛行中 (in_progress/rebase_fix) の rebase-done は conflict (確認済み欠陥 10 の固定):
+// ここで review.rebase を消せてしまうと、applyRebaseGiveUp の前提が永久に満たせなくなる。
+// 復帰列は in-review で in_review に戻してから rebase-done を呼ぶ。
+Deno.test("T-V-rebase-done-1: in_progress/rebase_fix origin -> conflict, rebase block preserved", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [
     queueItem({
@@ -4200,20 +4515,11 @@ Deno.test("T-V-rebase-done-1: succeeds from in_progress/rebase_fix origin, delet
       review: reviewOf({ tip: "old", rebase: rebaseOf() }),
     }),
   ]);
-  await expectOk(dir, [
-    "rebase-done",
-    "--state-dir",
+  await expectFailureUnchanged(
     dir,
-    "--id",
-    "t-1",
-    "--tip",
-    "newtip",
-  ]);
-  const item = await readItem(dir);
-  const review = item.review as Record<string, unknown>;
-  assertEquals(review.tip, "newtip");
-  assertEquals("rebase" in review, false);
-  assertEquals(item.status, "in_progress");
+    ["rebase-done", "--state-dir", dir, "--id", "t-1", "--tip", "newtip"],
+    EXIT_CODES.conflict,
+  );
 });
 
 Deno.test("T-V-rebase-done-2: succeeds from in_review origin (background rebase), status stays in_review", async () => {
@@ -4255,11 +4561,37 @@ Deno.test("T-V-rebase-done-3: missing --tip -> usage", async () => {
   );
 });
 
-Deno.test("T-V-rebase-done-4: review.rebase null -> conflict", async () => {
+// review.rebase が無くても tip は更新できる (確認済み欠陥 12 の固定): 背景の載せ直しが
+// 衝突なく成功した最頻パスには rebase-record の控えが無いが、マージ回収が見る tip の
+// 更新手段はこの verb にしか無い。
+Deno.test("T-V-rebase-done-4: review.rebase absent -> still updates tip (clean background rebase)", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [
-    queueItem({ status: "in_review", review: reviewOf() }),
+    queueItem({
+      status: "in_review",
+      review: reviewOf({ tip: "old", watch: watchOf({ handled: ["c1"] }) }),
+    }),
   ]);
+  await expectOk(dir, [
+    "rebase-done",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--tip",
+    "newtip3",
+  ]);
+  const item = await readItem(dir);
+  const review = item.review as Record<string, unknown>;
+  assertEquals(review.tip, "newtip3");
+  assertEquals("rebase" in review, false);
+  const watch = review.watch as Record<string, unknown>;
+  assertEquals(watch.handled, ["c1"], "watch preserved");
+});
+
+Deno.test("T-V-rebase-done-5: review null -> conflict", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem({ status: "in_review", review: null })]);
   await expectFailureUnchanged(
     dir,
     ["rebase-done", "--state-dir", dir, "--id", "t-1", "--tip", "x"],
@@ -4325,13 +4657,21 @@ Deno.test("T-V-rebase-give-up-2: phase not rebase_fix -> conflict", async () => 
 
 // --- 回収と候補 ---------------------------------------------------------------
 
-Deno.test("T-V-recover-done-1: with review.watch present, also nulls watch.proc", async () => {
+// done は追従対象外なので watch を丸ごと静止させる (確認済み欠陥 7 の固定: 以前は
+// proc だけ null にして state を watching のまま残していた)。
+Deno.test("T-V-recover-done-1: with review.watch present, stops watch and nulls proc", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [
     queueItem({
       status: "in_review",
       session: "s1",
-      review: reviewOf({ tip: "sha1", watch: watchOf({ proc: "bg-1" }) }),
+      review: reviewOf({
+        tip: "sha1",
+        watch: watchOf({
+          proc: "bg-1",
+          proc_started_at: "2026-08-01T00:00:00Z",
+        }),
+      }),
     }),
   ]);
   await expectOk(dir, ["recover-done", "--state-dir", dir, "--id", "t-1"]);
@@ -4343,6 +4683,8 @@ Deno.test("T-V-recover-done-1: with review.watch present, also nulls watch.proc"
     unknown
   >;
   assertEquals(watch.proc, null);
+  assertEquals(watch.proc_started_at, null);
+  assertEquals(watch.state, "stopped");
 });
 
 Deno.test("T-V-recover-done-2: without review.watch (finish=commit shape) succeeds", async () => {
@@ -4717,14 +5059,54 @@ Deno.test("T-V-restore-4: status approved (not an eligible origin) -> conflict",
   );
 });
 
-Deno.test("T-V-restore-5: not in relisted -> conflict", async () => {
+// relisted に無い = 「対象が存在しない」なので missing (contract の記載と一致させる。
+// 以前は実装が conflict を返し、契約側が missing と書いていた — 実装を契約に合わせた)。
+Deno.test("T-V-restore-5: not in relisted -> missing", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [queueItem({ status: "blocked" })], { relisted: [] });
   await expectFailureUnchanged(
     dir,
     ["restore", "--state-dir", dir, "--id", "t-1"],
-    EXIT_CODES.conflict,
+    EXIT_CODES.missing,
   );
+});
+
+// restore は watch の揮発状態を落とす (確認済み欠陥 8 の固定): watching / proc を抱えた
+// まま approved に戻ると、前周回の watch 状態が新しい周回に漏れる。handled と
+// fix_attempts の値は残る (次の watch-init --preserve-handled が仕切り直す)。
+Deno.test("T-V-restore-6: preserved review keeps handled but watch is stopped with proc null", async () => {
+  const dir = await tempDir();
+  await setupQueue(
+    dir,
+    [
+      queueItem({
+        status: "in_review",
+        worktree: "/wt",
+        base: "main",
+        review: reviewOf({
+          watch: watchOf({
+            proc: "bg-1",
+            proc_started_at: "2026-08-01T00:00:00Z",
+            handled: ["c1", "c2"],
+            fix_attempts: 2,
+          }),
+        }),
+      }),
+    ],
+    { relisted: [{ id: "t-1", seen_at: "2026-08-01T00:00:00Z" }] },
+  );
+  await expectOk(dir, ["restore", "--state-dir", dir, "--id", "t-1"]);
+  const item = await readItem(dir);
+  assertEquals(item.status, "approved");
+  const watch = (item.review as Record<string, unknown>).watch as Record<
+    string,
+    unknown
+  >;
+  assertEquals(watch.state, "stopped");
+  assertEquals(watch.proc, null);
+  assertEquals(watch.proc_started_at, null);
+  assertEquals(watch.handled, ["c1", "c2"]);
+  assertEquals(watch.fix_attempts, 2);
 });
 
 // --- 全体 ---------------------------------------------------------------------
@@ -4911,4 +5293,701 @@ Deno.test("T-D2: state-cli-contract.md verb headings match ALLOWED_FLAGS keys (A
     [],
     `verbs documented but not implemented: ${missingInImpl}`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// T-D3/T-D4/T-D5: 遷移表・フェーズ列と散文の突き合わせ
+// (T-D1/T-D2 と同じ「文書と実装の機械照合」パターンを状態機械に広げたもの)
+// ---------------------------------------------------------------------------
+
+function parseMdTable(doc: string, header: string[]): string[][] {
+  const lines = doc.split("\n");
+  const headerLine = `| ${header.join(" | ")} |`;
+  const idx = lines.findIndex((l) => l.trim() === headerLine);
+  assert(idx !== -1, `table header not found in doc: ${headerLine}`);
+  const rows: string[][] = [];
+  for (let i = idx + 2; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line.startsWith("|")) break;
+    rows.push(line.slice(1, -1).split("|").map((c) => c.trim()));
+  }
+  assert(rows.length > 0, `table has no rows: ${headerLine}`);
+  return rows;
+}
+
+Deno.test("T-D3: contract 遷移表 matches VERB_LIFECYCLE", async () => {
+  const doc = await Deno.readTextFile(CONTRACT_DOC);
+  const rows = parseMdTable(doc, ["verb", "from", "to"]);
+  const docSpec = new Map<string, { from: string[]; to: string }>();
+  for (const [verbCell, fromCell, toCell] of rows) {
+    const verb = verbCell.replaceAll("`", "");
+    let from: string[];
+    if (fromCell.includes("新規追加")) {
+      from = [];
+    } else if (fromCell.includes("`in_progress/*`")) {
+      from = PHASE_VALUES.map((p) => `in_progress/${p}`);
+    } else {
+      from = [...fromCell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+    }
+    let to: string;
+    if (toCell.includes("変更なし")) to = "unchanged";
+    else if (toCell.includes("分岐")) to = "dynamic";
+    else if (toCell.includes("削除")) to = "removed";
+    else to = toCell.replaceAll("`", "").replace(/\s*\(.*\)$/, "");
+    docSpec.set(verb, { from, to });
+  }
+  assertEquals(
+    [...docSpec.keys()].sort(),
+    Object.keys(VERB_LIFECYCLE).sort(),
+    "遷移表の verb 集合が VERB_LIFECYCLE と一致しない",
+  );
+  for (const [verb, spec] of Object.entries(VERB_LIFECYCLE)) {
+    const d = docSpec.get(verb)!;
+    assertEquals(
+      [...d.from].sort(),
+      [...spec.from].sort(),
+      `from mismatch for ${verb}`,
+    );
+    assertEquals(d.to, spec.to, `to mismatch for ${verb}`);
+  }
+});
+
+Deno.test("T-D4: contract フェーズ列 table matches GATE_PHASE_SEQUENCES", async () => {
+  const doc = await Deno.readTextFile(CONTRACT_DOC);
+  const rows = parseMdTable(doc, ["gate", "フェーズ列"]);
+  const docSeqs = new Map(
+    rows.map((
+      [g, s],
+    ) => [g.replaceAll("`", ""), s.replaceAll("`", "").split(" → ")]),
+  );
+  assertEquals(
+    [...docSeqs.keys()].sort(),
+    [...GATE_VALUES].sort(),
+    "gate 集合が一致しない",
+  );
+  for (const gate of GATE_VALUES) {
+    assertEquals(
+      docSeqs.get(gate),
+      [...GATE_PHASE_SEQUENCES[gate]],
+      `sequence mismatch for gate ${gate}`,
+    );
+  }
+});
+
+function parseAxisTo(cell: string): string {
+  if (cell.includes("変えない")) return "unchanged";
+  if (cell.includes("静止")) return "quiesce";
+  if (cell.includes("分岐")) return "dynamic";
+  if (cell.includes("確保")) return "ensure";
+  if (cell.includes("解除")) return "defuse";
+  return cell.replaceAll("`", "");
+}
+
+function parseAxisFrom(cell: string, all: readonly string[]): string[] {
+  if (cell.includes("任意")) return [...all];
+  return [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+}
+
+Deno.test("T-D8: contract 機械 B (watch) table matches VERB_SPEC watch axes", async () => {
+  const doc = await Deno.readTextFile(CONTRACT_DOC);
+  const rows = parseMdTable(doc, ["verb", "watch from", "watch to"]);
+  const docSpec = new Map<string, { from: string[]; to: string }>();
+  for (const [verbCell, fromCell, toCell] of rows) {
+    docSpec.set(verbCell.replaceAll("`", ""), {
+      from: parseAxisFrom(fromCell, WATCH_NODES),
+      to: parseAxisTo(toCell),
+    });
+  }
+  const touching = Object.entries(VERB_SPEC)
+    .filter(([, s]) => s.watch.to !== "untouched")
+    .map(([v]) => v);
+  assertEquals(
+    [...docSpec.keys()].sort(),
+    touching.sort(),
+    "watch 表の verb 集合が「watch に触れる verb」と一致しない",
+  );
+  for (const verb of touching) {
+    const d = docSpec.get(verb)!;
+    const spec = VERB_SPEC[verb].watch;
+    assertEquals(
+      [...d.from].sort(),
+      [...spec.from].sort(),
+      `watch from mismatch for ${verb}`,
+    );
+    assertEquals(d.to, spec.to, `watch to mismatch for ${verb}`);
+  }
+});
+
+Deno.test("T-D9: contract 機械 B' (rebase) table matches VERB_SPEC rebase axes", async () => {
+  const doc = await Deno.readTextFile(CONTRACT_DOC);
+  const rows = parseMdTable(doc, ["verb", "rebase from", "rebase to"]);
+  const docRows: {
+    verb: string;
+    entry: string | null;
+    from: string[];
+    to: string;
+  }[] = [];
+  for (const [verbCell, fromCell, toCell] of rows) {
+    const tokens = [...verbCell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+    docRows.push({
+      verb: tokens[0],
+      entry: tokens[1] ?? null,
+      from: parseAxisFrom(fromCell, REBASE_NODES),
+      to: parseAxisTo(toCell),
+    });
+  }
+  const expected: {
+    verb: string;
+    entry: string | null;
+    from: string[];
+    to: string;
+  }[] = [];
+  for (const [verb, spec] of Object.entries(VERB_SPEC)) {
+    if ("from" in spec.rebase) {
+      const axis = resolveRebaseAxis(spec.rebase, spec.lifecycle.from[0]);
+      if (axis.to === "untouched") continue;
+      expected.push({ verb, entry: null, from: [...axis.from], to: axis.to });
+    } else {
+      for (const node of spec.lifecycle.from) {
+        const axis = resolveRebaseAxis(spec.rebase, node);
+        expected.push({
+          verb,
+          entry: node,
+          from: [...axis.from],
+          to: axis.to,
+        });
+      }
+    }
+  }
+  const norm = (
+    r: { verb: string; entry: string | null; from: string[]; to: string },
+  ) => JSON.stringify([r.verb, r.entry, [...r.from].sort(), r.to]);
+  assertEquals(
+    docRows.map(norm).sort(),
+    expected.map(norm).sort(),
+    "rebase 表が VERB_SPEC の rebase 軸と一致しない",
+  );
+});
+
+Deno.test("T-D7: contract ノード一覧 matches LIFECYCLE_NODES", async () => {
+  const doc = await Deno.readTextFile(CONTRACT_DOC);
+  const rows = parseMdTable(doc, ["ノード", "意味"]);
+  const docNodes = rows.map(([n]) => n.replaceAll("`", ""));
+  assertEquals(
+    [...docNodes].sort(),
+    [...LIFECYCLE_NODES].sort(),
+    "ノード一覧が LIFECYCLE_NODES と一致しない — フェーズや status を変えたら契約のノード表も更新すること",
+  );
+});
+
+Deno.test("T-D5: SKILL.md contains each gate's current phase sequence", async () => {
+  const skill = await Deno.readTextFile(SKILL_MD);
+  for (const gate of GATE_VALUES) {
+    const chain = GATE_PHASE_SEQUENCES[gate].join(" → ");
+    assert(
+      skill.includes(chain),
+      `SKILL.md must contain the ${gate} sequence "${chain}" — ` +
+        "フェーズ列を変えたら SKILL.md のフェーズ列記述も更新すること",
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// T-SEQ: SKILL.md が規定する多段 verb シーケンスの統合テスト (CLI サブプロセス経由)
+//
+// 2026-08-05 に表面化した欠陥 (issue #13 / #15) は、単発 verb のテストが全部通ったまま
+// 複数 verb をまたぐ列だけが壊れていた。ここでは SKILL.md の実際の呼び出し列を
+// そのまま実行して固定する。
+// ---------------------------------------------------------------------------
+
+Deno.test("T-SEQ-1: pr_fix recovery loop — fix_attempts accumulates, handled merges, 4th fix-start stops (issue #15)", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      session: "s1",
+      review: reviewOf({
+        branch: "task-pipeline/t-1",
+        tip: "sha0",
+        base: "main",
+        watch: watchOf({ fix_attempts: 0, handled: [] }),
+      }),
+    }),
+  ]);
+  const inReviewArgs = (tip: string) => [
+    "in-review",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--commits",
+    "2",
+    "--ref",
+    "https://example.com/pull/1",
+    "--branch",
+    "task-pipeline/t-1",
+    "--base",
+    "main",
+    "--tip",
+    tip,
+  ];
+  for (let i = 1; i <= 3; i++) {
+    await expectOk(dir, [
+      "fix-pending",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--pending-ids",
+      `c${i}`,
+      "--findings",
+      "/f",
+    ]);
+    const started = await expectOk(dir, [
+      "fix-start",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--session",
+      "s1",
+    ]);
+    assertEquals(started.started, true, `cycle ${i}: started`);
+    assertEquals(started.fix_attempts, i, `cycle ${i}: fix_attempts`);
+    await expectOk(dir, [
+      "finalize-start",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--from",
+      "pr_fix",
+    ]);
+    await expectOk(dir, ["fix-done", "--state-dir", dir, "--id", "t-1"]);
+    await expectOk(dir, inReviewArgs(`sha${i}`));
+    await expectOk(dir, [
+      "watch-set",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--state",
+      "watching",
+    ]);
+  }
+  // 4 周目: 上限で started:false、watch は stopped、session は手放される
+  await expectOk(dir, [
+    "fix-pending",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--pending-ids",
+    "c4",
+    "--findings",
+    "/f",
+  ]);
+  const fourth = await expectOk(dir, [
+    "fix-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s1",
+  ]);
+  assertEquals(fourth.started, false, "4th cycle must not start");
+  assertEquals(fourth.fix_attempts, 4, "4th cycle attempts");
+  const item = await readItem(dir);
+  assertEquals(item.status, "in_review");
+  assertEquals(item.session, null);
+  const review = item.review as Record<string, unknown>;
+  assertEquals(review.tip, "sha3", "tip updated by each recovery in-review");
+  const watch = review.watch as Record<string, unknown>;
+  assertEquals(watch.state, "stopped");
+  assertEquals(watch.note, "追従上限");
+  assertEquals(watch.fix_attempts, 4);
+  assertEquals(
+    [...(watch.handled as string[])].sort(),
+    ["c1", "c2", "c3"],
+    "handled accumulates across recoveries",
+  );
+});
+
+Deno.test("T-SEQ-2: rebase_fix recovery — in-review then rebase-done then watch-set, watch preserved", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      session: "s1",
+      review: reviewOf({
+        branch: "task-pipeline/t-1",
+        tip: "sha0",
+        base: "main",
+        watch: watchOf({ fix_attempts: 2, handled: ["c1"] }),
+      }),
+    }),
+  ]);
+  await expectOk(dir, [
+    "rebase-record",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--blocked-onto",
+    "onto1",
+    "--reason",
+    "conflict",
+    "--kind",
+    "overlap",
+    "--cause",
+    "x",
+    "--report",
+    "/r",
+  ]);
+  await expectOk(dir, [
+    "rebase-resolve-pending",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--from-tip",
+    "sha0",
+  ]);
+  await expectOk(dir, [
+    "rebase-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s1",
+  ]);
+  await expectOk(dir, [
+    "finalize-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--from",
+    "rebase_fix",
+  ]);
+  await expectOk(dir, [
+    "in-review",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--commits",
+    "2",
+    "--ref",
+    "https://example.com/pull/1",
+    "--branch",
+    "task-pipeline/t-1",
+    "--base",
+    "main",
+    "--tip",
+    "sha1",
+  ]);
+  await expectOk(dir, [
+    "rebase-done",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--tip",
+    "sha1",
+  ]);
+  await expectOk(dir, [
+    "watch-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--state",
+    "watching",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.status, "in_review");
+  assertEquals(item.session, "s1");
+  const review = item.review as Record<string, unknown>;
+  assertEquals(review.tip, "sha1");
+  assertEquals("rebase" in review, false, "rebase block removed");
+  const watch = review.watch as Record<string, unknown>;
+  assertEquals(watch.state, "watching");
+  assertEquals(watch.fix_attempts, 2, "rebase recovery keeps fix_attempts");
+  assertEquals(watch.handled, ["c1"], "rebase recovery keeps handled");
+});
+
+Deno.test("T-SEQ-3: finalize-entry rebase_fix (REBASE-CONFLICT before first PR) reaches first review via rebase-start", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_progress",
+      phase: "finalize",
+      session: "s1",
+      review: null,
+    }),
+  ]);
+  const started = await expectOk(dir, [
+    "rebase-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s1",
+  ]);
+  assertEquals(started.status, "in_progress");
+  assertEquals(started.phase, "rebase_fix");
+  await expectOk(dir, [
+    "finalize-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--from",
+    "rebase_fix",
+  ]);
+  await expectOk(dir, [
+    "in-review",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--commits",
+    "1",
+    "--ref",
+    "https://example.com/pull/2",
+    "--branch",
+    "task-pipeline/t-1",
+    "--base",
+    "main",
+    "--tip",
+    "sha1",
+  ]);
+  await expectOk(dir, [
+    "watch-init",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s1",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.status, "in_review");
+  const review = item.review as Record<string, unknown>;
+  assertEquals(review.ref, "https://example.com/pull/2");
+  const watch = review.watch as Record<string, unknown>;
+  assertEquals(watch.state, "watching");
+});
+
+// フィクスチャは gate: light から始める — restore が gate を full に戻さないと、
+// claim 後に (in_progress/research, gate: light) という死にノード (light の列に
+// research の辺が無く set-gate も拒否) に着地し、この列の set-gate が conflict になる
+// (ultrareview 指摘の回帰の固定)。
+Deno.test("T-SEQ-4: restore rerun (light gate) — handled survives via --preserve-handled, fix_attempts resets", async () => {
+  const dir = await tempDir();
+  await setupQueue(
+    dir,
+    [
+      queueItem({
+        status: "in_review",
+        gate: "light",
+        worktree: "/wt",
+        base: "main",
+        session: "s1",
+        review: reviewOf({
+          branch: "task-pipeline/t-1",
+          tip: "sha0",
+          base: "main",
+          watch: watchOf({
+            handled: ["c1"],
+            fix_attempts: 2,
+            proc: "bg-1",
+            proc_started_at: "2026-08-01T00:00:00Z",
+          }),
+        }),
+      }),
+    ],
+    { relisted: [{ id: "t-1", seen_at: "2026-08-01T00:00:00Z" }] },
+  );
+  await expectOk(dir, ["restore", "--state-dir", dir, "--id", "t-1"]);
+  const restored = await readItem(dir);
+  assertEquals(restored.gate, "full", "restore resets gate to full");
+  await expectOk(dir, [
+    "claim",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s2",
+  ]);
+  await expectOk(dir, ["set-gate", "--state-dir", dir, "--id", "t-1"]);
+  await expectOk(dir, [
+    "phase-pass",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--from",
+    "research+plan",
+    "--to",
+    "implement",
+  ]);
+  await expectOk(dir, [
+    "phase-pass",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--from",
+    "implement",
+    "--to",
+    "report",
+  ]);
+  await expectOk(dir, [
+    "finalize-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--from",
+    "report",
+  ]);
+  await expectOk(dir, [
+    "in-review",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--commits",
+    "3",
+    "--ref",
+    "https://example.com/pull/1",
+    "--branch",
+    "task-pipeline/t-1",
+    "--base",
+    "main",
+    "--tip",
+    "sha1",
+  ]);
+  await expectOk(dir, [
+    "watch-init",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s2",
+    "--preserve-handled",
+    "true",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.status, "in_review");
+  assertEquals(item.session, "s2");
+  const watch = (item.review as Record<string, unknown>).watch as Record<
+    string,
+    unknown
+  >;
+  assertEquals(watch.state, "watching");
+  assertEquals(watch.handled, ["c1"], "handled survives the rerun boundary");
+  assertEquals(watch.fix_attempts, 0, "fix_attempts resets at the new cycle");
+  assertEquals(watch.proc, null);
+});
+
+// 新しい verb を足すとき、VERB_LIFECYCLE (遷移表) か帳簿系リスト (queue エントリの
+// status/phase に触らない verb) のどちらかに必ず分類させる。どちらにも入れずに
+// dispatch へ追加すると、この差集合が空でなくなって落ちる — サブ機械や verb を後から
+// 足す人が遷移表を素通りできないための網。
+Deno.test("T-D6: every CLI verb is classified as lifecycle (VERB_LIFECYCLE) or bookkeeping", () => {
+  const bookkeeping = new Set([
+    "init",
+    "get",
+    "validate",
+    "session-touch",
+    "sessions-alive",
+    "history-append",
+    "candidates-set",
+    "candidates-drop",
+    "promoted-add",
+    "promoted-drop",
+    "relisted-add",
+    "relisted-drop",
+    "stalled-set",
+  ]);
+  const allVerbs = new Set(Object.keys(ALLOWED_FLAGS));
+  const lifecycle = new Set(Object.keys(VERB_LIFECYCLE));
+  const unclassified = [...allVerbs].filter(
+    (v) => !bookkeeping.has(v) && !lifecycle.has(v),
+  );
+  const phantom = [...lifecycle].filter((v) => !allVerbs.has(v));
+  const overlap = [...lifecycle].filter((v) => bookkeeping.has(v));
+  assertEquals(
+    unclassified,
+    [],
+    `verbs missing from VERB_LIFECYCLE: ${unclassified}`,
+  );
+  assertEquals(
+    phantom,
+    [],
+    `VERB_LIFECYCLE entries without a CLI verb: ${phantom}`,
+  );
+  assertEquals(overlap, [], `verbs classified as both: ${overlap}`);
+});
+
+// 背景の載せ直し (「残った PR を新しい基点へ載せ直す」) が衝突なく一発で成功した
+// 最頻パスの列 (確認済み欠陥 12 の固定): rebase-record の控えが無いまま
+// rebase-done で tip を更新し、watch-set --proc null --sig null で署名を落とす。
+Deno.test("T-SEQ-5: clean background rebase — rebase-done without a rebase record, then watch-set", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_review",
+      session: "s1",
+      review: reviewOf({
+        branch: "task-pipeline/t-1",
+        tip: "sha0",
+        base: "main",
+        watch: watchOf({
+          proc: "bg-1",
+          sig: "sig-old",
+          handled: ["c1"],
+          fix_attempts: 1,
+        }),
+      }),
+    }),
+  ]);
+  await expectOk(dir, [
+    "rebase-done",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--tip",
+    "sha-rebased",
+  ]);
+  await expectOk(dir, [
+    "watch-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--proc",
+    "null",
+    "--sig",
+    "null",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.status, "in_review");
+  const review = item.review as Record<string, unknown>;
+  assertEquals(review.tip, "sha-rebased");
+  assertEquals("rebase" in review, false);
+  const watch = review.watch as Record<string, unknown>;
+  assertEquals(watch.proc, null);
+  assertEquals(watch.sig, null);
+  assertEquals(watch.handled, ["c1"], "watch preserved");
+  assertEquals(watch.fix_attempts, 1, "fix_attempts not counted for rebase");
 });

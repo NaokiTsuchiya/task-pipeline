@@ -56,6 +56,141 @@ stdout に必ず **1 行の JSON**。
 - 前提違反は `conflict` (対象は存在する) か `missing` (`--id` の指す対象が存在しない) のいずれか
   で失敗し、**state.json は一切書き換わらない** (エラー時共通の契約がそのまま適用される)。
 
+## 遷移表 (機械 A × B × B')
+
+状態は 3 つの機械の直積で持つ: **機械 A** はタスクのライフサイクル (`status`/`phase`)、
+**機械 B** は PR 追従 (`review.watch`)、**機械 B'** は載せ直し (`review.rebase`)。
+verb ごとの遷移は 3 軸それぞれの from→to として宣言され (`state-transitions.ts` の
+`VERB_SPEC`)、前提チェックは 3 軸すべてに掛かる — 「A のノードを動かさない verb」の
+多くは B / B' の軸を動かす辺である。この節は実装の転写であり、`state.test.ts` の
+T-D7 / T-D4 / T-D3 / T-D8 / T-D9 が一致を検査する (どちらかだけ直すとテストが落ちる)。
+
+### 機械 A (status/phase)
+
+機械 A のノードは `(status, phase)` の合法な組だけで、**`phase` が非 null なのは
+`status` が `in_progress` のとき、かつそのときに限る**。`in_progress` のノードは
+`in_progress/<phase>` と表記する。
+
+ノードの全一覧 (現在 4 + 8 = 12。意味の列は散文で、照合されるのはノード名だけ):
+
+| ノード | 意味 |
+|---|---|
+| `approved` | 承認済み・着手待ち。queue 追加直後と `restore` 後の形 |
+| `in_progress/research` | 調査フェーズを実行中 (gate `full` の先頭) |
+| `in_progress/plan` | 計画フェーズを実行中 |
+| `in_progress/implement` | 実装フェーズを実行中 |
+| `in_progress/report` | 報告フェーズを実行中 (両 gate の最終検証フェーズ) |
+| `in_progress/research+plan` | 調査と計画の統合フェーズを実行中 (gate `light` の先頭) |
+| `in_progress/finalize` | 後処理 (コミット・PR 作成・押し直し) 中。検証ゲート無し |
+| `in_progress/pr_fix` | レビュー指摘への修正を実行中 (仕上げ) |
+| `in_progress/rebase_fix` | 載せ直し衝突の解消を実行中 (仕上げ) |
+| `in_review` | レビュー待ち。`finish=pr` なら `review.watch` (機械 B) が PR を追従 |
+| `done` | マージを証明して回収済み (終端) |
+| `blocked` | パイプラインが自力で進めない。人が `restore` で戻すまで停止 |
+
+フェーズ列は gate ごとに 1 本で、`phase-pass` が通せるのは**この列の隣接ペアだけ**
+(飛び越し・逆行・自己辺・gate 違いの辺・`finalize`/`pr_fix`/`rebase_fix` への出入りは
+`conflict`。それらへの遷移は `finalize-start` / `fix-start` / `rebase-start` が担う):
+
+| gate | フェーズ列 |
+|---|---|
+| `full` | `research → plan → implement → report` |
+| `light` | `research+plan → implement → report` |
+
+queue エントリを対象にする verb の (from ノード → to ノード)。`in_progress/*` は
+in_progress の全フェーズノードを指す。to の「変更なし」はノードを動かさない verb、
+「分岐」は引数・状態で行き先が分かれる verb、「削除」は queue からエントリが消える verb:
+
+| verb | from | to |
+|---|---|---|
+| `approve` | (新規追加) | `approved` |
+| `claim` | `approved` | `in_progress/research` |
+| `set-gate` | `in_progress/research` | `in_progress/research+plan` |
+| `set-worktree` | `in_progress/*` | (変更なし) |
+| `set-executor` | `in_progress/*` | (変更なし) |
+| `touch-executor` | `in_progress/*` | (変更なし) |
+| `set-takeover` | `in_progress/*` | (変更なし) |
+| `phase-pass` | `in_progress/research`, `in_progress/plan`, `in_progress/implement`, `in_progress/research+plan` | (分岐) |
+| `phase-fail` | `in_progress/research`, `in_progress/plan`, `in_progress/implement`, `in_progress/report`, `in_progress/research+plan`, `in_progress/pr_fix`, `in_progress/rebase_fix` | (変更なし) |
+| `block` | `in_progress/*` | `blocked` |
+| `dequeue` | `in_progress/*` | (削除) |
+| `finalize-start` | `in_progress/report`, `in_progress/pr_fix`, `in_progress/rebase_fix` | `in_progress/finalize` |
+| `in-review` | `in_progress/finalize` | `in_review` |
+| `watch-init` | `in_review` | (変更なし) |
+| `watch-set` | `in_review` | (変更なし) |
+| `fix-pending` | `in_review` | (変更なし) |
+| `fix-start` | `in_review` | (分岐) |
+| `fix-done` | `in_progress/finalize` | (変更なし) |
+| `review-only` | `in_review` | (変更なし) |
+| `answered-set` | `in_review` | (変更なし) |
+| `rebase-record` | `in_review` | (変更なし) |
+| `rebase-resolve-pending` | `in_review` | (変更なし) |
+| `rebase-start` | `in_review`, `in_progress/finalize` | `in_progress/rebase_fix` |
+| `rebase-done` | `in_review` | (変更なし) |
+| `rebase-give-up` | `in_progress/rebase_fix` | `in_review` |
+| `recover-done` | `in_review` | `done` |
+| `withdraw` | `in_review` | (変更なし) |
+| `withdraw-remove` | `in_review` | (削除) |
+| `withdraw-asked` | `in_review` | (変更なし) |
+| `restore` | `in_review`, `done`, `blocked` | `approved` |
+
+この表の from に無いノードから呼ぶと `conflict` になる。from にあっても、他の軸
+(下記 B / B') や verb 固有の補助前提 (`fix_pending` など。下記 verb 一覧) を満たさなければ
+同じく `conflict`。書き込み後には全 verb 共通で「到達不能ノードを書かない」「`review.watch`
+は `review.ref` なしに存在しない」の不変条件が検査され、違反は `schema` で拒否される。
+
+### 機械 B (review.watch)
+
+watch の軸のノードは 3 つ:
+
+| ノード | 意味 |
+|---|---|
+| `absent` | `review.watch` が無い (追従対象になったことがない、または新周回前) |
+| `watching` | 追従中 (watch プロセスと観測がこのタスクを見る) |
+| `stopped` | 停止 (追従上限・エラー 3 連続・取り下げ・回収・静止。人が戻すまで再開しない) |
+
+verb ごとの watch の from→to。**この表に無い verb は watch に一切触れない**
+(untouched — 書き換えはフレームテストが禁じ、前提としては任意のノードを受ける)。
+to の「変えない」は内部フィールドは書くが軸は動かさない、「静止」は present なら
+`stopped`・`absent` なら `absent`、「分岐」はフラグ・状態で行き先が分かれる:
+
+| verb | watch from | watch to |
+|---|---|---|
+| `watch-init` | (任意) | `watching` |
+| `watch-set` | `watching`, `stopped` | (分岐) |
+| `fix-pending` | `watching`, `stopped` | (変えない) |
+| `fix-start` | `watching` | (分岐) |
+| `fix-done` | `watching`, `stopped` | (変えない) |
+| `review-only` | `watching`, `stopped` | (変えない) |
+| `answered-set` | `watching`, `stopped` | (変えない) |
+| `block` | (任意) | (静止) |
+| `recover-done` | (任意) | (静止) |
+| `restore` | (任意) | (静止) |
+
+### 機械 B' (review.rebase)
+
+rebase の軸のノードは 3 つ:
+
+| ノード | 意味 |
+|---|---|
+| `absent` | `review.rebase` が無い (載せ直しの控えが無い通常状態) |
+| `recorded` | 控えのみ (`rebase-record` が書いた blocked_onto / トリアージ結果) |
+| `pending` | `resolve_pending` が真 (解決サイクルの着手待ち) |
+
+verb ごとの rebase の from→to。**この表に無い verb は rebase に一切触れない**。
+`rebase-start` は機械 A の入口で前提が変わるため 2 行に分ける。to の「確保」は
+無ければ `recorded` を作る (有れば軸は不変)、「解除」は有れば `resolve_pending` を
+落として `recorded` に (無ければ `absent` のまま):
+
+| verb | rebase from | rebase to |
+|---|---|---|
+| `rebase-record` | (任意) | (確保) |
+| `rebase-resolve-pending` | `recorded`, `pending` | `pending` |
+| `rebase-start` (`in_review` から) | `pending` | (解除) |
+| `rebase-start` (`in_progress/finalize` から) | (任意) | (解除) |
+| `rebase-done` | (任意) | `absent` |
+| `rebase-give-up` | `recorded`, `pending` | (解除) |
+
 ## verb 一覧
 
 ### `init`
@@ -127,7 +262,7 @@ lock 取得 → 読み直し → `checkState` → `history` 配列へ `--line` �
 原子的書き込み → lock 解放。state.json が無ければ `missing`。invalid なら `schema`。
 成功: `{"ok": true, "history_length": <n>}`。
 
-以下、`state-cli-verbs` タスクで追加した36 verb。**すべて lock を使う書き込み系**で、
+以下、`state-cli-verbs` タスクで追加し、その後 `answered-set` (gh-6) を加えた 37 verb。**すべて lock を使う書き込み系**で、
 共通の流れ (lock取得 → 読み直し → `checkState` → 前提検査 → フィールド書き換え →
 `updated_at`/`schema_version` 正規化 → 事後スキーマ検証 → 原子的書き込み → lock 解放) は
 共通なので、以下では verb ごとの**前提**と**効果**だけを記す。前提を満たさない場合は
@@ -228,9 +363,11 @@ state.ts phase-pass --state-dir <dir> --id <id> --from <phase> --to <phase> \
   [--lock-retry-ms <n>] [--lock-max-retries <n>]
 ```
 
-`--from`/`--to` は `research`/`research+plan`/`plan`/`implement`/`report`/`finalize`/
-`pr_fix`/`rebase_fix` のいずれか (それ以外は `usage`)。
-前提: `status=="in_progress" && phase==<from>` (`conflict`)。
+`--from`/`--to` は `phase` の全トークンのいずれか (それ以外は `usage`)。
+前提: `status=="in_progress" && phase==<from>`、かつ `<from> → <to>` が**そのタスクの
+`gate` のフェーズ列 (上記「遷移表」) の隣接ペア**であること (どちらを欠いても `conflict`)。
+飛び越し・自己辺・gate 違いの辺は通らない。`finalize`/`pr_fix`/`rebase_fix` への遷移は
+この verb では行えない (`finalize-start`/`fix-start`/`rebase-start` を使う)。
 効果: `phase→<to>, attempts→0`。
 成功: `{"ok": true, "id": "<id>", "phase": "<to>"}`。
 
@@ -241,6 +378,8 @@ state.ts phase-fail --state-dir <dir> --id <id> --phase <phase> \
   [--lock-retry-ms <n>] [--lock-max-retries <n>]
 ```
 
+`--phase` は検証ゲートを持つフェーズ (フェーズ列の各フェーズと `pr_fix`/`rebase_fix`)
+のみ。`finalize` は検証対象外なので `usage`。
 前提: `status=="in_progress" && phase==<phase>` (`conflict`)。
 効果: `attempts+=1`。
 成功: `{"ok": true, "id": "<id>", "attempts": <n>}`。
@@ -254,6 +393,9 @@ state.ts block --state-dir <dir> --id <id> --reason <text> \
 
 前提: `status=="in_progress"` (`conflict`)。
 効果: `status→"blocked", blocked_reason→<text>, phase→null, session→null`。
+`review.watch` が存在すれば `watch.state→"stopped", watch.proc→null,
+watch.proc_started_at→null` も同じ書き込みで行う (`pr_fix`/`rebase_fix` の途中で
+blocked になる経路がある — blocked は追従対象外)。
 (`executor`/`executor_last_event_at`/`takeover_at` は変更しない — 復帰時は `restore` が
 初期化する。)
 成功: `{"ok": true, "id": "<id>", "status": "blocked"}`。
@@ -296,9 +438,12 @@ state.ts in-review --state-dir <dir> --id <id> \
 (片方だけの指定は `usage`)。`--commits 0` のとき `--tip` を渡すと `usage`。`--commits` が
 1以上のとき `--tip` を省くと `usage`。
 前提: `status=="in_progress" && phase=="finalize"` (`conflict`)。
-効果: `status→"in_review", phase→null, attempts→0`。上記4フラグを指定したときだけ
-`review→{ref, branch, tip: (commits>=1 ? tip : null), base}` を書く (省略時は既存の
-`review` を一切変更しない — `pr_fix`/`rebase_fix` からの復帰専用)。`--clear-session true`
+効果: `status→"in_review", phase→null, attempts→0`。上記4フラグを指定したときは
+`review` の**グループフィールドだけ**を `{ref, branch, tip: (commits>=1 ? tip : null),
+base}` に書き換え、**既存の `review.watch` / `review.rebase` / `review.withdrawn` /
+`review.withdrawn_asked` は保持する** (丸ごと置換しない — `pr_fix` 復帰は毎回ここを
+通るため、置換すると `watch.fix_attempts` の上限と `watch.handled` の再浮上ガードが
+周回のたびに無効化される)。4フラグ省略時は既存の `review` を一切変更しない。`--clear-session true`
 を渡すと、同じ書き込みで `session→null` も行う (レビュー待ちにしたタスクに `watch-init` を
 呼ばない経路 — `ref` が PR URL でないとき — で使う。揮発資源がもう無いタスクに `session` を
 残すと、そのセッションが他の作業で生きている間、他セッションからは「所有中」に見えてマージの
@@ -318,10 +463,14 @@ state.ts watch-init --state-dir <dir> --id <id> --session <s> \
 効果: `review.watch` を既定値一式で作る
 (`{state:"watching", proc:null, proc_started_at:null, sig:null, head:null, ci:null,
 handled:[], fix_pending:false, pending_ids:[], findings:null, fix_attempts:0, errors:0,
-checked_at:null, note:null, review_only:[]}`)。`--preserve-handled true` のときは、既存
-`review.watch.handled` があればそれを引き継ぐ (無ければ空配列のまま)。**`review_only` は
-`--preserve-handled` の対象外で常に `[]` から始まる** (`pending_ids`/`findings` と同じく
-watch-init は毎回まっさらにする)。加えて `session→<s>`。
+checked_at:null, note:null, review_only:[], answered:[]}`)。`--preserve-handled true` の
+ときは、既存 `review.watch.handled` があればそれを引き継ぐ (無ければ空配列のまま)。
+**`--preserve-handled` の及ぶ範囲は `handled` だけ**で、`review_only`/`answered` は常に
+`[]` から、`fix_attempts` は常に 0 から始まる (`pending_ids`/`findings` と同じく
+watch-init は毎回まっさらにする)。この verb を呼ぶのは**新しいレビュー周回の開始時だけ**
+(最初のレビュー待ち・restore 後の再走) で、`pr_fix`/`rebase_fix` からの復帰では呼ばない —
+復帰は `in-review` が `watch` を保持するので、`fix_attempts`/`handled` が周回をまたいで
+生き残る (SKILL.md の復帰列)。加えて `session→<s>`。
 成功: `{"ok": true, "id": "<id>"}`。
 
 ### `watch-set`
@@ -341,7 +490,10 @@ state.ts watch-set --state-dir <dir> --id <id> \
 `T-V-watch-set-12` が固定)。`--session null` と `--state stopped` はどちらも null を意味する
 ので同時指定してもよく、exit 0 で `session→null, review.watch.state→"stopped"` になる
 (`T-V-watch-set-13` が受理側として固定)。
-前提: `review.watch!=null` (`conflict`)。
+前提: `status=="in_review" && review.watch!=null` (`conflict`)。in_review に限るのは、
+飛行中 (`pr_fix`/`rebase_fix`) のタスクの `session` を watch 側の機械から null に
+落とせないようにするため。approved / blocked / done の watch は `restore`/`block`/
+`recover-done` がそれぞれ静止させるので、この verb の対象にならない。
 効果: 指定したフィールドだけ書く。**不変条件**: `--proc` に非null値を渡すと
 `proc_started_at→now` も同時に、`--proc null` なら `proc_started_at→null` も同時に書く
 (`--proc` 省略時は `proc_started_at` を変更しない)。`--state stopped` を渡すと、トップレベル
@@ -375,14 +527,18 @@ state.ts fix-start --state-dir <dir> --id <id> --session <s> \
   [--reset-attempts true] [--lock-retry-ms <n>] [--lock-max-retries <n>]
 ```
 
-前提: `status=="in_review" && watch.fix_pending==true` (`conflict`)。
+前提: `status=="in_review" && watch.fix_pending==true && watch.state=="watching"`
+(`conflict`)。
 効果 (lock内で計算): 現在の `fix_attempts` (`--reset-attempts true` なら0とみなす) に+1 した
 値を `newAttempts` とする。`newAttempts<=3` なら
 `status→"in_progress", phase→"pr_fix", attempts→0, session→<s>, watch.fix_pending→false,
 watch.fix_attempts→newAttempts` (`started:true`)。`newAttempts>3` なら
 `watch.fix_attempts→newAttempts, watch.state→"stopped", watch.note→"追従上限",
 session→null` (`started:false`、`status`/`phase` は変更しない)。**どちらも exit 0** —
-上限超過は「修正しない」という正常分岐であって前提違反ではない。
+上限超過は「修正しない」という正常分岐であって前提違反ではない。上限で `stopped` に
+なった後は前提 (`watch.state=="watching"`) が偽になるため、再度呼んでも `conflict` で
+加算されない (ラッチ)。ユーザーが `watch.state` を `watching` に戻したときだけ
+`--reset-attempts true` 付きで再開できる。
 成功: `{"ok": true, "id": "<id>", "started": <bool>, "fix_attempts": <n>}`。
 
 ### `fix-done`
@@ -472,17 +628,21 @@ state.ts rebase-start --state-dir <dir> --id <id> --session <s> \
   [--lock-retry-ms <n>] [--lock-max-retries <n>]
 ```
 
-前提: `status=="in_review" && review.rebase!=null && review.rebase.resolve_pending==true`
-(`conflict`)。
-効果: `status→"in_progress", phase→"rebase_fix", attempts→0, session→<s>,
-review.rebase.resolve_pending→false`。
+`rebase_fix` への入口は 2 つあり、この verb が両方を受ける (遷移表の from):
+
+- **`in_review` から** (背景の載せ直しが衝突し、`rebase-record`/`rebase-resolve-pending`
+  で控えた復帰): 前提は `review.rebase!=null && review.rebase.resolve_pending==true`
+  (`conflict`)。
+- **`in_progress/finalize` から** (executor が push 直前の載せ直しで `REBASE-CONFLICT`
+  停止した直接進入): `review` を一切見ない (最初の PR を出す直前なら `review` は null の
+  まま)。衝突の控えとトリアージ結果は state に置かず、オーケストレーターがイテレーション
+  内で持ち回る (SKILL.md の「解決サイクル」の「finalize から入る経路」)。
+
+効果: `status→"in_progress", phase→"rebase_fix", attempts→0, session→<s>`。
+`review.rebase` が存在すれば `resolve_pending→false` も同じ書き込みで行う。
 成功: `{"ok": true, "id": "<id>", "status": "in_progress", "phase": "rebase_fix"}`。
-前提から分かるとおり、**この verb は `in_review` のタスクを `rebase_fix` へ戻す用途にしか使えない**。
-`finalize` フェーズで executor が衝突して止まったタスク (`status: in_progress`。最初の PR を出す
-直前なら `review` も null) は `rebase-record`/`rebase-resolve-pending` も含めてこの一族の verb を
-1 つも通せないので、`phase-pass --from finalize --to rebase_fix` で遷移する
-(`T-V-rebase-start-3`/`T-V-phase-pass-4` が両側を固定。運用は SKILL.md の
-「解決サイクル」の「finalize から入る経路」)。
+(`T-V-rebase-start-3`/`T-V-rebase-start-4` が finalize 入口を、`T-V-phase-pass-4` が
+`phase-pass` でこの遷移ができないことを固定。)
 
 ### `rebase-done`
 
@@ -492,10 +652,15 @@ state.ts rebase-done --state-dir <dir> --id <id> --tip <sha> \
 ```
 
 `--tip` は必須 (省略は `usage`)。
-前提: `review!=null && review.rebase!=null` (`status` は問わない — `in_progress`/
-`rebase_fix` からの復帰、`in_review` のままの背景載せ直しの両方から呼ばれる)。
-効果: `review.tip→<sha>`。`review.rebase` プロパティを削除する (`null` ではなく削除 —
-スキーマの `reviewRebase` は type:"object" のみで null を許さないため)。
+前提: `status=="in_review" && review!=null` (`conflict`)。in_review に限るのは、飛行中
+(`in_progress/rebase_fix`) に `review.rebase` を消せると `rebase-give-up` の前提が永久に
+満たせなくなるため。`rebase_fix` からの復帰列では、`in-review` で `in_review` に戻した
+**後**にこの verb を呼ぶ (SKILL.md のレビュー待ち処理)。**`review.rebase` の存在は要求
+しない** — 背景の載せ直しが初回の試行で衝突なく成功した最頻パスには `rebase-record` の
+控えが無く、それでも tip の更新 (マージ回収の鍵) はこの verb にしか無い。
+効果: `review.tip→<sha>`。`review.rebase` プロパティが存在すれば削除する (`null` では
+なく削除 — スキーマの `reviewRebase` は type:"object" のみで null を許さないため。
+無ければ tip の更新だけを行う)。
 成功: `{"ok": true, "id": "<id>", "tip": "<sha>"}`。
 
 ### `rebase-give-up`
@@ -522,8 +687,10 @@ state.ts recover-done --state-dir <dir> --id <id> \
 ```
 
 前提: `status=="in_review" && review!=null && review.tip!=null` (`conflict`)。
-効果: `status→"done", session→null`。`review.watch` が存在すれば `watch.proc→null`
-(存在しなければ何もしない — `finish=commit` のタスクは `review.watch` を持たない)。
+効果: `status→"done", session→null`。`review.watch` が存在すれば
+`watch.state→"stopped", watch.proc→null, watch.proc_started_at→null` も同じ書き込みで
+行う (done は追従対象外 — `watching` のまま残すと停止経路が「自分の担当」として数え
+続ける。存在しなければ何もしない — `finish=commit` のタスクは `review.watch` を持たない)。
 成功: `{"ok": true, "id": "<id>", "status": "done"}`。
 
 ### `withdraw`
@@ -638,9 +805,16 @@ state.ts restore --state-dir <dir> --id <id> \
 
 前提: `id` が `relisted` に存在する (`missing`) **かつ** 対応する `queue` エントリの
 `status` が `in_review`/`blocked`/`done` のいずれか (`conflict`)。
-効果: `queue` エントリを `status→"approved", phase→null, attempts→0, session→null,
-executor→null, executor_last_event_at→null, takeover_at→null, blocked_reason→null` に
-(`worktree`/`base`/`review` は変更しない)。同じ書き込みで `relisted` から該当エントリを削除。
+効果: `queue` エントリを `status→"approved", gate→"full", phase→null, attempts→0,
+session→null, executor→null, executor_last_event_at→null, takeover_at→null,
+blocked_reason→null` に (`worktree`/`base`/`review` は変更しない)。`gate` を初期値に
+戻すのは、`light` のまま `claim` すると `(in_progress/research, gate: light)` という
+どの verb でも進めないノードに着地するため — gate の正はトラッカー側の宣言で、
+再 claim 時の gate 判定 (SKILL.md タスク実行手順 1) が改めて復元する。ただし `review.watch` が存在すれば
+`watch.state→"stopped", watch.proc→null, watch.proc_started_at→null` にする (前回周回の
+watching / proc を抱えたまま approved に再入させない。`handled`/`fix_attempts` の値は残り、
+次の周回の `watch-init --preserve-handled` が仕切り直す)。同じ書き込みで `relisted` から
+該当エントリを削除。
 成功: `{"ok": true, "id": "<id>", "status": "approved"}`。
 
 ### 全体
@@ -666,8 +840,8 @@ state.ts stalled-set --state-dir <dir> --value <depleted|max_open|null> \
 プロセスだけが除去者になるので、複数プロセスが同時に stale 判定しても排他は破れない。
 `--lock-retry-ms` (既定 10000) 待って `--lock-max-retries` (既定 3) 回失敗したら `lock` で
 諦める。書き込みは一時ファイルに全文を書いてから `rename` で置換する (部分書き込み防止)。
-`init`/`history-append`、および `state-cli-verbs` で追加した36 verb (`approve` 〜
-`stalled-set`) がこの lock を使う (`get`/`validate` は読み専用で lock 不要。
+`init`/`history-append`、および `approve` 〜 `stalled-set` の
+37 verb がこの lock を使う (`get`/`validate` は読み専用で lock 不要。
 `session-touch`/`sessions-alive` は自分のファイルと日次残骸しか触らないため lock 不要)。
 
 ## heartbeat の契約
