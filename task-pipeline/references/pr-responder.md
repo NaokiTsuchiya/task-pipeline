@@ -27,14 +27,15 @@
    - 必要なら関連する他のファイル (grep・Read 相当)。
 3. 質問が実質的に変更要求・不具合報告を含むと分かったら (watcher の分類が粗かった場合)、答えずに「回答できない場合」に回す (このエージェントは pr_fix の代わりにコードを直したり直すと約束したりしない)。
 4. 根拠から一意に答えを導けるものだけ、日本語で簡潔に回答本文を作る。**引用元 (`ファイル:行` または diff の該当箇所) を含める** — 推測ではなく根拠に基づく回答であることが読み手に伝わるようにする。本文の**末尾に** `<!-- task-pipeline:pr-reply -->` を付ける (`pr-watcher.md` の「`<!-- task-pipeline` マーカーを含むコメントは落とす」規則に合わせ、以降の観測がこの投稿をパイプライン自身のものと認識できるようにする)。
-5. 投稿する。`id` は `rc-<databaseId>` の形なので、数値部分 (`databaseId`) を使う。PR URL から owner/repo/PR番号を取り出す。
+5. 投稿する。**新しい単独コメントは作らない — 必ず、答える対象のレビューコメントが属するスレッドへの返信として投稿する。** `id` は `rc-<databaseId>` の形なので、数値部分 (`databaseId`) を使う。この `databaseId` は「答える対象のコメントそのもの」の id であり (スレッドの先頭コメントとは限らない — スレッド内の後続コメントに対する質問もありうる)、これを `in_reply_to`/`commentId` にそのまま渡せば GitHub 側がそのコメントの属するスレッドへ解決して返信を連結する。PR URL から owner/repo/PR番号を取り出す。
    - 第一候補は `gh` CLI。**実体バイナリを使う** (`which -a gh | grep '^/' | head -1` — `executor.md`/`pr-watcher.md`/`adapters/gh.md` と同じ実体バイナリ回避):
      ```sh
      GH=$(which -a gh | grep '^/' | head -1)
      "$GH" api "repos/<owner>/<repo>/pulls/<pull number>/comments" \
        -f body="<回答本文>" -F in_reply_to=<databaseId>
      ```
-   - `gh` が使えなければ、ToolSearch (`query: "github pull request reply comment"`) で GitHub MCP の `add_reply_to_pull_request_comment` (`commentId` = `databaseId`, `body`, `owner`, `repo`, `pullNumber`) をロードして使う。
+     `-F in_reply_to=<databaseId>` を付けることで、`repos/.../pulls/.../comments` (新規コメント作成用のエンドポイント) が「新規」ではなく「`<databaseId>` の属するスレッドへの返信」として扱う (**このフラグを落とすと独立した新規コメントになってしまうので絶対に落とさない**)。`gh pr comment` (トップレベルの PR コメント投稿) は使わない — スレッドに紐付かない。
+   - `gh` が使えなければ、ToolSearch (`query: "github pull request reply comment"`) で GitHub MCP の `add_reply_to_pull_request_comment` (`commentId` = `databaseId`, `body`, `owner`, `repo`, `pullNumber`) をロードして使う。この MCP ツールも「指定した `commentId` への reply」専用であり、同じくスレッドへ連結される。
    - どちらも失敗したら、その id は「回答できない場合」に回す (理由: `投稿手段が無い` — 答えは分かっていても投稿できなかった場合であり、根拠不足とは理由を区別する)。
 6. `question_ids` の全 id が、`answered` か `unanswered` のどちらかに必ず 1 回だけ現れるようにする。
 
