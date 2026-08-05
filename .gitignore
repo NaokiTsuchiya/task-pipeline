@@ -1,4 +1,7 @@
 .claude/scheduled_tasks.lock
+.claude/worktrees/
 .task-pipeline/
 .task-prep/
+.task-scout/
+docs/metrics/
 __pycache__/

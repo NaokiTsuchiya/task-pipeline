@@ -1,6 +1,10 @@
-# skills
+# task-pipeline
 
-個人用 Claude Code skill 集。
+承認済みのタスクを、調査から PR まで自分で回しきる Claude Code skill スイート。
+
+トラッカー (GitHub issue / markdown ファイル) からタスクを読み、優先順位を付けて 1 件ずつ承認を取り、**調査 → 計画 → 実装 → 報告**の固定フェーズで実行する。各フェーズはフレッシュな検証サブエージェントの PASS なしに先へ進まない。`finish=pr` なら出した PR の CI とレビューコメントをそのまま追従し、自分で直して押し直す。
+
+3 つの skill が一本のタスクライフサイクルを成す — **task-scout** がコードベースの実査から候補を掘り、**task-prep** がそれを検証可能な受け入れ条件付きの issue に整え、**task-pipeline** が承認済みのものを消化する。
 
 ## skills 一覧
 

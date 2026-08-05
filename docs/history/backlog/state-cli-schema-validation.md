@@ -6,7 +6,7 @@
 
 このパターンから、**スキーマ検証はロック・heartbeat・CLI dispatch と完全に独立した純粋関数** (入力: JSオブジェクト、出力: valid/invalid + 違反パス。ファイルI/Oも排他も無い) であり、切り出して単独で開発・検証できると判断した。手書きの per-field チェッカーではなく、**スキーマ文書 (`state.schema.json`) を解釈する汎用の再帰的 walker** にすることで、「フィールドの数だけ書き忘れの可能性がある」という問題の構造そのものを解消する。
 
-state.json の実データ・フィールド定義は `state-cli-foundation` の research.md (`.task-pipeline/runs/state-cli-foundation/research.md`) で裏取り済み: このリポジトリの live state (`/Users/naoki/work/github.com/NaokiTsuchiya/skills/.task-pipeline/state.json`, 365行, queue 11件) と `task-pipeline/SKILL.md` 59-106行のフィールド定義を突き合わせている。要点:
+state.json の実データ・フィールド定義は `state-cli-foundation` の research.md (`.task-pipeline/runs/state-cli-foundation/research.md`) で裏取り済み: このリポジトリの live state (`<リポジトリルート>/.task-pipeline/state.json`, 365行, queue 11件) と `task-pipeline/SKILL.md` 59-106行のフィールド定義を突き合わせている。要点:
 
 - queue 要素は14キー (`id` / `title` / `status` / `gate` / `phase` / `attempts` / `session` / `executor` / `executor_last_event_at` / `takeover_at` / `blocked_reason` / `worktree` / `base` / `review`)。`status` と `gate` は非nullのenum、`phase` はnull可のenum (8トークン: `research`/`research+plan`/`plan`/`implement`/`report`/`finalize`/`pr_fix`/`rebase_fix`)、`attempts` は整数 ≥ 0。
 - top-level は `tracker`/`source`/`updated_at`/`queue`/`candidates`/`relisted`/`promoted`/`history` が必須、`stalled` (null|"depleted"|"max_open")/`stalled_since`/`withdrawn_branches`/`schema_version` が任意。`promoted` は素のid文字列の配列 (実データで確認: `["scripts-test-harness", ...]`)。

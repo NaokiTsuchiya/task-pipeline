@@ -32,7 +32,7 @@ README.md:88 は「着手すると自分にアサインされる（**着手中�
 $ ls ~/.claude/skills/task-pipeline/
 SKILL.md  docs  references  scripts
 $ ls ~/.claude/skills/task-pipeline/backlog
-ls: /Users/naoki/.claude/skills/task-pipeline/backlog: No such file or directory
+ls: ~/.claude/skills/task-pipeline/backlog: No such file or directory
 ```
 
 さらに executor は target project を作業ディレクトリとして動くので、相対パス `backlog/...` は target project 側の無関係なパスとして解決されうる。`grep -rn 'backlog/' task-pipeline/` のヒットはこの 1 件だけである (同じ executor.md 内の他の参照、例えば `docs/gate-declaration-2026-08.md` は `task-pipeline/` 配下なので解決する)。
