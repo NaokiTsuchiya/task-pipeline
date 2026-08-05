@@ -5,10 +5,11 @@
 //
 //   T-ALIGN  語彙の整合 — state.schema.json の enum と TS の語彙定数が一致する。
 //            フェーズ・gate・status を片方だけ足すとここで落ちる。
-//   T-MX     行列テスト — 全 verb × 全ライフサイクルノード (12) を実行し、
-//            VERB_LIFECYCLE の from に無いノードからは conflict になり、from に
-//            あるノードからは成功して to のノードに着地することを網羅で検査する。
-//            フェーズを足すとノードが増え、この行列が新ノードの扱いを全 verb に問う。
+//   T-MX     行列テスト — 状態空間は A × B × B' の直積 (VERB_SPEC)。T-MX-1 は
+//            機械 A の全ノード (12)、T-MX-4 は機械 B (watch) の 3 ノード、T-MX-5 は
+//            機械 B' (rebase) の 3 ノードについて、宣言した from でだけ発火し
+//            宣言した to に着地することを全 verb で網羅検査する。フェーズや
+//            サブ機械の状態を足すと、この行列が新ノードの扱いを全 verb に問う。
 //   T-FRAME  フレームテスト — 各 verb を代表フィクスチャで 1 回実行し、書き換わった
 //            パスが宣言した許可パス (FRAME) の中に収まることを検査する。verb が
 //            自分の管轄外のサブ機械 (review.watch / review.rebase / withdrawn) を
@@ -54,16 +55,25 @@ import {
   GATE_PHASE_SEQUENCES,
   GATE_VALUES,
   isPhasePassEdge,
+  isRecord,
   LIFECYCLE_NODES,
   type NodeKey,
   nodeKeyOf,
   PHASE_VALUES,
   REBASE_KIND_VALUES,
+  REBASE_NODES,
   REBASE_REASON_VALUES,
+  type RebaseNode,
+  rebaseNodeOf,
+  resolveRebaseAxis,
   STALLED_VALUES,
   STATUS_VALUES,
   VERB_LIFECYCLE,
+  VERB_SPEC,
+  WATCH_NODES,
   WATCH_STATE_VALUES,
+  type WatchNode,
+  watchNodeOf,
 } from "./state-transitions.ts";
 import { collectSchemaNodes } from "./state-schema.ts";
 import schemaJson from "./state.schema.json" with { type: "json" };
@@ -1066,4 +1076,241 @@ Deno.test("T-ALIGN-13: frame fixtures cover every schema property of review/watc
     Object.keys(d.reviewRebase.properties),
     "rebaseOf() must cover all reviewRebase properties",
   );
+});
+
+// ---------------------------------------------------------------------------
+// T-MX-4 / T-MX-5: 機械 B (watch) と機械 B' (rebase) の軸の行列テスト
+//
+// 状態空間は A × B × B' の直積 (VERB_SPEC)。ここでは各 verb の代表ノード上で
+// B / B' の軸だけを変化させ、宣言した from でだけ発火し、宣言した to に着地する
+// ことを網羅で検査する。"untouched" は「軸のノードが同じ」ではなく
+// 「オブジェクトが 1 バイトも変わらない」の深い等値で検査する。
+// ---------------------------------------------------------------------------
+
+function resolveOverrides(
+  c: VerbCase,
+  node: NodeKey,
+): Record<string, unknown> | undefined {
+  return typeof c.overrides === "function" ? c.overrides(node) : c.overrides;
+}
+
+function withWatchVariant(
+  item: Record<string, unknown>,
+  w: WatchNode,
+): Record<string, unknown> {
+  const review = isRecord(item.review) ? { ...item.review } : null;
+  if (w === "absent") {
+    if (review && "watch" in review) {
+      delete review.watch;
+      return { ...item, review };
+    }
+    return item;
+  }
+  const baseReview = review ?? reviewOf();
+  const existing = isRecord(baseReview.watch) ? baseReview.watch : null;
+  const watch = existing ? { ...existing, state: w } : watchOf({ state: w });
+  return { ...item, review: { ...baseReview, watch } };
+}
+
+function withRebaseVariant(
+  item: Record<string, unknown>,
+  r: RebaseNode,
+): Record<string, unknown> {
+  const review = isRecord(item.review) ? { ...item.review } : null;
+  if (r === "absent") {
+    if (review && "rebase" in review) {
+      delete review.rebase;
+      return { ...item, review };
+    }
+    return item;
+  }
+  const baseReview = review ?? reviewOf();
+  const existing = isRecord(baseReview.rebase) ? baseReview.rebase : null;
+  const rebase = existing
+    ? { ...existing, resolve_pending: r === "pending" }
+    : rebaseOf({ resolve_pending: r === "pending" });
+  return { ...item, review: { ...baseReview, rebase } };
+}
+
+Deno.test("T-MX-4: watch axis — verbs accept exactly their declared watch nodes and land on the declared to", () => {
+  for (const c of VERB_CASES) {
+    const spec = VERB_SPEC[c.verb];
+    const overrides = resolveOverrides(c, c.frameNode);
+    for (const w of WATCH_NODES) {
+      const item = withWatchVariant(itemAt(c.frameNode, overrides), w);
+      const state = stateOf(item, c.stateExtra);
+      const expectedOk = spec.watch.from.includes(w);
+      let next: Record<string, unknown> | null = null;
+      let err: unknown = null;
+      try {
+        next = c.invoke(item, 0, state);
+      } catch (e) {
+        err = e;
+      }
+      if (!expectedOk) {
+        assert(
+          err !== null && err instanceof CliError && err.code === "conflict",
+          `${c.verb} @ watch=${w}: expected conflict, got ${
+            err === null ? "success" : String(err)
+          }`,
+        );
+        continue;
+      }
+      assert(
+        next !== null,
+        `${c.verb} @ watch=${w}: expected success, got ${String(err)}`,
+      );
+      if (spec.lifecycle.to === "removed") continue;
+      const outItem = queueItemOf(next!)!;
+      const before = isRecord(item.review)
+        ? (item.review as Record<string, unknown>).watch
+        : undefined;
+      const after = isRecord(outItem.review)
+        ? (outItem.review as Record<string, unknown>).watch
+        : undefined;
+      switch (spec.watch.to) {
+        case "untouched":
+          assertEquals(after, before, `${c.verb} @ watch=${w}: not untouched`);
+          break;
+        case "unchanged":
+          assertEquals(watchNodeOf(outItem), w, `${c.verb} @ watch=${w}`);
+          break;
+        case "watching":
+          assertEquals(
+            watchNodeOf(outItem),
+            "watching",
+            `${c.verb} @ watch=${w}`,
+          );
+          break;
+        case "quiesce":
+          assertEquals(
+            watchNodeOf(outItem),
+            w === "absent" ? "absent" : "stopped",
+            `${c.verb} @ watch=${w}`,
+          );
+          break;
+        case "dynamic":
+          break;
+      }
+    }
+  }
+});
+
+Deno.test("T-MX-5: rebase axis — verbs accept exactly their declared rebase nodes and land on the declared to", () => {
+  for (const c of VERB_CASES) {
+    const spec = VERB_SPEC[c.verb];
+    const byEntry = !("from" in spec.rebase);
+    const nodes: readonly NodeKey[] = byEntry
+      ? spec.lifecycle.from
+      : [c.frameNode];
+    for (const node of nodes) {
+      const axis = resolveRebaseAxis(spec.rebase, node);
+      const overrides = resolveOverrides(c, node);
+      for (const r of REBASE_NODES) {
+        const item = withRebaseVariant(itemAt(node, overrides), r);
+        const state = stateOf(item, c.stateExtra);
+        const expectedOk = axis.from.includes(r);
+        let next: Record<string, unknown> | null = null;
+        let err: unknown = null;
+        try {
+          next = c.invoke(item, 0, state);
+        } catch (e) {
+          err = e;
+        }
+        if (!expectedOk) {
+          assert(
+            err !== null && err instanceof CliError && err.code === "conflict",
+            `${c.verb} @ ${node} rebase=${r}: expected conflict, got ${
+              err === null ? "success" : String(err)
+            }`,
+          );
+          continue;
+        }
+        assert(
+          next !== null,
+          `${c.verb} @ ${node} rebase=${r}: expected success, got ${
+            String(err)
+          }`,
+        );
+        if (spec.lifecycle.to === "removed") continue;
+        const outItem = queueItemOf(next!)!;
+        const before = isRecord(item.review)
+          ? (item.review as Record<string, unknown>).rebase
+          : undefined;
+        const after = isRecord(outItem.review)
+          ? (outItem.review as Record<string, unknown>).rebase
+          : undefined;
+        switch (axis.to) {
+          case "untouched":
+            assertEquals(
+              after,
+              before,
+              `${c.verb} @ ${node} rebase=${r}: not untouched`,
+            );
+            break;
+          case "unchanged":
+            assertEquals(rebaseNodeOf(outItem), r, `${c.verb} @ ${node}`);
+            break;
+          case "ensure":
+            assertEquals(
+              rebaseNodeOf(outItem),
+              r === "absent" ? "recorded" : r,
+              `${c.verb} @ ${node} rebase=${r}`,
+            );
+            break;
+          case "pending":
+            assertEquals(
+              rebaseNodeOf(outItem),
+              "pending",
+              `${c.verb} @ ${node} rebase=${r}`,
+            );
+            break;
+          case "defuse":
+            assertEquals(
+              rebaseNodeOf(outItem),
+              r === "absent" ? "absent" : "recorded",
+              `${c.verb} @ ${node} rebase=${r}`,
+            );
+            break;
+          case "absent":
+            assertEquals(
+              rebaseNodeOf(outItem),
+              "absent",
+              `${c.verb} @ ${node} rebase=${r}`,
+            );
+            break;
+        }
+      }
+    }
+  }
+});
+
+// フレーム宣言と軸宣言の整合: 軸が "untouched" の verb のフレームに、その機械の
+// パスが混ざっていないこと (混ざっていると「触れない」の宣言とフレームの許可が矛盾し、
+// フレームテストの検出力が黙って落ちる)。
+Deno.test("T-ALIGN-14: frames are consistent with declared axes", () => {
+  for (const c of VERB_CASES) {
+    const spec = VERB_SPEC[c.verb];
+    if (spec.watch.to === "untouched") {
+      assertEquals(
+        c.frame.filter((p) =>
+          p === "review.watch" || p.startsWith("review.watch.")
+        ),
+        [],
+        `${c.verb}: watch untouched but frame allows watch paths`,
+      );
+    }
+    const rebaseAxes = "from" in spec.rebase
+      ? [spec.rebase]
+      : Object.values(spec.rebase);
+    if (rebaseAxes.every((a) => a && a.to === "untouched")) {
+      assertEquals(
+        c.frame.filter((p) =>
+          p === "review.rebase" || p.startsWith("review.rebase.")
+        ),
+        [],
+        `${c.verb}: rebase untouched but frame allows rebase paths`,
+      );
+    }
+  }
 });

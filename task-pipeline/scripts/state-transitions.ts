@@ -241,88 +241,325 @@ function atNode(
 }
 
 export interface VerbLifecycleSpec {
-  // この verb が発火を許すノード集合 (requireFromNode が参照する唯一の前提)。
+  // この verb が発火を許すノード集合 (requireVerbAxes が参照する唯一の前提)。
   from: readonly NodeKey[];
   // 機械 A 上の効果。"unchanged" = ノードを変えない。"dynamic" = 引数・状態で分岐
   // (phase-pass / finalize-start / fix-start)。"removed" = queue から消える。
   to: NodeKey | "unchanged" | "dynamic" | "removed";
 }
 
-// queue エントリを対象にする全 verb の (status, phase) 遷移表。
-// docs/state-cli-contract.md の「遷移表」節と state.test.ts の T-D3 が突き合わせ、
-// state-transitions.test.ts の matrix テストが「表に無いノードからは conflict になる」
-// ことを全ノード×全 verb で検査する。approve だけはノードを持たない (新規追加) ので
-// from は空。
-export const VERB_LIFECYCLE: Readonly<Record<string, VerbLifecycleSpec>> = {
-  "approve": { from: [], to: "approved" },
-  "claim": { from: ["approved"], to: "in_progress/research" },
-  "set-gate": {
-    from: ["in_progress/research"],
-    to: "in_progress/research+plan",
+// ---------------------------------------------------------------------------
+// 機械 B (review.watch) と機械 B' (review.rebase) のノード
+//
+// 状態空間は実際には A × B × B' の直積で、「A のノードを動かさない verb」の多くは
+// B / B' の軸を動かす辺である。verb ごとの遷移をこの 3 軸で宣言する (VERB_SPEC) —
+// 見方 (直積機械) がそのまま表現になるように。
+// ---------------------------------------------------------------------------
+
+// watch の軸: absent = review.watch が無い / watching・stopped = watch.state の値
+export const WATCH_NODES = ["absent", "watching", "stopped"] as const;
+export type WatchNode = (typeof WATCH_NODES)[number];
+
+// rebase の軸: absent = review.rebase が無い / recorded = 控えのみ /
+// pending = resolve_pending が真 (解決サイクル待ち)
+export const REBASE_NODES = ["absent", "recorded", "pending"] as const;
+export type RebaseNode = (typeof REBASE_NODES)[number];
+
+export function watchNodeOf(item: Record<string, unknown>): WatchNode | null {
+  const watch = getWatch(item);
+  if (watch === null) return "absent";
+  if (watch.state === "watching" || watch.state === "stopped") {
+    return watch.state;
+  }
+  return null;
+}
+
+export function rebaseNodeOf(item: Record<string, unknown>): RebaseNode {
+  const rebase = getRebase(item);
+  if (rebase === null) return "absent";
+  return rebase.resolve_pending === true ? "pending" : "recorded";
+}
+
+// 軸の "absent" は「review 自体が無い」と「review はあるがサブレコードが無い」の
+// 両方を指す。review グループ側の要件 (review の存在・ref・tip など) は軸の外の
+// verb 固有前提として各 apply 関数に残る (契約の verb 一覧に明記)。
+export interface WatchAxisSpec {
+  // 発火を許す watch ノード集合
+  from: readonly WatchNode[];
+  // 効果: "untouched" = watch に一切触れない (フレームテストも書き換えを禁じる) /
+  // "unchanged" = 内部フィールドは書くが state 軸は動かさない / "watching" = 初期化 /
+  // "quiesce" = present なら stopped・absent なら absent (揮発資源の静止) /
+  // "dynamic" = 分岐 (watch-set の --state、fix-start の上限分岐)
+  to: "watching" | "unchanged" | "quiesce" | "dynamic" | "untouched";
+}
+
+export interface RebaseAxisSpec {
+  // 発火を許す rebase ノード集合
+  from: readonly RebaseNode[];
+  // 効果: "untouched" = 一切触れない / "unchanged" = 記録の中身は書くが軸は不変 /
+  // "ensure" = 無ければ作る (有れば軸は不変) / "pending" = resolve_pending を立てる /
+  // "defuse" = 有れば resolve_pending を落とす (無ければ absent のまま。軸以外の
+  //   記録フィールドを書くかは verb 次第 — rebase-give-up は reason/blocked_onto も
+  //   上書きする。書いてよい集合はフレーム宣言が持つ) /
+  // "absent" = 記録ごと削除
+  to: "pending" | "absent" | "ensure" | "defuse" | "unchanged" | "untouched";
+}
+
+export interface VerbSpec {
+  lifecycle: VerbLifecycleSpec;
+  watch: WatchAxisSpec;
+  // rebase の軸は入口 (機械 A の from ノード) で前提が変わる verb がある
+  // (rebase-start)。その場合はノードごとの指定にする。
+  rebase: RebaseAxisSpec | Readonly<Partial<Record<NodeKey, RebaseAxisSpec>>>;
+}
+
+const W_UNTOUCHED: WatchAxisSpec = { from: WATCH_NODES, to: "untouched" };
+const W_PRESENT: readonly WatchNode[] = ["watching", "stopped"];
+const R_UNTOUCHED: RebaseAxisSpec = { from: REBASE_NODES, to: "untouched" };
+
+export function resolveRebaseAxis(
+  spec: VerbSpec["rebase"],
+  node: NodeKey,
+): RebaseAxisSpec {
+  if ("from" in spec && "to" in spec) return spec as RebaseAxisSpec;
+  const byNode = (spec as Readonly<Partial<Record<NodeKey, RebaseAxisSpec>>>)[
+    node
+  ];
+  if (!byNode) {
+    throw new Error(`BUG: no rebase axis for node ${node}`);
+  }
+  return byNode;
+}
+
+// queue エントリを対象にする全 verb の遷移表 (3 軸)。
+// lifecycle は機械 A (status/phase)、watch は機械 B (review.watch)、rebase は
+// 機械 B' (review.rebase) の from→to。docs/state-cli-contract.md の「遷移表」節と
+// state.test.ts の T-D3/T-D8/T-D9 が突き合わせ、state-transitions.test.ts の matrix
+// テストが「表に無いノードからは conflict になる」ことを軸ごとに網羅で検査する。
+// approve だけはノードを持たない (新規追加) ので lifecycle の from は空。
+export const VERB_SPEC: Readonly<Record<string, VerbSpec>> = {
+  "approve": {
+    lifecycle: { from: [], to: "approved" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
   },
-  "set-worktree": { from: IN_PROGRESS_NODES, to: "unchanged" },
-  "set-executor": { from: IN_PROGRESS_NODES, to: "unchanged" },
-  "touch-executor": { from: IN_PROGRESS_NODES, to: "unchanged" },
-  "set-takeover": { from: IN_PROGRESS_NODES, to: "unchanged" },
+  "claim": {
+    lifecycle: { from: ["approved"], to: "in_progress/research" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
+  "set-gate": {
+    lifecycle: {
+      from: ["in_progress/research"],
+      to: "in_progress/research+plan",
+    },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
+  "set-worktree": {
+    lifecycle: { from: IN_PROGRESS_NODES, to: "unchanged" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
+  "set-executor": {
+    lifecycle: { from: IN_PROGRESS_NODES, to: "unchanged" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
+  "touch-executor": {
+    lifecycle: { from: IN_PROGRESS_NODES, to: "unchanged" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
+  "set-takeover": {
+    lifecycle: { from: IN_PROGRESS_NODES, to: "unchanged" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
   "phase-pass": {
-    from: SEQUENCE_PHASES.filter((p) =>
-      !Object.values(GATE_PHASE_SEQUENCES).some(
-        (seq) => seq[seq.length - 1] === p,
-      )
-    ).map((p) => `in_progress/${p}` as NodeKey),
-    to: "dynamic",
+    lifecycle: {
+      from: SEQUENCE_PHASES.filter((p) =>
+        !Object.values(GATE_PHASE_SEQUENCES).some(
+          (seq) => seq[seq.length - 1] === p,
+        )
+      ).map((p) => `in_progress/${p}` as NodeKey),
+      to: "dynamic",
+    },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
   },
   "phase-fail": {
-    from: VERIFIED_PHASES.map((p) => `in_progress/${p}` as NodeKey),
-    to: "unchanged",
+    lifecycle: {
+      from: VERIFIED_PHASES.map((p) => `in_progress/${p}` as NodeKey),
+      to: "unchanged",
+    },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
   },
-  "block": { from: IN_PROGRESS_NODES, to: "blocked" },
-  "dequeue": { from: IN_PROGRESS_NODES, to: "removed" },
+  "block": {
+    lifecycle: { from: IN_PROGRESS_NODES, to: "blocked" },
+    watch: { from: WATCH_NODES, to: "quiesce" },
+    rebase: R_UNTOUCHED,
+  },
+  "dequeue": {
+    lifecycle: { from: IN_PROGRESS_NODES, to: "removed" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
   "finalize-start": {
-    from: FINALIZE_FROM_PHASES.map((p) => `in_progress/${p}` as NodeKey),
-    to: "in_progress/finalize",
+    lifecycle: {
+      from: FINALIZE_FROM_PHASES.map((p) => `in_progress/${p}` as NodeKey),
+      to: "in_progress/finalize",
+    },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
   },
-  "in-review": { from: ["in_progress/finalize"], to: "in_review" },
-  "watch-init": { from: ["in_review"], to: "unchanged" },
-  "watch-set": { from: ["in_review"], to: "unchanged" },
-  "fix-pending": { from: ["in_review"], to: "unchanged" },
-  "fix-start": { from: ["in_review"], to: "dynamic" },
-  "fix-done": { from: ["in_progress/finalize"], to: "unchanged" },
-  "review-only": { from: ["in_review"], to: "unchanged" },
-  "answered-set": { from: ["in_review"], to: "unchanged" },
-  "rebase-record": { from: ["in_review"], to: "unchanged" },
-  "rebase-resolve-pending": { from: ["in_review"], to: "unchanged" },
-  // rebase_fix への入口は 2 つ: in_review からの復帰 (resolve_pending を消費) と、
-  // executor が finalize で REBASE-CONFLICT 停止した直後の直接進入 (review 不問)。
+  "in-review": {
+    lifecycle: { from: ["in_progress/finalize"], to: "in_review" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
+  "watch-init": {
+    lifecycle: { from: ["in_review"], to: "unchanged" },
+    watch: { from: WATCH_NODES, to: "watching" },
+    rebase: R_UNTOUCHED,
+  },
+  "watch-set": {
+    lifecycle: { from: ["in_review"], to: "unchanged" },
+    watch: { from: W_PRESENT, to: "dynamic" },
+    rebase: R_UNTOUCHED,
+  },
+  "fix-pending": {
+    lifecycle: { from: ["in_review"], to: "unchanged" },
+    watch: { from: W_PRESENT, to: "unchanged" },
+    rebase: R_UNTOUCHED,
+  },
+  // 前提 watching がラッチ: 上限分岐が stopped を書いた瞬間、自分の前提が偽になる。
+  "fix-start": {
+    lifecycle: { from: ["in_review"], to: "dynamic" },
+    watch: { from: ["watching"], to: "dynamic" },
+    rebase: R_UNTOUCHED,
+  },
+  "fix-done": {
+    lifecycle: { from: ["in_progress/finalize"], to: "unchanged" },
+    watch: { from: W_PRESENT, to: "unchanged" },
+    rebase: R_UNTOUCHED,
+  },
+  "review-only": {
+    lifecycle: { from: ["in_review"], to: "unchanged" },
+    watch: { from: W_PRESENT, to: "unchanged" },
+    rebase: R_UNTOUCHED,
+  },
+  "answered-set": {
+    lifecycle: { from: ["in_review"], to: "unchanged" },
+    watch: { from: W_PRESENT, to: "unchanged" },
+    rebase: R_UNTOUCHED,
+  },
+  "rebase-record": {
+    lifecycle: { from: ["in_review"], to: "unchanged" },
+    watch: W_UNTOUCHED,
+    rebase: { from: REBASE_NODES, to: "ensure" },
+  },
+  "rebase-resolve-pending": {
+    lifecycle: { from: ["in_review"], to: "unchanged" },
+    watch: W_UNTOUCHED,
+    rebase: { from: ["recorded", "pending"], to: "pending" },
+  },
+  // rebase_fix への入口は 2 つで、rebase 軸の前提が入口で異なる:
+  // in_review からの復帰は resolve_pending の消費 (pending 必須)、finalize からの
+  // 直接進入 (executor の REBASE-CONFLICT 停止) は rebase 記録を持たないのが普通。
   "rebase-start": {
-    from: ["in_review", "in_progress/finalize"],
-    to: "in_progress/rebase_fix",
+    lifecycle: {
+      from: ["in_review", "in_progress/finalize"],
+      to: "in_progress/rebase_fix",
+    },
+    watch: W_UNTOUCHED,
+    rebase: {
+      "in_review": { from: ["pending"], to: "defuse" },
+      "in_progress/finalize": { from: REBASE_NODES, to: "defuse" },
+    },
   },
-  "rebase-done": { from: ["in_review"], to: "unchanged" },
-  "rebase-give-up": { from: ["in_progress/rebase_fix"], to: "in_review" },
-  "recover-done": { from: ["in_review"], to: "done" },
-  "withdraw": { from: ["in_review"], to: "unchanged" },
-  "withdraw-remove": { from: ["in_review"], to: "removed" },
-  "withdraw-asked": { from: ["in_review"], to: "unchanged" },
-  "restore": { from: ["in_review", "done", "blocked"], to: "approved" },
+  "rebase-done": {
+    lifecycle: { from: ["in_review"], to: "unchanged" },
+    watch: W_UNTOUCHED,
+    rebase: { from: REBASE_NODES, to: "absent" },
+  },
+  "rebase-give-up": {
+    lifecycle: { from: ["in_progress/rebase_fix"], to: "in_review" },
+    watch: W_UNTOUCHED,
+    rebase: { from: ["recorded", "pending"], to: "defuse" },
+  },
+  "recover-done": {
+    lifecycle: { from: ["in_review"], to: "done" },
+    watch: { from: WATCH_NODES, to: "quiesce" },
+    rebase: R_UNTOUCHED,
+  },
+  "withdraw": {
+    lifecycle: { from: ["in_review"], to: "unchanged" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
+  "withdraw-remove": {
+    lifecycle: { from: ["in_review"], to: "removed" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
+  "withdraw-asked": {
+    lifecycle: { from: ["in_review"], to: "unchanged" },
+    watch: W_UNTOUCHED,
+    rebase: R_UNTOUCHED,
+  },
+  "restore": {
+    lifecycle: { from: ["in_review", "done", "blocked"], to: "approved" },
+    watch: { from: WATCH_NODES, to: "quiesce" },
+    rebase: R_UNTOUCHED,
+  },
 };
 
-// verb の遷移表に基づく前提チェック。表に無いノードからの呼び出しは conflict。
-function requireFromNode(
+// 機械 A だけのビュー (T-D3・T-D6 と行列テストの lifecycle 検査が使う)。
+export const VERB_LIFECYCLE: Readonly<Record<string, VerbLifecycleSpec>> =
+  Object.fromEntries(
+    Object.entries(VERB_SPEC).map(([verb, spec]) => [verb, spec.lifecycle]),
+  );
+
+// verb の遷移表に基づく前提チェック (3 軸すべて)。表に無いノードからの呼び出しは
+// 軸を問わず conflict。
+function requireVerbAxes(
   item: Record<string, unknown>,
   verb: string,
 ): NodeKey {
-  const spec = VERB_LIFECYCLE[verb];
+  const spec = VERB_SPEC[verb];
   if (!spec) {
-    throw new Error(`BUG: no VERB_LIFECYCLE entry for verb: ${verb}`);
+    throw new Error(`BUG: no VERB_SPEC entry for verb: ${verb}`);
   }
   const node = nodeKeyOf(item);
-  if (node === null || !spec.from.includes(node)) {
+  if (node === null || !spec.lifecycle.from.includes(node)) {
     const got = node ??
       `status=${String(item.status)} phase=${String(item.phase)}`;
     throw new CliError(
       "conflict",
-      `${verb}: node must be one of [${spec.from.join(", ")}], got ${got}`,
+      `${verb}: node must be one of [${
+        spec.lifecycle.from.join(", ")
+      }], got ${got}`,
+    );
+  }
+  const watchNode = watchNodeOf(item);
+  if (watchNode === null || !spec.watch.from.includes(watchNode)) {
+    throw new CliError(
+      "conflict",
+      `${verb}: watch must be one of [${spec.watch.from.join(", ")}], got ${
+        watchNode ?? "invalid"
+      }`,
+    );
+  }
+  const rebaseAxis = resolveRebaseAxis(spec.rebase, node);
+  const rebaseNode = rebaseNodeOf(item);
+  if (!rebaseAxis.from.includes(rebaseNode)) {
+    throw new CliError(
+      "conflict",
+      `${verb}: rebase must be one of [${
+        rebaseAxis.from.join(", ")
+      }], got ${rebaseNode}`,
     );
   }
   return node;
@@ -637,7 +874,7 @@ export function applyClaim(
   state: Record<string, unknown>,
   session: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "claim");
+  requireVerbAxes(item, "claim");
   const next = {
     ...atNode(item, "in_progress/research"),
     attempts: 0,
@@ -651,7 +888,7 @@ export function applySetGate(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
-  requireFromNode(item, "set-gate");
+  requireVerbAxes(item, "set-gate");
   requirePrecondition(
     item.gate === "full",
     `gate must be full, got ${String(item.gate)}`,
@@ -671,7 +908,7 @@ export function applySetWorktree(
   base: string,
   drop: boolean,
 ): Record<string, unknown> {
-  requireFromNode(item, "set-worktree");
+  requireVerbAxes(item, "set-worktree");
   const next = { ...item, worktree, base };
   let nextState = withReplacedItem(state, index, next);
   if (drop) {
@@ -699,7 +936,7 @@ export function applySetExecutor(
   session: string,
   nowIso: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "set-executor");
+  requireVerbAxes(item, "set-executor");
   const next = {
     ...item,
     executor,
@@ -716,7 +953,7 @@ export function applyTouchExecutor(
   sessionIfUnowned: string | undefined,
   nowIso: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "touch-executor");
+  requireVerbAxes(item, "touch-executor");
   requirePrecondition(item.executor != null, "executor must be set");
   let next: Record<string, unknown> = {
     ...item,
@@ -734,7 +971,7 @@ export function applySetTakeover(
   state: Record<string, unknown>,
   atValue: string | null,
 ): Record<string, unknown> {
-  requireFromNode(item, "set-takeover");
+  requireVerbAxes(item, "set-takeover");
   const next = { ...item, takeover_at: atValue };
   return withReplacedItem(state, index, next);
 }
@@ -750,7 +987,7 @@ export function applyPhasePass(
   from: string,
   to: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "phase-pass");
+  requireVerbAxes(item, "phase-pass");
   requirePrecondition(
     item.phase === from,
     `phase must be ${from}, got ${String(item.phase)}`,
@@ -777,7 +1014,7 @@ export function applyPhaseFail(
   state: Record<string, unknown>,
   phase: string,
 ): PhaseFailResult {
-  requireFromNode(item, "phase-fail");
+  requireVerbAxes(item, "phase-fail");
   requirePrecondition(
     item.phase === phase,
     `phase must be ${phase}, got ${String(item.phase)}`,
@@ -796,7 +1033,7 @@ export function applyBlock(
   state: Record<string, unknown>,
   reason: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "block");
+  requireVerbAxes(item, "block");
   const next = {
     ...withStoppedWatch(atNode(item, "blocked")),
     blocked_reason: reason,
@@ -810,7 +1047,7 @@ export function applyDequeue(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
-  requireFromNode(item, "dequeue");
+  requireVerbAxes(item, "dequeue");
   const q = queueArray(state).slice();
   q.splice(index, 1);
   return { ...state, queue: q };
@@ -822,7 +1059,7 @@ export function applyFinalizeStart(
   state: Record<string, unknown>,
   from: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "finalize-start");
+  requireVerbAxes(item, "finalize-start");
   requirePrecondition(
     item.phase === from,
     `phase must be ${from}, got ${String(item.phase)}`,
@@ -850,7 +1087,7 @@ export function applyInReview(
   state: Record<string, unknown>,
   args: InReviewArgs,
 ): Record<string, unknown> {
-  requireFromNode(item, "in-review");
+  requireVerbAxes(item, "in-review");
   let next: Record<string, unknown> = {
     ...atNode(item, "in_review"),
     attempts: 0,
@@ -886,7 +1123,7 @@ export function applyWatchInit(
   session: string,
   preserve: boolean,
 ): Record<string, unknown> {
-  requireFromNode(item, "watch-init");
+  requireVerbAxes(item, "watch-init");
   const review = getReview(item);
   requirePrecondition(
     review !== null && review.ref != null,
@@ -944,10 +1181,9 @@ export function applyWatchSet(
   // in_review に限る: 飛行中 (pr_fix / rebase_fix) のタスクの session を watch 側の
   // 機械が null に落とせてしまう継ぎ目を塞ぐ。approved / blocked / done の watch は
   // restore / block / recover-done がそれぞれ落とすので、ここに来る対象は無い。
-  requireFromNode(item, "watch-set");
+  requireVerbAxes(item, "watch-set");
   const review = getReview(item);
   const watch = getWatch(item);
-  requirePrecondition(watch !== null, "review.watch must be present");
   const nextWatch: Record<string, unknown> = { ...watch! };
   if ("proc" in fields) {
     nextWatch.proc = fields.proc;
@@ -984,10 +1220,9 @@ export function applyFixPending(
   pendingIds: string[],
   findings: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "fix-pending");
+  requireVerbAxes(item, "fix-pending");
   const review = getReview(item);
   const watch = getWatch(item);
-  requirePrecondition(watch !== null, "review.watch must be present");
   const nextWatch = {
     ...watch,
     fix_pending: true,
@@ -1014,13 +1249,12 @@ export function applyFixStart(
   session: string,
   reset: boolean,
 ): FixStartResult {
-  requireFromNode(item, "fix-start");
+  requireVerbAxes(item, "fix-start");
   const review = getReview(item);
   const watch = getWatch(item);
   requirePrecondition(
-    watch !== null && watch.fix_pending === true &&
-      watch.state === "watching",
-    "watch.fix_pending must be true and watch.state must be watching",
+    watch!.fix_pending === true,
+    "watch.fix_pending must be true",
   );
   const baseAttempts = reset
     ? 0
@@ -1062,10 +1296,9 @@ export function applyFixDone(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
-  requireFromNode(item, "fix-done");
+  requireVerbAxes(item, "fix-done");
   const review = getReview(item);
   const watch = getWatch(item);
-  requirePrecondition(watch !== null, "review.watch must be present");
   const pendingIds = Array.isArray(watch!.pending_ids)
     ? (watch!.pending_ids as string[])
     : [];
@@ -1091,10 +1324,9 @@ export function applyReviewOnly(
   state: Record<string, unknown>,
   items: ReviewOnlyEntry[],
 ): ReviewOnlyResult {
-  requireFromNode(item, "review-only");
+  requireVerbAxes(item, "review-only");
   const review = getReview(item);
   const watch = getWatch(item);
-  requirePrecondition(watch !== null, "review.watch must be present");
   const existing = getReviewOnlyList(watch);
   const byId = new Map(existing.map((e) => [e.id, e.updated_at]));
   const newOrChanged: string[] = [];
@@ -1130,10 +1362,9 @@ export function applyAnsweredSet(
   state: Record<string, unknown>,
   items: ReviewOnlyEntry[],
 ): ReviewOnlyResult {
-  requireFromNode(item, "answered-set");
+  requireVerbAxes(item, "answered-set");
   const review = getReview(item);
   const watch = getWatch(item);
-  requirePrecondition(watch !== null, "review.watch must be present");
   const existing = getAnsweredList(watch);
   const byId = new Map(existing.map((e) => [e.id, e.updated_at]));
   const newOrChanged: string[] = [];
@@ -1174,7 +1405,7 @@ export function applyRebaseRecord(
   report: string | undefined,
   nowIso: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "rebase-record");
+  requireVerbAxes(item, "rebase-record");
   const review = getReview(item);
   requirePrecondition(review !== null, "review must be present");
   const existingRebase = getRebase(item);
@@ -1197,10 +1428,9 @@ export function applyRebaseResolvePending(
   state: Record<string, unknown>,
   fromTip: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "rebase-resolve-pending");
+  requireVerbAxes(item, "rebase-resolve-pending");
   const review = getReview(item);
   const rebase = getRebase(item);
-  requirePrecondition(rebase !== null, "review.rebase must be present");
   const nextRebase = {
     ...rebase,
     resolve_pending: true,
@@ -1222,15 +1452,9 @@ export function applyRebaseStart(
   state: Record<string, unknown>,
   session: string,
 ): Record<string, unknown> {
-  const node = requireFromNode(item, "rebase-start");
+  requireVerbAxes(item, "rebase-start");
   const review = getReview(item);
   const rebase = getRebase(item);
-  if (node === "in_review") {
-    requirePrecondition(
-      rebase !== null && rebase.resolve_pending === true,
-      "review.rebase.resolve_pending must be true",
-    );
-  }
   let next: Record<string, unknown> = {
     ...atNode(item, "in_progress/rebase_fix"),
     attempts: 0,
@@ -1256,7 +1480,7 @@ export function applyRebaseDone(
   state: Record<string, unknown>,
   tip: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "rebase-done");
+  requireVerbAxes(item, "rebase-done");
   const review = getReview(item);
   requirePrecondition(review !== null, "review must be present");
   const nextReview: Record<string, unknown> = { ...review, tip };
@@ -1271,13 +1495,9 @@ export function applyRebaseGiveUp(
   state: Record<string, unknown>,
   blockedOnto: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "rebase-give-up");
+  requireVerbAxes(item, "rebase-give-up");
   const review = getReview(item);
   const rebase = getRebase(item);
-  requirePrecondition(
-    review !== null && rebase !== null,
-    "review.rebase must be present",
-  );
   const nextRebase = {
     ...rebase,
     reason: "conflict",
@@ -1306,7 +1526,7 @@ export function applyRecoverDone(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
-  requireFromNode(item, "recover-done");
+  requireVerbAxes(item, "recover-done");
   const review = getReview(item);
   requirePrecondition(
     review !== null && review.tip != null,
@@ -1324,7 +1544,7 @@ export function applyWithdraw(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
-  requireFromNode(item, "withdraw");
+  requireVerbAxes(item, "withdraw");
   const review = getReview(item);
   requirePrecondition(review !== null, "review must be present");
   const next = { ...item, review: { ...review, withdrawn: true } };
@@ -1338,7 +1558,7 @@ export function applyWithdrawRemove(
   reason: string,
   nowIso: string,
 ): Record<string, unknown> {
-  requireFromNode(item, "withdraw-remove");
+  requireVerbAxes(item, "withdraw-remove");
   const review = getReview(item);
   requirePrecondition(
     review !== null && review.withdrawn === true && item.worktree != null &&
@@ -1368,7 +1588,7 @@ export function applyWithdrawAsked(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
-  requireFromNode(item, "withdraw-asked");
+  requireVerbAxes(item, "withdraw-asked");
   const review = getReview(item);
   requirePrecondition(
     review !== null && review.withdrawn === true,
@@ -1476,7 +1696,7 @@ export function applyRestore(
   if (rIndex === -1) {
     throw new CliError("missing", `id not found in relisted: ${id}`);
   }
-  requireFromNode(item, "restore");
+  requireVerbAxes(item, "restore");
   // gate も初期値 (full) に戻す — 残すと light のタスクが claim 後に
   // (in_progress/research, gate: light) という死にノードに着地する (light の
   // フェーズ列に research の辺が無く、set-gate も gate!=full で拒否するため)。

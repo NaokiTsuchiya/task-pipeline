@@ -56,14 +56,20 @@ stdout に必ず **1 行の JSON**。
 - 前提違反は `conflict` (対象は存在する) か `missing` (`--id` の指す対象が存在しない) のいずれか
   で失敗し、**state.json は一切書き換わらない** (エラー時共通の契約がそのまま適用される)。
 
-## 遷移表 (機械 A: status/phase)
+## 遷移表 (機械 A × B × B')
 
-状態機械のノードは `(status, phase)` の合法な組だけで、**`phase` が非 null なのは
+状態は 3 つの機械の直積で持つ: **機械 A** はタスクのライフサイクル (`status`/`phase`)、
+**機械 B** は PR 追従 (`review.watch`)、**機械 B'** は載せ直し (`review.rebase`)。
+verb ごとの遷移は 3 軸それぞれの from→to として宣言され (`state-transitions.ts` の
+`VERB_SPEC`)、前提チェックは 3 軸すべてに掛かる — 「A のノードを動かさない verb」の
+多くは B / B' の軸を動かす辺である。この節は実装の転写であり、`state.test.ts` の
+T-D7 / T-D4 / T-D3 / T-D8 / T-D9 が一致を検査する (どちらかだけ直すとテストが落ちる)。
+
+### 機械 A (status/phase)
+
+機械 A のノードは `(status, phase)` の合法な組だけで、**`phase` が非 null なのは
 `status` が `in_progress` のとき、かつそのときに限る**。`in_progress` のノードは
-`in_progress/<phase>` と表記する。この節は実装 (`state-transitions.ts` の
-`LIFECYCLE_NODES` / `GATE_PHASE_SEQUENCES` / `VERB_LIFECYCLE`) の転写であり、
-`state.test.ts` の T-D7 / T-D4 / T-D3 が一致を検査する (どちらかだけ直すとテストが
-落ちる)。
+`in_progress/<phase>` と表記する。
 
 ノードの全一覧 (現在 4 + 8 = 12。意味の列は散文で、照合されるのはノード名だけ):
 
@@ -128,10 +134,62 @@ in_progress の全フェーズノードを指す。to の「変更なし」は�
 | `withdraw-asked` | `in_review` | (変更なし) |
 | `restore` | `in_review`, `done`, `blocked` | `approved` |
 
-この表の from に無いノードから呼ぶと `conflict` になる。from にあっても、各 verb 固有の
-補助前提 (`review.watch` の存在や `fix_pending` など。下記 verb 一覧) を満たさなければ
+この表の from に無いノードから呼ぶと `conflict` になる。from にあっても、他の軸
+(下記 B / B') や verb 固有の補助前提 (`fix_pending` など。下記 verb 一覧) を満たさなければ
 同じく `conflict`。書き込み後には全 verb 共通で「到達不能ノードを書かない」「`review.watch`
 は `review.ref` なしに存在しない」の不変条件が検査され、違反は `schema` で拒否される。
+
+### 機械 B (review.watch)
+
+watch の軸のノードは 3 つ:
+
+| ノード | 意味 |
+|---|---|
+| `absent` | `review.watch` が無い (追従対象になったことがない、または新周回前) |
+| `watching` | 追従中 (watch プロセスと観測がこのタスクを見る) |
+| `stopped` | 停止 (追従上限・エラー 3 連続・取り下げ・回収・静止。人が戻すまで再開しない) |
+
+verb ごとの watch の from→to。**この表に無い verb は watch に一切触れない**
+(untouched — 書き換えはフレームテストが禁じ、前提としては任意のノードを受ける)。
+to の「変えない」は内部フィールドは書くが軸は動かさない、「静止」は present なら
+`stopped`・`absent` なら `absent`、「分岐」はフラグ・状態で行き先が分かれる:
+
+| verb | watch from | watch to |
+|---|---|---|
+| `watch-init` | (任意) | `watching` |
+| `watch-set` | `watching`, `stopped` | (分岐) |
+| `fix-pending` | `watching`, `stopped` | (変えない) |
+| `fix-start` | `watching` | (分岐) |
+| `fix-done` | `watching`, `stopped` | (変えない) |
+| `review-only` | `watching`, `stopped` | (変えない) |
+| `answered-set` | `watching`, `stopped` | (変えない) |
+| `block` | (任意) | (静止) |
+| `recover-done` | (任意) | (静止) |
+| `restore` | (任意) | (静止) |
+
+### 機械 B' (review.rebase)
+
+rebase の軸のノードは 3 つ:
+
+| ノード | 意味 |
+|---|---|
+| `absent` | `review.rebase` が無い (載せ直しの控えが無い通常状態) |
+| `recorded` | 控えのみ (`rebase-record` が書いた blocked_onto / トリアージ結果) |
+| `pending` | `resolve_pending` が真 (解決サイクルの着手待ち) |
+
+verb ごとの rebase の from→to。**この表に無い verb は rebase に一切触れない**。
+`rebase-start` は機械 A の入口で前提が変わるため 2 行に分ける。to の「確保」は
+無ければ `recorded` を作る (有れば軸は不変)、「解除」は有れば `resolve_pending` を
+落として `recorded` に (無ければ `absent` のまま):
+
+| verb | rebase from | rebase to |
+|---|---|---|
+| `rebase-record` | (任意) | (確保) |
+| `rebase-resolve-pending` | `recorded`, `pending` | `pending` |
+| `rebase-start` (`in_review` から) | `pending` | (解除) |
+| `rebase-start` (`in_progress/finalize` から) | (任意) | (解除) |
+| `rebase-done` | (任意) | `absent` |
+| `rebase-give-up` | `recorded`, `pending` | (解除) |
 
 ## verb 一覧
 

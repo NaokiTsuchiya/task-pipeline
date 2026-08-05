@@ -32,7 +32,11 @@ import {
   GATE_VALUES,
   LIFECYCLE_NODES,
   PHASE_VALUES,
+  REBASE_NODES,
+  resolveRebaseAxis,
   VERB_LIFECYCLE,
+  VERB_SPEC,
+  WATCH_NODES,
 } from "./state-transitions.ts";
 
 const SCRIPT_URL = new URL("./state.ts", import.meta.url);
@@ -5368,6 +5372,101 @@ Deno.test("T-D4: contract フェーズ列 table matches GATE_PHASE_SEQUENCES", a
       `sequence mismatch for gate ${gate}`,
     );
   }
+});
+
+function parseAxisTo(cell: string): string {
+  if (cell.includes("変えない")) return "unchanged";
+  if (cell.includes("静止")) return "quiesce";
+  if (cell.includes("分岐")) return "dynamic";
+  if (cell.includes("確保")) return "ensure";
+  if (cell.includes("解除")) return "defuse";
+  return cell.replaceAll("`", "");
+}
+
+function parseAxisFrom(cell: string, all: readonly string[]): string[] {
+  if (cell.includes("任意")) return [...all];
+  return [...cell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+}
+
+Deno.test("T-D8: contract 機械 B (watch) table matches VERB_SPEC watch axes", async () => {
+  const doc = await Deno.readTextFile(CONTRACT_DOC);
+  const rows = parseMdTable(doc, ["verb", "watch from", "watch to"]);
+  const docSpec = new Map<string, { from: string[]; to: string }>();
+  for (const [verbCell, fromCell, toCell] of rows) {
+    docSpec.set(verbCell.replaceAll("`", ""), {
+      from: parseAxisFrom(fromCell, WATCH_NODES),
+      to: parseAxisTo(toCell),
+    });
+  }
+  const touching = Object.entries(VERB_SPEC)
+    .filter(([, s]) => s.watch.to !== "untouched")
+    .map(([v]) => v);
+  assertEquals(
+    [...docSpec.keys()].sort(),
+    touching.sort(),
+    "watch 表の verb 集合が「watch に触れる verb」と一致しない",
+  );
+  for (const verb of touching) {
+    const d = docSpec.get(verb)!;
+    const spec = VERB_SPEC[verb].watch;
+    assertEquals(
+      [...d.from].sort(),
+      [...spec.from].sort(),
+      `watch from mismatch for ${verb}`,
+    );
+    assertEquals(d.to, spec.to, `watch to mismatch for ${verb}`);
+  }
+});
+
+Deno.test("T-D9: contract 機械 B' (rebase) table matches VERB_SPEC rebase axes", async () => {
+  const doc = await Deno.readTextFile(CONTRACT_DOC);
+  const rows = parseMdTable(doc, ["verb", "rebase from", "rebase to"]);
+  const docRows: {
+    verb: string;
+    entry: string | null;
+    from: string[];
+    to: string;
+  }[] = [];
+  for (const [verbCell, fromCell, toCell] of rows) {
+    const tokens = [...verbCell.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
+    docRows.push({
+      verb: tokens[0],
+      entry: tokens[1] ?? null,
+      from: parseAxisFrom(fromCell, REBASE_NODES),
+      to: parseAxisTo(toCell),
+    });
+  }
+  const expected: {
+    verb: string;
+    entry: string | null;
+    from: string[];
+    to: string;
+  }[] = [];
+  for (const [verb, spec] of Object.entries(VERB_SPEC)) {
+    if ("from" in spec.rebase) {
+      const axis = resolveRebaseAxis(spec.rebase, spec.lifecycle.from[0]);
+      if (axis.to === "untouched") continue;
+      expected.push({ verb, entry: null, from: [...axis.from], to: axis.to });
+    } else {
+      for (const node of spec.lifecycle.from) {
+        const axis = resolveRebaseAxis(spec.rebase, node);
+        expected.push({
+          verb,
+          entry: node,
+          from: [...axis.from],
+          to: axis.to,
+        });
+      }
+    }
+  }
+  const norm = (
+    r: { verb: string; entry: string | null; from: string[]; to: string },
+  ) => JSON.stringify([r.verb, r.entry, [...r.from].sort(), r.to]);
+  assertEquals(
+    docRows.map(norm).sort(),
+    expected.map(norm).sort(),
+    "rebase 表が VERB_SPEC の rebase 軸と一致しない",
+  );
 });
 
 Deno.test("T-D7: contract ノード一覧 matches LIFECYCLE_NODES", async () => {
