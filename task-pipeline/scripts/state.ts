@@ -29,9 +29,11 @@
 //     task-pipeline/scripts/state.test.ts
 //
 // 実行時の外部依存はゼロ (npm:/jsr: 参照なし)。state-schema.ts の checkState と、
-// state-transitions.ts (42 verb の事前条件チェック・状態オブジェクトの書き換えを持つ
+// state-transitions.ts (全 43 verb の事前条件チェック・状態オブジェクトの書き換えを持つ
 // 純粋関数群 — Deno 由来の API を一切呼ばない) だけを import する。lock・原子的書き込み・
 // heartbeat・権限・CLI dispatch・終了コードへの変換はこのファイルに残る。
+// status / phase / gate などの語彙 (enum) も state-transitions.ts が単一ソースで、
+// このファイルはフラグ検証にそれを import するだけ (独自の列挙を持たない)。
 
 import { checkState } from "./state-schema.ts";
 import {
@@ -74,16 +76,25 @@ import {
   applyWithdraw,
   applyWithdrawAsked,
   applyWithdrawRemove,
+  assertItemInvariants,
+  CI_VALUES,
   CliError,
   type ExitCodeName,
+  FINALIZE_FROM_PHASES,
   finalizeState,
   get as transitionsGet,
   isRecord,
   isSessionAlive,
   isSessionStale,
+  PHASE_VALUES,
+  REBASE_KIND_VALUES,
+  REBASE_REASON_VALUES,
   requireQueueItem,
   type ReviewOnlyEntry,
+  STALLED_VALUES,
   validate as transitionsValidate,
+  VERIFIED_PHASES,
+  WATCH_STATE_VALUES,
   type WatchSetFields,
 } from "./state-transitions.ts";
 
@@ -435,6 +446,14 @@ async function withQueueLock(
     }
     const { index, item } = requireQueueItem(current, id);
     const nextState = mutate(item, index, current);
+    // 書き込み前の不変条件検査: 対象エントリが (残っていれば) 到達可能なノードで
+    // あることを保証する。verb 実装のバグが壊れた組を書く前に schema エラーで止める
+    // (applyStateChange の事後スキーマ検証と同じ安全網の、状態機械版)。
+    const nextQueue = Array.isArray(nextState.queue)
+      ? (nextState.queue as Record<string, unknown>[])
+      : [];
+    const nextItem = nextQueue.find((it) => it.id === id);
+    if (nextItem !== undefined) assertItemInvariants(nextItem);
     return finalizeState(nextState, nowIso());
   });
   return result.value;
@@ -504,17 +523,6 @@ function boolFlag(flags: Map<string, string>, name: string): boolean {
 function nullableFlag(raw: string): string | null {
   return raw === "null" ? null : raw;
 }
-
-const PHASE_VALUES = [
-  "research",
-  "research+plan",
-  "plan",
-  "implement",
-  "report",
-  "finalize",
-  "pr_fix",
-  "rebase_fix",
-] as const;
 
 // ---------------------------------------------------------------------------
 // init 専用: <git common dir>/info/exclude への冪等な追記
@@ -964,19 +972,41 @@ async function cmdApprove(
   return { ok: true, id };
 }
 
+// claim / set-gate の成功ペイロードの status/phase/gate は、書き込んだ state から読み戻す
+// (リテラルの複製を持たない — 初期フェーズや統合フェーズ名を変えたとき、ここが古いまま
+// 残る経路を消す)。
+function payloadFields(
+  state: Record<string, unknown>,
+  id: string,
+  keys: readonly string[],
+): Record<string, unknown> {
+  const queue = Array.isArray(state.queue)
+    ? (state.queue as Record<string, unknown>[])
+    : [];
+  const item = queue.find((it) => it.id === id) ?? {};
+  const out: Record<string, unknown> = {};
+  for (const k of keys) out[k] = item[k];
+  return out;
+}
+
 async function cmdClaim(
   stateDir: string,
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const session = requireFlag(flags, "session");
-  await withQueueLock(
+  const next = await withQueueLock(
     stateDir,
     id,
     lockOpts(flags),
     (item, index, state) => applyClaim(item, index, state, session),
   );
-  return { ok: true, id, status: "in_progress", phase: "research", session };
+  return {
+    ok: true,
+    id,
+    ...payloadFields(next, id, ["status", "phase"]),
+    session,
+  };
 }
 
 async function cmdSetGate(
@@ -984,13 +1014,13 @@ async function cmdSetGate(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  await withQueueLock(
+  const next = await withQueueLock(
     stateDir,
     id,
     lockOpts(flags),
     (item, index, state) => applySetGate(item, index, state),
   );
-  return { ok: true, id, gate: "light", phase: "research+plan" };
+  return { ok: true, id, ...payloadFields(next, id, ["gate", "phase"]) };
 }
 
 async function cmdSetWorktree(
@@ -1085,7 +1115,8 @@ async function cmdPhaseFail(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  const phase = requireEnumFlag(flags, "phase", PHASE_VALUES);
+  // 検証ゲートを持つフェーズだけを受ける (finalize は検証対象外なので usage)。
+  const phase = requireEnumFlag(flags, "phase", VERIFIED_PHASES);
   let attempts = 0;
   await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
     const result = applyPhaseFail(item, index, state, phase);
@@ -1129,14 +1160,9 @@ async function cmdFinalizeStart(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
-  // "rebase_fix" は state-cli-verbs では対象外だったが、SKILL.md の設計 (rebase_fix PASS も
-  // report/pr_fix と同じく finalize を経て in-review へ戻る) には含まれる。ここに含めないと、
-  // 載せ直しの衝突解消 (解決サイクル) が PASS しても finalize へ進めなくなる。
-  const from = requireEnumFlag(flags, "from", [
-    "report",
-    "pr_fix",
-    "rebase_fix",
-  ]);
+  // 受理値は導出 (各フェーズ列の最終フェーズ + 仕上げフェーズ)。フェーズ列を変えると
+  // ここも自動で追従する。
+  const from = requireEnumFlag(flags, "from", FINALIZE_FROM_PHASES);
   await withQueueLock(
     stateDir,
     id,
@@ -1240,10 +1266,7 @@ async function cmdWatchSet(
   const hasCi = flags.has("ci");
   if (hasCi) {
     const raw = flags.get("ci")!;
-    if (
-      raw !== "null" &&
-      !["passing", "failing", "pending", "none"].includes(raw)
-    ) {
+    if (raw !== "null" && !(CI_VALUES as readonly string[]).includes(raw)) {
       throw new CliError("usage", `invalid --ci: ${raw}`);
     }
     fields.ci = raw === "null" ? null : raw;
@@ -1265,7 +1288,7 @@ async function cmdWatchSet(
   const hasState = flags.has("state");
   if (hasState) {
     const stateVal = flags.get("state")!;
-    if (!["watching", "stopped"].includes(stateVal)) {
+    if (!(WATCH_STATE_VALUES as readonly string[]).includes(stateVal)) {
       throw new CliError("usage", `invalid --state: ${stateVal}`);
     }
     fields.state = stateVal as "watching" | "stopped";
@@ -1438,25 +1461,17 @@ async function cmdAnsweredSet(
 
 // --- 載せ直し ---------------------------------------------------------------
 
-const REBASE_REASONS = ["dirty", "diverged", "conflict", "push"] as const;
-const REBASE_KINDS = [
-  "superseded",
-  "overlap",
-  "adjacent",
-  "structural",
-  "other",
-] as const;
-
 async function cmdRebaseRecord(
   stateDir: string,
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const blockedOnto = requireFlag(flags, "blocked-onto");
-  const reason = requireEnumFlag(flags, "reason", REBASE_REASONS);
+  const reason = requireEnumFlag(flags, "reason", REBASE_REASON_VALUES);
   const kind = flags.get("kind");
   if (
-    kind !== undefined && !(REBASE_KINDS as readonly string[]).includes(kind)
+    kind !== undefined &&
+    !(REBASE_KIND_VALUES as readonly string[]).includes(kind)
   ) {
     throw new CliError("usage", `invalid --kind: ${kind}`);
   }
@@ -1724,11 +1739,7 @@ async function cmdStalledSet(
   stateDir: string,
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
-  const value = requireEnumFlag(flags, "value", [
-    "depleted",
-    "max_open",
-    "null",
-  ]);
+  const value = requireEnumFlag(flags, "value", [...STALLED_VALUES, "null"]);
   const bump = boolFlag(flags, "bump");
   await withExistingStateLock(
     stateDir,

@@ -19,10 +19,11 @@ state_test_ts=$repo_dir/task-pipeline/scripts/state.test.ts
 # 対象に含める。
 state_ownership_ts=$repo_dir/task-pipeline/scripts/state-ownership.ts
 state_ownership_test_ts=$repo_dir/task-pipeline/scripts/state-ownership.test.ts
-# state.ts から切り出した42 verb の遷移純粋関数群。専用のテストファイルは持たない
-# (state.test.ts は state.ts をサブプロセス起動して検証する既存の安全網のまま変更しない)
-# ため、fmt/lint/check の対象にだけ加える。
+# state.ts から切り出した全 43 verb の遷移純粋関数群と、その宣言データ (語彙・遷移表) を
+# 直接 import で検査する専用テスト (T-ALIGN / T-MX / T-FRAME)。スキーマの読み取りだけ
+# なので --allow-read で足りる。
 state_transitions_ts=$repo_dir/task-pipeline/scripts/state-transitions.ts
+state_transitions_test_ts=$repo_dir/task-pipeline/scripts/state-transitions.test.ts
 
 if ! command -v deno >/dev/null 2>&1; then
     printf 'SKIP  state-cli tests — deno not found\n'
@@ -34,6 +35,7 @@ fi
 [ -f "$state_ownership_ts" ] || { printf 'state-ownership.ts not found: %s\n' "$state_ownership_ts" >&2; exit 1; }
 [ -f "$state_ownership_test_ts" ] || { printf 'state-ownership.test.ts not found: %s\n' "$state_ownership_test_ts" >&2; exit 1; }
 [ -f "$state_transitions_ts" ] || { printf 'state-transitions.ts not found: %s\n' "$state_transitions_ts" >&2; exit 1; }
+[ -f "$state_transitions_test_ts" ] || { printf 'state-transitions.test.ts not found: %s\n' "$state_transitions_test_ts" >&2; exit 1; }
 
 fail=0
 
@@ -49,10 +51,10 @@ run_step() {
     fi
 }
 
-run_step "deno fmt --check" deno fmt --check "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts" "$state_transitions_ts"
-run_step "deno lint" deno lint "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts" "$state_transitions_ts"
-run_step "deno check" deno check "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts" "$state_transitions_ts"
-run_step "deno test" deno test --allow-read --allow-write --allow-env --allow-run "$state_test_ts" "$state_ownership_test_ts"
+run_step "deno fmt --check" deno fmt --check "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts" "$state_transitions_ts" "$state_transitions_test_ts"
+run_step "deno lint" deno lint "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts" "$state_transitions_ts" "$state_transitions_test_ts"
+run_step "deno check" deno check "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts" "$state_transitions_ts" "$state_transitions_test_ts"
+run_step "deno test" deno test --allow-read --allow-write --allow-env --allow-run "$state_test_ts" "$state_ownership_test_ts" "$state_transitions_test_ts"
 
 printf '\n%s\n' "----------------------------------------"
 if [ "$fail" -eq 0 ]; then

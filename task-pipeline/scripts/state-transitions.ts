@@ -1,12 +1,18 @@
 // task-pipeline/scripts/state-transitions.ts
 //
-// task-pipeline/docs/state-cli-contract.md が定める42 verb のうち、各 verb の
+// task-pipeline/docs/state-cli-contract.md が定める全43 verb のうち、各 verb の
 // 「事前条件チェックと状態オブジェクトの書き換え」だけを切り出した純粋関数群。
 // ロック・原子的書き込み・heartbeat・権限・CLI dispatch・終了コードへの変換は
 // state.ts に残る。ここは Deno 由来の API 呼び出しを一切行わない (state-ownership.ts /
 // state-schema.ts と同型の設計) — 現在時刻が要る箇所は、呼び出し元 (state.ts) が
 // nowIso()/nowMs() (STATE_CLI_TEST_NOW_MS によるテスト決定性込み) で計算した値を
 // 引数として受け取る。ファイルI/O・排他は一切行わない。
+//
+// 状態機械の語彙 (status/phase/gate のトークン集合)・フェーズ順・verb ごとの合法な
+// (status, phase) 遷移は、このファイル冒頭の宣言データ (GATE_PHASE_SEQUENCES /
+// VERB_LIFECYCLE) が唯一の真実である。散文 (SKILL.md / state-cli-contract.md) と
+// スキーマ (state.schema.json) は、テスト (state-transitions.test.ts の整合テストと
+// state.test.ts の T-D 系) がこの宣言データと突き合わせる。
 //
 // verb → 実装 (state-cli-contract.md の `### ` 見出しと対応。全43件):
 //   `init`                     → applyInit
@@ -54,8 +60,8 @@
 //   `stalled-set`              → applyStalledSet
 //
 // テスト: state.test.ts / state-ownership.test.ts はサブプロセス経由で state.ts を検証する
-// 既存の安全網のまま変更しない (このタスクの要求)。このファイル専用の直接importテストは
-// 後続タスクの範囲。
+// 既存の安全網。このファイルの宣言データと実装の整合は state-transitions.test.ts
+// (T-ALIGN / T-MX / T-FRAME) が直接 import で検査する。
 
 import { checkState } from "./state-schema.ts";
 
@@ -78,6 +84,270 @@ export type ExitCodeName =
 export class CliError extends Error {
   constructor(public readonly code: ExitCodeName, message: string) {
     super(message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 状態機械の語彙 (単一ソース)
+//
+// status / phase / gate / watch.state / watch.ci / rebase.reason / rebase.kind /
+// stalled のトークン集合はここだけで定義する。state.ts の CLI フラグ検証はここを
+// import し、state.schema.json の enum とは state-transitions.test.ts の整合テストが
+// 突き合わせる (どちらかだけ直すとテストが落ちる)。
+// ---------------------------------------------------------------------------
+
+export const STATUS_VALUES = [
+  "approved",
+  "in_progress",
+  "in_review",
+  "done",
+  "blocked",
+] as const;
+export type Status = (typeof STATUS_VALUES)[number];
+
+// gate ごとの検証フェーズ列。phase-pass が通せる辺は「この列の隣接ペア」だけで、
+// フェーズ順の正はこの宣言 (SKILL.md の記述はこの転写で、T-D4 が突き合わせる)。
+export const GATE_PHASE_SEQUENCES = {
+  full: ["research", "plan", "implement", "report"],
+  light: ["research+plan", "implement", "report"],
+} as const;
+export type Gate = keyof typeof GATE_PHASE_SEQUENCES;
+export const GATE_VALUES = Object.keys(GATE_PHASE_SEQUENCES) as Gate[];
+
+type SequencePhase = (typeof GATE_PHASE_SEQUENCES)[Gate][number];
+
+// finalize は検証ゲートを持たない後処理フェーズ、pr_fix / rebase_fix は in_review から
+// (rebase_fix は finalize からも) 入る仕上げフェーズ。フェーズ列への挿入位置は
+// VERB_LIFECYCLE (fix-start / rebase-start / finalize-start) が定める。
+export const FINALIZE_PHASE = "finalize" as const;
+export const FIX_PHASES = ["pr_fix", "rebase_fix"] as const;
+export type Phase =
+  | SequencePhase
+  | typeof FINALIZE_PHASE
+  | (typeof FIX_PHASES)[number];
+
+const ALL_SEQUENCES: ReadonlyArray<readonly SequencePhase[]> = Object.values(
+  GATE_PHASE_SEQUENCES,
+);
+
+// 検証フェーズ列の全トークン (full → light の順で重複除去)。
+export const SEQUENCE_PHASES: readonly SequencePhase[] = [
+  ...new Set<SequencePhase>(ALL_SEQUENCES.flat()),
+];
+
+// phase の全トークン。schema の enum・CLI の受理値はこの導出値に追従する
+// (フェーズを 1 つ足すときは GATE_PHASE_SEQUENCES か FIX_PHASES に足せば全部に伝わる)。
+export const PHASE_VALUES: readonly Phase[] = [
+  ...SEQUENCE_PHASES,
+  FINALIZE_PHASE,
+  ...FIX_PHASES,
+];
+
+// 検証ゲートを持つフェーズ (phase-fail --phase の受理値)。finalize だけが対象外。
+export const VERIFIED_PHASES: readonly Phase[] = [
+  ...SEQUENCE_PHASES,
+  ...FIX_PHASES,
+];
+
+// finalize-start --from の受理値: 各フェーズ列の最終フェーズと仕上げフェーズ。
+export const FINALIZE_FROM_PHASES: readonly Phase[] = [
+  ...new Set<Phase>([
+    ...ALL_SEQUENCES.map((seq) => seq[seq.length - 1]),
+    ...FIX_PHASES,
+  ]),
+];
+
+export const WATCH_STATE_VALUES = ["watching", "stopped"] as const;
+export const CI_VALUES = ["passing", "failing", "pending", "none"] as const;
+export const REBASE_REASON_VALUES = [
+  "dirty",
+  "diverged",
+  "conflict",
+  "push",
+] as const;
+export const REBASE_KIND_VALUES = [
+  "superseded",
+  "overlap",
+  "adjacent",
+  "structural",
+  "other",
+] as const;
+export const STALLED_VALUES = ["depleted", "max_open"] as const;
+
+// phase-pass が通せる辺か (gate のフェーズ列の隣接ペアのみ。自己辺・逆行・飛び越し・
+// gate 違いの辺はすべて偽)。
+export function isPhasePassEdge(
+  gate: unknown,
+  from: string,
+  to: string,
+): boolean {
+  if (typeof gate !== "string" || !(gate in GATE_PHASE_SEQUENCES)) return false;
+  const seq: readonly string[] = GATE_PHASE_SEQUENCES[gate as Gate];
+  const i = seq.indexOf(from);
+  return i !== -1 && seq[i + 1] === to;
+}
+
+// ---------------------------------------------------------------------------
+// ライフサイクルノード (機械 A) と verb ごとの遷移表
+//
+// ノードは (status, phase) の合法な組だけ。phase が非 null なのは in_progress のとき、
+// かつそのときに限る — スキーマ上表現可能な 45 通りのうち、この 12 通り以外は
+// 「誰も作らない」ではなく「atNode では表現できない」。
+// ---------------------------------------------------------------------------
+
+export type NodeKey =
+  | Exclude<Status, "in_progress">
+  | `in_progress/${Phase}`;
+
+export const IN_PROGRESS_NODES: readonly NodeKey[] = PHASE_VALUES.map(
+  (p) => `in_progress/${p}` as NodeKey,
+);
+
+export const LIFECYCLE_NODES: readonly NodeKey[] = [
+  "approved",
+  "in_review",
+  "done",
+  "blocked",
+  ...IN_PROGRESS_NODES,
+];
+
+// item の現在ノード。合法なノードでなければ null (前提チェックでは conflict に、
+// 書き込み後アサーションでは schema エラーになる)。
+export function nodeKeyOf(item: Record<string, unknown>): NodeKey | null {
+  const status = item.status;
+  const phase = item.phase;
+  if (typeof status !== "string") return null;
+  if (status === "in_progress") {
+    if (typeof phase !== "string") return null;
+    if (!(PHASE_VALUES as readonly string[]).includes(phase)) return null;
+    return `in_progress/${phase as Phase}`;
+  }
+  if (!(STATUS_VALUES as readonly string[]).includes(status)) return null;
+  if (phase !== null) return null;
+  return status as NodeKey;
+}
+
+// status と phase を必ずペアで書く。片方だけ書き換えて到達不能な組を作る経路を
+// 型の上で塞ぐ (NodeKey に無い組はここに渡せない)。
+function atNode(
+  item: Record<string, unknown>,
+  node: NodeKey,
+): Record<string, unknown> {
+  const prefix = "in_progress/";
+  if (node.startsWith(prefix)) {
+    return { ...item, status: "in_progress", phase: node.slice(prefix.length) };
+  }
+  return { ...item, status: node, phase: null };
+}
+
+export interface VerbLifecycleSpec {
+  // この verb が発火を許すノード集合 (requireFromNode が参照する唯一の前提)。
+  from: readonly NodeKey[];
+  // 機械 A 上の効果。"unchanged" = ノードを変えない。"dynamic" = 引数・状態で分岐
+  // (phase-pass / finalize-start / fix-start)。"removed" = queue から消える。
+  to: NodeKey | "unchanged" | "dynamic" | "removed";
+}
+
+// queue エントリを対象にする全 verb の (status, phase) 遷移表。
+// docs/state-cli-contract.md の「遷移表」節と state.test.ts の T-D3 が突き合わせ、
+// state-transitions.test.ts の matrix テストが「表に無いノードからは conflict になる」
+// ことを全ノード×全 verb で検査する。approve だけはノードを持たない (新規追加) ので
+// from は空。
+export const VERB_LIFECYCLE: Readonly<Record<string, VerbLifecycleSpec>> = {
+  "approve": { from: [], to: "approved" },
+  "claim": { from: ["approved"], to: "in_progress/research" },
+  "set-gate": {
+    from: ["in_progress/research"],
+    to: "in_progress/research+plan",
+  },
+  "set-worktree": { from: IN_PROGRESS_NODES, to: "unchanged" },
+  "set-executor": { from: IN_PROGRESS_NODES, to: "unchanged" },
+  "touch-executor": { from: IN_PROGRESS_NODES, to: "unchanged" },
+  "set-takeover": { from: IN_PROGRESS_NODES, to: "unchanged" },
+  "phase-pass": {
+    from: SEQUENCE_PHASES.filter((p) =>
+      !Object.values(GATE_PHASE_SEQUENCES).some(
+        (seq) => seq[seq.length - 1] === p,
+      )
+    ).map((p) => `in_progress/${p}` as NodeKey),
+    to: "dynamic",
+  },
+  "phase-fail": {
+    from: VERIFIED_PHASES.map((p) => `in_progress/${p}` as NodeKey),
+    to: "unchanged",
+  },
+  "block": { from: IN_PROGRESS_NODES, to: "blocked" },
+  "dequeue": { from: IN_PROGRESS_NODES, to: "removed" },
+  "finalize-start": {
+    from: FINALIZE_FROM_PHASES.map((p) => `in_progress/${p}` as NodeKey),
+    to: "in_progress/finalize",
+  },
+  "in-review": { from: ["in_progress/finalize"], to: "in_review" },
+  "watch-init": { from: ["in_review"], to: "unchanged" },
+  "watch-set": { from: ["in_review"], to: "unchanged" },
+  "fix-pending": { from: ["in_review"], to: "unchanged" },
+  "fix-start": { from: ["in_review"], to: "dynamic" },
+  "fix-done": { from: ["in_progress/finalize"], to: "unchanged" },
+  "review-only": { from: ["in_review"], to: "unchanged" },
+  "answered-set": { from: ["in_review"], to: "unchanged" },
+  "rebase-record": { from: ["in_review"], to: "unchanged" },
+  "rebase-resolve-pending": { from: ["in_review"], to: "unchanged" },
+  // rebase_fix への入口は 2 つ: in_review からの復帰 (resolve_pending を消費) と、
+  // executor が finalize で REBASE-CONFLICT 停止した直後の直接進入 (review 不問)。
+  "rebase-start": {
+    from: ["in_review", "in_progress/finalize"],
+    to: "in_progress/rebase_fix",
+  },
+  "rebase-done": { from: ["in_review"], to: "unchanged" },
+  "rebase-give-up": { from: ["in_progress/rebase_fix"], to: "in_review" },
+  "recover-done": { from: ["in_review"], to: "done" },
+  "withdraw": { from: ["in_review"], to: "unchanged" },
+  "withdraw-remove": { from: ["in_review"], to: "removed" },
+  "withdraw-asked": { from: ["in_review"], to: "unchanged" },
+  "restore": { from: ["in_review", "done", "blocked"], to: "approved" },
+};
+
+// verb の遷移表に基づく前提チェック。表に無いノードからの呼び出しは conflict。
+function requireFromNode(
+  item: Record<string, unknown>,
+  verb: string,
+): NodeKey {
+  const spec = VERB_LIFECYCLE[verb];
+  if (!spec) {
+    throw new Error(`BUG: no VERB_LIFECYCLE entry for verb: ${verb}`);
+  }
+  const node = nodeKeyOf(item);
+  if (node === null || !spec.from.includes(node)) {
+    const got = node ??
+      `status=${String(item.status)} phase=${String(item.phase)}`;
+    throw new CliError(
+      "conflict",
+      `${verb}: node must be one of [${spec.from.join(", ")}], got ${got}`,
+    );
+  }
+  return node;
+}
+
+// 書き込み後の item 不変条件。verb 実装のバグで到達不能な組や継ぎ目の破壊が state に
+// 書かれる前に止める (state.ts の withQueueLock / applyApprove が毎書き込みで呼ぶ)。
+// 既存 state.json との互換のため、ここで検査するのは旧実装でも常に成立していた
+// 2 条件だけに絞る (より強い性質は state-transitions.test.ts の frame / matrix テストが
+// verb の出力に対して検査する)。
+export function assertItemInvariants(item: Record<string, unknown>): void {
+  if (nodeKeyOf(item) === null) {
+    throw new CliError(
+      "schema",
+      `refusing to write unreachable node: status=${String(item.status)} ` +
+        `phase=${String(item.phase)}`,
+    );
+  }
+  const review = isRecord(item.review) ? item.review : null;
+  const watch = review && isRecord(review.watch) ? review.watch : null;
+  if (watch !== null && (review === null || review.ref == null)) {
+    throw new CliError(
+      "schema",
+      "refusing to write review.watch without review.ref",
+    );
   }
 }
 
@@ -191,6 +461,42 @@ function getRebase(
   const review = getReview(item);
   if (!review) return null;
   return isRecord(review.rebase) ? review.rebase : null;
+}
+
+// review のグループフィールド (ref/branch/tip/base) だけを書き換え、機械 B の
+// サブフィールド (watch / rebase / withdrawn / withdrawn_asked) は既存値を保つ。
+// in-review の freshGroup はこれを通ることで、pr_fix 復帰のたびに watch (fix_attempts /
+// handled) を破壊していた経路 (issue #13 / #15) を構造的に塞ぐ。
+function mergeReviewGroup(
+  item: Record<string, unknown>,
+  group: {
+    ref: string;
+    branch: string;
+    tip: string | null;
+    base: string;
+  },
+): Record<string, unknown> {
+  const existing = getReview(item) ?? {};
+  return { ...existing, ...group };
+}
+
+// watch を持つタスクの揮発資源を落とす (state→stopped, proc→null)。block / restore /
+// recover-done が使う: これらの遷移後のノード (blocked / approved / done) は追従の
+// 対象外なので、watching のまま残すと停止経路の watch-set (前提: in_review) が
+// 詰まり、誰にも止められない watch 状態が残る。watch が無ければ何もしない。
+function withStoppedWatch(
+  item: Record<string, unknown>,
+): Record<string, unknown> {
+  const review = getReview(item);
+  const watch = getWatch(item);
+  if (!review || !watch) return item;
+  return {
+    ...item,
+    review: {
+      ...review,
+      watch: { ...watch, state: "stopped", proc: null, proc_started_at: null },
+    },
+  };
 }
 
 export interface ReviewOnlyEntry {
@@ -319,6 +625,7 @@ export function applyApprove(
     base: null,
     review: null,
   };
+  assertItemInvariants(entry);
   const q = queueArray(current).slice();
   q.push(entry);
   return { ...current, queue: q };
@@ -330,14 +637,9 @@ export function applyClaim(
   state: Record<string, unknown>,
   session: string,
 ): Record<string, unknown> {
-  requirePrecondition(
-    item.status === "approved",
-    `status must be approved, got ${String(item.status)}`,
-  );
+  requireFromNode(item, "claim");
   const next = {
-    ...item,
-    status: "in_progress",
-    phase: "research",
+    ...atNode(item, "in_progress/research"),
     attempts: 0,
     session,
   };
@@ -349,12 +651,15 @@ export function applySetGate(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
+  requireFromNode(item, "set-gate");
   requirePrecondition(
-    item.status === "in_progress" && item.phase === "research" &&
-      item.gate === "full",
-    "status must be in_progress, phase must be research, gate must be full",
+    item.gate === "full",
+    `gate must be full, got ${String(item.gate)}`,
   );
-  const next = { ...item, gate: "light", phase: "research+plan" };
+  const next = {
+    ...atNode(item, "in_progress/research+plan"),
+    gate: "light",
+  };
   return withReplacedItem(state, index, next);
 }
 
@@ -366,10 +671,7 @@ export function applySetWorktree(
   base: string,
   drop: boolean,
 ): Record<string, unknown> {
-  requirePrecondition(
-    item.status === "in_progress",
-    `status must be in_progress, got ${String(item.status)}`,
-  );
+  requireFromNode(item, "set-worktree");
   const next = { ...item, worktree, base };
   let nextState = withReplacedItem(state, index, next);
   if (drop) {
@@ -397,10 +699,7 @@ export function applySetExecutor(
   session: string,
   nowIso: string,
 ): Record<string, unknown> {
-  requirePrecondition(
-    item.status === "in_progress",
-    `status must be in_progress, got ${String(item.status)}`,
-  );
+  requireFromNode(item, "set-executor");
   const next = {
     ...item,
     executor,
@@ -417,10 +716,8 @@ export function applyTouchExecutor(
   sessionIfUnowned: string | undefined,
   nowIso: string,
 ): Record<string, unknown> {
-  requirePrecondition(
-    item.status === "in_progress" && item.executor != null,
-    "status must be in_progress and executor must be set",
-  );
+  requireFromNode(item, "touch-executor");
+  requirePrecondition(item.executor != null, "executor must be set");
   let next: Record<string, unknown> = {
     ...item,
     executor_last_event_at: nowIso,
@@ -437,14 +734,15 @@ export function applySetTakeover(
   state: Record<string, unknown>,
   atValue: string | null,
 ): Record<string, unknown> {
-  requirePrecondition(
-    item.status === "in_progress",
-    `status must be in_progress, got ${String(item.status)}`,
-  );
+  requireFromNode(item, "set-takeover");
   const next = { ...item, takeover_at: atValue };
   return withReplacedItem(state, index, next);
 }
 
+// phase-pass は gate の検証フェーズ列を 1 つ進める verb。合法な辺は
+// GATE_PHASE_SEQUENCES の隣接ペアだけで、表に無い辺 (飛び越し・逆行・自己辺・
+// gate 違い・finalize/pr_fix/rebase_fix への出入り) は conflict になる。
+// finalize / rebase_fix への遷移は finalize-start / rebase-start が担う。
 export function applyPhasePass(
   item: Record<string, unknown>,
   index: number,
@@ -452,13 +750,19 @@ export function applyPhasePass(
   from: string,
   to: string,
 ): Record<string, unknown> {
+  requireFromNode(item, "phase-pass");
   requirePrecondition(
-    item.status === "in_progress" && item.phase === from,
-    `status must be in_progress and phase must be ${from}, got status=${
-      String(item.status)
-    } phase=${String(item.phase)}`,
+    item.phase === from,
+    `phase must be ${from}, got ${String(item.phase)}`,
   );
-  const next = { ...item, phase: to, attempts: 0 };
+  requirePrecondition(
+    isPhasePassEdge(item.gate, from, to),
+    `not a phase-pass edge for gate ${String(item.gate)}: ${from} -> ${to}`,
+  );
+  const next = {
+    ...atNode(item, `in_progress/${to as Phase}`),
+    attempts: 0,
+  };
   return withReplacedItem(state, index, next);
 }
 
@@ -473,11 +777,10 @@ export function applyPhaseFail(
   state: Record<string, unknown>,
   phase: string,
 ): PhaseFailResult {
+  requireFromNode(item, "phase-fail");
   requirePrecondition(
-    item.status === "in_progress" && item.phase === phase,
-    `status must be in_progress and phase must be ${phase}, got status=${
-      String(item.status)
-    } phase=${String(item.phase)}`,
+    item.phase === phase,
+    `phase must be ${phase}, got ${String(item.phase)}`,
   );
   const attempts = (typeof item.attempts === "number" ? item.attempts : 0) +
     1;
@@ -485,21 +788,18 @@ export function applyPhaseFail(
   return { state: withReplacedItem(state, index, next), attempts };
 }
 
+// blocked は追従の対象外なので、watch が生きたまま残らないよう withStoppedWatch で
+// 揮発資源ごと落とす (pr_fix / rebase_fix の途中で blocked になる経路がある)。
 export function applyBlock(
   item: Record<string, unknown>,
   index: number,
   state: Record<string, unknown>,
   reason: string,
 ): Record<string, unknown> {
-  requirePrecondition(
-    item.status === "in_progress",
-    `status must be in_progress, got ${String(item.status)}`,
-  );
+  requireFromNode(item, "block");
   const next = {
-    ...item,
-    status: "blocked",
+    ...withStoppedWatch(atNode(item, "blocked")),
     blocked_reason: reason,
-    phase: null,
     session: null,
   };
   return withReplacedItem(state, index, next);
@@ -510,10 +810,7 @@ export function applyDequeue(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
-  requirePrecondition(
-    item.status === "in_progress",
-    `status must be in_progress, got ${String(item.status)}`,
-  );
+  requireFromNode(item, "dequeue");
   const q = queueArray(state).slice();
   q.splice(index, 1);
   return { ...state, queue: q };
@@ -525,13 +822,15 @@ export function applyFinalizeStart(
   state: Record<string, unknown>,
   from: string,
 ): Record<string, unknown> {
+  requireFromNode(item, "finalize-start");
   requirePrecondition(
-    item.status === "in_progress" && item.phase === from,
-    `status must be in_progress and phase must be ${from}, got status=${
-      String(item.status)
-    } phase=${String(item.phase)}`,
+    item.phase === from,
+    `phase must be ${from}, got ${String(item.phase)}`,
   );
-  const next = { ...item, phase: "finalize", attempts: 0 };
+  const next = {
+    ...atNode(item, "in_progress/finalize"),
+    attempts: 0,
+  };
   return withReplacedItem(state, index, next);
 }
 
@@ -551,27 +850,23 @@ export function applyInReview(
   state: Record<string, unknown>,
   args: InReviewArgs,
 ): Record<string, unknown> {
-  requirePrecondition(
-    item.status === "in_progress" && item.phase === "finalize",
-    `status must be in_progress and phase must be finalize, got status=${
-      String(item.status)
-    } phase=${String(item.phase)}`,
-  );
+  requireFromNode(item, "in-review");
   let next: Record<string, unknown> = {
-    ...item,
-    status: "in_review",
-    phase: null,
+    ...atNode(item, "in_review"),
     attempts: 0,
   };
   if (args.freshGroup) {
+    // グループフィールドだけを書き換え、watch / rebase / withdrawn / withdrawn_asked は
+    // 保つ (mergeReviewGroup)。pr_fix 復帰は毎回ここを通るので、丸ごと置換に戻すと
+    // fix_attempts の上限と handled の再浮上ガードが毎周無効化される (issue #13 / #15)。
     next = {
       ...next,
-      review: {
+      review: mergeReviewGroup(item, {
         ref: args.ref!,
         branch: args.branch!,
         tip: args.commits >= 1 ? args.tip! : null,
         base: args.base!,
-      },
+      }),
     };
   }
   if (args.clearSession) {
@@ -591,10 +886,11 @@ export function applyWatchInit(
   session: string,
   preserve: boolean,
 ): Record<string, unknown> {
+  requireFromNode(item, "watch-init");
   const review = getReview(item);
   requirePrecondition(
-    item.status === "in_review" && review !== null && review.ref != null,
-    "status must be in_review and review.ref must be set",
+    review !== null && review.ref != null,
+    "review.ref must be set",
   );
   const existingWatch = getWatch(item);
   const existingHandled = preserve && existingWatch &&
@@ -645,6 +941,10 @@ export function applyWatchSet(
   fields: WatchSetFields,
   nowIso: string,
 ): Record<string, unknown> {
+  // in_review に限る: 飛行中 (pr_fix / rebase_fix) のタスクの session を watch 側の
+  // 機械が null に落とせてしまう継ぎ目を塞ぐ。approved / blocked / done の watch は
+  // restore / block / recover-done がそれぞれ落とすので、ここに来る対象は無い。
+  requireFromNode(item, "watch-set");
   const review = getReview(item);
   const watch = getWatch(item);
   requirePrecondition(watch !== null, "review.watch must be present");
@@ -684,12 +984,10 @@ export function applyFixPending(
   pendingIds: string[],
   findings: string,
 ): Record<string, unknown> {
+  requireFromNode(item, "fix-pending");
   const review = getReview(item);
   const watch = getWatch(item);
-  requirePrecondition(
-    item.status === "in_review" && watch !== null,
-    "status must be in_review and review.watch must be present",
-  );
+  requirePrecondition(watch !== null, "review.watch must be present");
   const nextWatch = {
     ...watch,
     fix_pending: true,
@@ -706,6 +1004,9 @@ export interface FixStartResult {
   fixAttempts: number;
 }
 
+// 前提に watch.state=="watching" を含める: 上限到達で stopped にした後は、この verb 自体が
+// conflict になる (ラッチ)。前提が真のまま残って呼ぶたびに fix_attempts を加算し続ける
+// 経路 (確認済み欠陥 9) を塞ぐ。ユーザーが手で watching に戻したときだけ再び呼べる。
 export function applyFixStart(
   item: Record<string, unknown>,
   index: number,
@@ -713,12 +1014,13 @@ export function applyFixStart(
   session: string,
   reset: boolean,
 ): FixStartResult {
+  requireFromNode(item, "fix-start");
   const review = getReview(item);
   const watch = getWatch(item);
   requirePrecondition(
-    item.status === "in_review" && watch !== null &&
-      watch.fix_pending === true,
-    "status must be in_review and watch.fix_pending must be true",
+    watch !== null && watch.fix_pending === true &&
+      watch.state === "watching",
+    "watch.fix_pending must be true and watch.state must be watching",
   );
   const baseAttempts = reset
     ? 0
@@ -730,9 +1032,7 @@ export function applyFixStart(
   if (started) {
     nextWatch = { ...watch, fix_attempts: fixAttempts, fix_pending: false };
     next = {
-      ...item,
-      status: "in_progress",
-      phase: "pr_fix",
+      ...atNode(item, "in_progress/pr_fix"),
       attempts: 0,
       session,
       review: { ...review, watch: nextWatch },
@@ -762,13 +1062,10 @@ export function applyFixDone(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
+  requireFromNode(item, "fix-done");
   const review = getReview(item);
   const watch = getWatch(item);
-  requirePrecondition(
-    item.status === "in_progress" && item.phase === "finalize" &&
-      watch !== null,
-    "status must be in_progress, phase must be finalize, and review.watch must be present",
-  );
+  requirePrecondition(watch !== null, "review.watch must be present");
   const pendingIds = Array.isArray(watch!.pending_ids)
     ? (watch!.pending_ids as string[])
     : [];
@@ -794,12 +1091,10 @@ export function applyReviewOnly(
   state: Record<string, unknown>,
   items: ReviewOnlyEntry[],
 ): ReviewOnlyResult {
+  requireFromNode(item, "review-only");
   const review = getReview(item);
   const watch = getWatch(item);
-  requirePrecondition(
-    item.status === "in_review" && watch !== null,
-    "status must be in_review and review.watch must be present",
-  );
+  requirePrecondition(watch !== null, "review.watch must be present");
   const existing = getReviewOnlyList(watch);
   const byId = new Map(existing.map((e) => [e.id, e.updated_at]));
   const newOrChanged: string[] = [];
@@ -835,12 +1130,10 @@ export function applyAnsweredSet(
   state: Record<string, unknown>,
   items: ReviewOnlyEntry[],
 ): ReviewOnlyResult {
+  requireFromNode(item, "answered-set");
   const review = getReview(item);
   const watch = getWatch(item);
-  requirePrecondition(
-    item.status === "in_review" && watch !== null,
-    "status must be in_review and review.watch must be present",
-  );
+  requirePrecondition(watch !== null, "review.watch must be present");
   const existing = getAnsweredList(watch);
   const byId = new Map(existing.map((e) => [e.id, e.updated_at]));
   const newOrChanged: string[] = [];
@@ -881,11 +1174,9 @@ export function applyRebaseRecord(
   report: string | undefined,
   nowIso: string,
 ): Record<string, unknown> {
+  requireFromNode(item, "rebase-record");
   const review = getReview(item);
-  requirePrecondition(
-    item.status === "in_review" && review !== null,
-    "status must be in_review and review must be present",
-  );
+  requirePrecondition(review !== null, "review must be present");
   const existingRebase = getRebase(item);
   const nextRebase: Record<string, unknown> = {
     ...(existingRebase ?? {}),
@@ -906,12 +1197,10 @@ export function applyRebaseResolvePending(
   state: Record<string, unknown>,
   fromTip: string,
 ): Record<string, unknown> {
+  requireFromNode(item, "rebase-resolve-pending");
   const review = getReview(item);
   const rebase = getRebase(item);
-  requirePrecondition(
-    item.status === "in_review" && rebase !== null,
-    "status must be in_review and review.rebase must be present",
-  );
+  requirePrecondition(rebase !== null, "review.rebase must be present");
   const nextRebase = {
     ...rebase,
     resolve_pending: true,
@@ -921,43 +1210,55 @@ export function applyRebaseResolvePending(
   return withReplacedItem(state, index, next);
 }
 
+// rebase_fix への入口は 2 つ (VERB_LIFECYCLE 参照):
+// - in_review から: 背景の載せ直しが衝突し rebase-record / rebase-resolve-pending で
+//   控えた復帰。resolve_pending が真であることを要求し、消費する。
+// - in_progress/finalize から: executor が push 直前の載せ直しで REBASE-CONFLICT 停止
+//   した直接進入。review が無いこともある (最初の PR を出す直前) ので review を見ない。
+//   衝突の控えとトリアージ結果はオーケストレーターがイテレーション内で持ち回る。
 export function applyRebaseStart(
   item: Record<string, unknown>,
   index: number,
   state: Record<string, unknown>,
   session: string,
 ): Record<string, unknown> {
+  const node = requireFromNode(item, "rebase-start");
   const review = getReview(item);
   const rebase = getRebase(item);
-  requirePrecondition(
-    item.status === "in_review" && rebase !== null &&
-      rebase.resolve_pending === true,
-    "status must be in_review and review.rebase.resolve_pending must be true",
-  );
-  const nextRebase = { ...rebase, resolve_pending: false };
-  const next = {
-    ...item,
-    status: "in_progress",
-    phase: "rebase_fix",
+  if (node === "in_review") {
+    requirePrecondition(
+      rebase !== null && rebase.resolve_pending === true,
+      "review.rebase.resolve_pending must be true",
+    );
+  }
+  let next: Record<string, unknown> = {
+    ...atNode(item, "in_progress/rebase_fix"),
     attempts: 0,
     session,
-    review: { ...review, rebase: nextRebase },
   };
+  if (rebase !== null) {
+    next = {
+      ...next,
+      review: { ...review, rebase: { ...rebase, resolve_pending: false } },
+    };
+  }
   return withReplacedItem(state, index, next);
 }
 
+// in_review に限る: 飛行中 (in_progress/rebase_fix) に呼ぶと review.rebase が消え、
+// applyRebaseGiveUp の前提が永久に満たせなくなる (確認済み欠陥 10)。復帰列では
+// in-review で in_review に戻した後に呼ぶ。review.rebase は要求しない — 背景の
+// 載せ直しが初回の試行で衝突なく成功した最頻パスには rebase-record の控えが無く、
+// それでも tip の更新 (マージ回収の鍵) はこの verb にしか無い (確認済み欠陥 12)。
 export function applyRebaseDone(
   item: Record<string, unknown>,
   index: number,
   state: Record<string, unknown>,
   tip: string,
 ): Record<string, unknown> {
+  requireFromNode(item, "rebase-done");
   const review = getReview(item);
-  const rebase = getRebase(item);
-  requirePrecondition(
-    review !== null && rebase !== null,
-    "review.rebase must be present",
-  );
+  requirePrecondition(review !== null, "review must be present");
   const nextReview: Record<string, unknown> = { ...review, tip };
   delete nextReview.rebase;
   const next = { ...item, review: nextReview };
@@ -970,12 +1271,12 @@ export function applyRebaseGiveUp(
   state: Record<string, unknown>,
   blockedOnto: string,
 ): Record<string, unknown> {
+  requireFromNode(item, "rebase-give-up");
   const review = getReview(item);
   const rebase = getRebase(item);
   requirePrecondition(
-    item.status === "in_progress" && item.phase === "rebase_fix" &&
-      review !== null && rebase !== null,
-    "status must be in_progress, phase must be rebase_fix, and review.rebase must be present",
+    review !== null && rebase !== null,
+    "review.rebase must be present",
   );
   const nextRebase = {
     ...rebase,
@@ -984,9 +1285,7 @@ export function applyRebaseGiveUp(
     resolve_pending: false,
   };
   const next = {
-    ...item,
-    status: "in_review",
-    phase: null,
+    ...atNode(item, "in_review"),
     attempts: 0,
     session: null,
     review: { ...review, rebase: nextRebase },
@@ -998,26 +1297,24 @@ export function applyRebaseGiveUp(
 // 回収と候補
 // ---------------------------------------------------------------------------
 
+// done は追従の対象外なので、watch を watching のまま残さない (確認済み欠陥 7:
+// proc だけ null にして state を watching のまま残すと、停止経路が「自分の担当」として
+// 数え続ける)。withStoppedWatch が state→stopped / proc→null / proc_started_at→null を
+// まとめて行う。
 export function applyRecoverDone(
   item: Record<string, unknown>,
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
+  requireFromNode(item, "recover-done");
   const review = getReview(item);
   requirePrecondition(
-    item.status === "in_review" && review !== null && review.tip != null,
-    "status must be in_review and review.tip must be present",
+    review !== null && review.tip != null,
+    "review.tip must be present",
   );
-  const watch = getWatch(item);
-  let nextReview = review!;
-  if (watch !== null) {
-    nextReview = { ...review, watch: { ...watch, proc: null } };
-  }
   const next = {
-    ...item,
-    status: "done",
+    ...withStoppedWatch(atNode(item, "done")),
     session: null,
-    review: nextReview,
   };
   return withReplacedItem(state, index, next);
 }
@@ -1027,11 +1324,9 @@ export function applyWithdraw(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
+  requireFromNode(item, "withdraw");
   const review = getReview(item);
-  requirePrecondition(
-    item.status === "in_review" && review !== null,
-    "status must be in_review and review must be present",
-  );
+  requirePrecondition(review !== null, "review must be present");
   const next = { ...item, review: { ...review, withdrawn: true } };
   return withReplacedItem(state, index, next);
 }
@@ -1043,12 +1338,12 @@ export function applyWithdrawRemove(
   reason: string,
   nowIso: string,
 ): Record<string, unknown> {
+  requireFromNode(item, "withdraw-remove");
   const review = getReview(item);
   requirePrecondition(
-    item.status === "in_review" && review !== null &&
-      review.withdrawn === true && item.worktree != null &&
+    review !== null && review.withdrawn === true && item.worktree != null &&
       item.base != null,
-    "status must be in_review, review.withdrawn must be true, and worktree/base must be set",
+    "review.withdrawn must be true and worktree/base must be set",
   );
   const id = String(item.id);
   const entry = {
@@ -1073,11 +1368,11 @@ export function applyWithdrawAsked(
   index: number,
   state: Record<string, unknown>,
 ): Record<string, unknown> {
+  requireFromNode(item, "withdraw-asked");
   const review = getReview(item);
   requirePrecondition(
-    item.status === "in_review" && review !== null &&
-      review.withdrawn === true,
-    "status must be in_review and review.withdrawn must be true",
+    review !== null && review.withdrawn === true,
+    "review.withdrawn must be true",
   );
   const next = { ...item, review: { ...review, withdrawn_asked: true } };
   return withReplacedItem(state, index, next);
@@ -1162,6 +1457,12 @@ export function applyRelistedDrop(
   return { ...current, relisted: next };
 }
 
+// worktree / base / review は意図して残す (done の回収まで worktree もブランチも PR も
+// 消さないため)。ただし watch は withStoppedWatch で落とす — approved に戻ったタスクは
+// 追従の対象外で、前回周回の watching / proc を抱えたまま再入すると、停止経路の
+// watch-set (前提: in_review) が詰まる (確認済み欠陥 8)。fix_attempts / handled の値は
+// 残るが、次の周回のレビュー待ちで watch-init (--preserve-handled) が仕切り直す。
+// relisted に無い場合は「対象が存在しない」なので missing (契約と揃える)。
 export function applyRestore(
   item: Record<string, unknown>,
   index: number,
@@ -1172,16 +1473,12 @@ export function applyRestore(
     ? (state.relisted as Record<string, unknown>[])
     : [];
   const rIndex = relisted.findIndex((r) => r.id === id);
-  requirePrecondition(rIndex !== -1, `id not found in relisted: ${id}`);
-  requirePrecondition(
-    item.status === "in_review" || item.status === "blocked" ||
-      item.status === "done",
-    `status must be in_review/blocked/done, got ${String(item.status)}`,
-  );
+  if (rIndex === -1) {
+    throw new CliError("missing", `id not found in relisted: ${id}`);
+  }
+  requireFromNode(item, "restore");
   const nextItem = {
-    ...item,
-    status: "approved",
-    phase: null,
+    ...withStoppedWatch(atNode(item, "approved")),
     attempts: 0,
     session: null,
     executor: null,
