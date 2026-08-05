@@ -531,6 +531,23 @@ Deno.test("valid-fixtures", async (t) => {
       assertOk(checkState(legacyShapeWatch), "watch without review_only");
     },
   );
+  await t.step(
+    "watch without answered (pre-existing shape) stays valid",
+    () => {
+      // answered は今回 (task-pipeline gh-6) 新設したフィールドで、review_only と同じ理由
+      // (これより前に作られた state.json の watch オブジェクトには存在しない) によりスキーマ上
+      // required に入れていない。キーが無いままでも valid であり続けることを固定する
+      // (後方互換の回帰テスト)。
+      const legacyShapeWatch = deleteAt(validWatchRebase, [
+        "queue",
+        0,
+        "review",
+        "watch",
+        "answered",
+      ]);
+      assertOk(checkState(legacyShapeWatch), "watch without answered");
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

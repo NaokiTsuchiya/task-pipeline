@@ -35,6 +35,7 @@
 
 import { checkState } from "./state-schema.ts";
 import {
+  applyAnsweredSet,
   applyApprove,
   applyBlock,
   applyCandidatesDrop,
@@ -655,6 +656,7 @@ export const ALLOWED_FLAGS: Record<string, ReadonlySet<string>> = {
   ]),
   "fix-done": new Set(["state-dir", "id", ...LOCK_FLAGS]),
   "review-only": new Set(["state-dir", "id", "items-json", ...LOCK_FLAGS]),
+  "answered-set": new Set(["state-dir", "id", "items-json", ...LOCK_FLAGS]),
   // --- 載せ直し ---
   "rebase-record": new Set([
     "state-dir",
@@ -1404,6 +1406,36 @@ async function cmdReviewOnly(
   };
 }
 
+// watch.answered は review_only と同じ入出力契約 (id/updated_at の upsert・dedup) を持つが、
+// 別フィールド・別語彙にする (gh-6)。watch.handled は「pr_fix で実際にコードを直した」ことを
+// 表す語彙、watch.review_only は「人の判断が要ると回した」ことを表す語彙で、どちらとも意味が
+// 違う「質問に回答・投稿済み」をこの2つに混ぜると、次に読む executor/verifier が誤読する。
+// items-json のパースは review-only と全く同じ形 ({id, updated_at} の配列) なので
+// parseReviewOnlyItems をそのまま再利用する。前提チェックと状態書き換えは applyReviewOnly と
+// 同じく state-transitions.ts の applyAnsweredSet に持たせる (state-transitions.ts への関数
+// 移設 [main] に合わせる)。
+async function cmdAnsweredSet(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const items = parseReviewOnlyItems(requireFlag(flags, "items-json"));
+  let newOrChanged: string[] = [];
+  let total = 0;
+  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
+    const result = applyAnsweredSet(item, index, state, items);
+    newOrChanged = result.newOrChanged;
+    total = result.total;
+    return result.state;
+  });
+  return {
+    ok: true,
+    id,
+    new_or_changed: newOrChanged,
+    answered_total: total,
+  };
+}
+
 // --- 載せ直し ---------------------------------------------------------------
 
 const REBASE_REASONS = ["dirty", "diverged", "conflict", "push"] as const;
@@ -1830,6 +1862,9 @@ export async function main(argv: string[]): Promise<number> {
         break;
       case "review-only":
         result = await cmdReviewOnly(stateDir, flags);
+        break;
+      case "answered-set":
+        result = await cmdAnsweredSet(stateDir, flags);
         break;
       case "rebase-record":
         result = await cmdRebaseRecord(stateDir, flags);

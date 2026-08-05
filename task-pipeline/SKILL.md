@@ -76,7 +76,7 @@ state.json への**書き込み**は、目的に対応する verb を CLI (`~/.c
 ```
 - フェーズ列はタスクの `gate` により 2 形態ある。`full` (既定): **research → plan → implement → report**。`light`: **research+plan → implement → report** (research と plan を 1 フェーズに統合し、検証ゲートも 1 回になる)。`gate` はタスク実行手順 1 で、タスクファイルの frontmatter から機械的に判定する — **宣言が無い・判定できないタスクは常に `full`** で、一度決めたら以降変えない。宣言の妥当性は統合ゲートの verifier が再判定する (verifier.md の research+plan 節) — 覆されても gate とフェーズ列は巻き戻さず、full 相当の要求が統合ゲートでそのまま課される。`phase`、判定ファイル名 (`verdicts/<phase>-<attempt>.json`)、サブエージェントへの指示は必ずこれらの英語トークンを使う (統合フェーズは `research+plan` の 1 トークン)。`finish=commit|pr` のときだけ、report PASS 後に検証対象外の後処理として `phase: finalize` を挟む。`finish=pr` では、in_review になった後に `phase: pr_fix` (検証ゲートあり) → `finalize` が何度か追加で回ることがある (下記「PR の追従」)。同じく `phase: rebase_fix` (検証ゲートあり) → `finalize` が回ることもある (下記「解決サイクル」)。
 - パイプラインが自力で到達する終端は `in_review` (レビュー待ち) と `blocked`。**Done (マージ/受け入れ完了) はユーザーの行為である。** パイプラインが done を書くのは、ユーザーのマージを git 履歴で証明できたときの回収 (下記「マージの回収」) だけ。
-- `review` は in_review になったときに `state.ts in-review` が埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}` (branch/tip/base は**タスクブランチにコミットがあるときだけ**。回収の判定に使う)。`ref` が PR URL のときは `state.ts watch-init` が追従用の `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "sig": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "checked_at": null, "note": null}` も併せて置く。`review.rebase` (`state.ts rebase-record`) は載せ直しの状態、`review.withdrawn`/`withdrawn_asked` (`state.ts withdraw`/`withdraw-asked`) は PR が未マージで閉じられたタスクの後始末に使う (下記「残った PR を新しい基点へ載せ直す」「PR の追従」)。詳細な内部フィールドと根拠は `docs/state-machine.md`。
+- `review` は in_review になったときに `state.ts in-review` が埋める: `{"ref": <PR URL / コミットハッシュ / null>, "branch": ..., "tip": ..., "base": ...}` (branch/tip/base は**タスクブランチにコミットがあるときだけ**。回収の判定に使う)。`ref` が PR URL のときは `state.ts watch-init` が追従用の `"watch": {"state": "watching", "proc": null, "proc_started_at": null, "sig": null, "head": null, "ci": null, "handled": [], "fix_pending": false, "pending_ids": [], "findings": null, "fix_attempts": 0, "errors": 0, "checked_at": null, "note": null}` も併せて置く。`review.rebase` (`state.ts rebase-record`) は載せ直しの状態、`review.withdrawn`/`withdrawn_asked` (`state.ts withdraw`/`withdraw-asked`) は PR が未マージで閉じられたタスクの後始末に使う (下記「残った PR を新しい基点へ載せ直す」「PR の追従」)。`watch.answered` (`state.ts answered-set`) は `watch.review_only` と同じ `{id, updated_at}` 形の配列で、レビュアーの質問に回答・投稿済みのものを記録し二重投稿を防ぐ (下記「質問への回答」)。詳細な内部フィールドと根拠は `docs/state-machine.md`。
 - `stalled` は**パイプラインが新しいタスクを着手できない状態**の種類 (`null` / `"depleted"` = 候補が尽きた / `"max_open"` = レビュー待ちの上限)、`stalled_since` はその状態に入った時刻。**追従を打ち切る唯一の判定材料** (下記「ペーシングと枯渇」)。毎イテレーション `state.ts stalled-set` で書き直す (パイプライン全体の状態。時刻で持つ理由は `docs/state-machine.md`)。`worktree`/`base` はそのタスク専用 worktree の絶対パスと分岐元ブランチ (`state.ts set-worktree` が書く。下記「worktree」)。
 - `phase`/`attempts` は現在実行中のフェーズと検証試行回数 (`state.ts phase-pass`/`phase-fail`)。`session` はこのタスクの揮発資源を持つセッションの id (下記「セッションの所有権」)。`executor` は実行エージェントの agentId — **必ず `session` とセットで読む** (`state.ts set-executor`/`touch-executor`)。`executor_last_event_at` は起動時・SendMessage 成功時・停止通知処理時の 3 箇所だけで更新し (**実行エージェントの生存判定はこのフィールドで行う**。トップレベルの `updated_at` は使わない)、`takeover_at` は引き継ぎ待ちの開始時刻 (`state.ts set-takeover`。下記「飛行中の扱い」)。3 箇所に限る理由は `docs/state-machine.md`。
 - `updated_at` は書き込み系 verb がすべて自動で更新する。`candidates`/`promoted`/`withdrawn_branches`/`relisted` はそれぞれ `candidates-set`/`candidates-drop`、`promoted-add`/`promoted-drop`、`withdraw-remove`、`relisted-add`/`relisted-drop`/`restore` で操作する未承認タスクの優先順キャッシュ・自動昇格の控え・取り下げブランチの控え (`base` を運ぶためだけに置く)・再登場ガード (10 分ルール) で、根拠は `docs/state-machine.md` (下記「承認」「マージで解けた依存の昇格」「PR の追従」)。
@@ -326,6 +326,28 @@ Return only the watch JSON.
 - `error` (観測サブエージェントの `error`、または watch スクリプトの終了コード 3 / 4) → `state.ts watch-set --id <id> --errors-inc true --note <エラー内容>` を呼ぶ。**追従は続ける** (一時的な不調が大半)。3 回連続で `error` なら `state.ts watch-set --id <id> --state stopped` を呼び (`session` も同じ書き込みで null)、watch プロセスも起動し直さずに 1 行報告する (ループもタスクも止めない)。`error` 以外になったら `state.ts watch-set --id <id> --errors-reset true` を呼ぶ。3 回に満たないときは: **このイテレーションでは watch プロセスを起動し直さない** (次イテレーションが張り直し経路から再開する)。**観測サブエージェントの `error` では `state.ts watch-set --id <id> --sig null` を呼んで `watch.sig` を取り消す** (張り直すと次の外部変化までブロックし続け、error 中の指摘が失われるため)。**watch スクリプトの終了コード 3/4 では `watch.sig` をそのままにする** (`watch-set --sig` を呼ばない — 次の張り直しでその署名を使えば catch-up より安く済む)。
 どの verdict でも、watcher の応答に `review_only` が含まれていれば (`[{id, updated_at}, ...]`)、その配列をそのまま `--items-json` に渡して `state.ts review-only --id <id> --items-json <json>` を呼ぶ。この verb は `watch.review_only` に id ごと upsert するだけで **`watch.handled` は一切変更しない** (`watch.handled` は `fix-done` を経由して実際に修正したものだけを表す)。返り値の `new_or_changed` (今回新規に見えた、または前回記録した `updated_at` から版が進んだ id。`updated_at` が `null` の id は版の比較ができないため観測されるたびに毎回含まれる — 安全側に倒した意図した動作) だけを 1 行で報告する (findings ファイルが書かれていればパスを添える)。同じ版のまま繰り返し観測された id は `watch.review_only` に残るだけで、再報告はしない。`review_only` の id は `watch.handled` に入らないので、GitHub 側でスレッドが解決されない限り次回以降の観測でも actionable ではなく review_only として返り続ける — これが「未対応のまま残り続ける」経路そのものであり、新しい仕組みは要らない。返り値の `review_only_total` が 1 以上なら、この観測の報告に「未対応の要確認 `<review_only_total>` 件」を添える (`new_or_changed` が空でもこの件数の告知だけは毎回の観測に乗せる) — レビュー待ちのタスクに人の判断待ちが残っていることを、観測のたびに可視化するため。
 `merged` / `closed`、および `watch.state` が `stopped` になったタスクの watch プロセスは**起動し直さない**。`stopped` にするときに生きているプロセスが残っていれば止める (`session` は `watch-set --state stopped` が同じ書き込みで null に戻す。揮発資源が無くなったので、ユーザーが `watching` に戻したときはどのセッションでも拾える)。
+
+同じく、どの verdict でも、watcher の応答に `questions` が含まれていれば (`[{id, updated_at}, ...]`)、現在の `review.watch.answered` および `review.watch.review_only` のどちらにも同じ `{id, updated_at}` の組で存在しないものだけを残す (state.json は既に読み込み済みなので追加の CLI 呼び出しは不要)。1 件以上残れば下記「質問への回答」を行う。
+
+### 質問への回答
+
+対象は、直前の観測が返した `questions` のうち、`review.watch.answered`/`review.watch.review_only` にまだ同じ版で記録が無いもの。
+
+1. 対象の `{id, updated_at}` の一覧を集め、フレッシュなサブエージェント (general-purpose、同期) を 1 体起動する。プロンプトはこの形のみ:
+   ```
+   You are a PR responder subagent.
+   Do not modify the repository, the branch, or any tracker. Your only write
+   targets are GitHub PR review-thread replies, as the instructions specify.
+   Read ~/.claude/skills/task-pipeline/references/pr-responder.md and follow it.
+   pr: <PR URL> / run dir: <runs/<id> の絶対パス> / task: <tasks/<id>.md の絶対パス>
+   target project: <worktree の絶対パス (無ければプロジェクトルート)>
+   question_ids: <対象 id をカンマ区切り>
+   Return only the JSON pr-responder.md specifies.
+   ```
+   この起動は同期 (呼び出し元のターン内で完了を待つ) であり、飛行中の実行エージェント数 (上記「併走の枠」) には数えない — pr-watcher の観測サブエージェント自体と同じ扱いである。
+2. 返った `answered` が非空なら、その配列をそのまま `--items-json` に渡して `state.ts answered-set --id <id> --items-json <json>` を呼ぶ (`watch.answered` に upsert される。`watch.handled`/`watch.review_only` には触れない)。
+3. 返った `unanswered` が非空なら、同じ形 (`id`/`updated_at` のみ、`reason` は捨ててよい) で既存の `state.ts review-only --id <id> --items-json <json>` を呼ぶ — 答えられなかった質問は、コードを直せなかった指摘と同じ「要確認」の語彙にそのまま合流させる (新しいバケットは作らない)。
+4. 投稿できた件数・要確認へ回った件数を、この観測の 1 行報告に添える。**PushNotification は送らない** — 返信の投稿はレビュー待ちの状態遷移を起こさない (PR は引き続き in_review のまま) ので、上記「更新時の通知」の対象にはならない。
 
 ### 修正サイクル
 

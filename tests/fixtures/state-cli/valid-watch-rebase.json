@@ -40,7 +40,8 @@
           "errors": 0,
           "checked_at": "2026-08-02T08:59:00Z",
           "note": null,
-          "review_only": [{ "id": "rc-9", "updated_at": "2026-08-02T08:10:00Z" }]
+          "review_only": [{ "id": "rc-9", "updated_at": "2026-08-02T08:10:00Z" }],
+          "answered": [{ "id": "rc-answered-1", "updated_at": "2026-08-02T08:20:00Z" }]
         },
         "rebase": {
           "blocked_onto": "def456abc789",
