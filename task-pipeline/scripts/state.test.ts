@@ -4140,6 +4140,57 @@ Deno.test("T-V-rebase-start-2: resolve_pending false -> conflict", async () => {
   );
 });
 
+// `finalize` フェーズで executor が衝突して止まったタスク (`REBASE-CONFLICT`) は
+// `status: in_progress` かつ `review` が null なので、`rebase-start` では rebase_fix に
+// 入れない。SKILL.md の「解決サイクル」はこの経路に `phase-pass` を使うと定めており、
+// 次の 2 本がその前提 (どちらの verb がどちらで通るか) を固定する。
+Deno.test("T-V-rebase-start-3: review null (finalize phase) -> conflict", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_progress",
+      phase: "finalize",
+      session: "s1",
+      review: null,
+    }),
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    ["rebase-start", "--state-dir", dir, "--id", "t-1", "--session", "s1"],
+    EXIT_CODES.conflict,
+  );
+});
+
+Deno.test("T-V-phase-pass-4: finalize -> rebase_fix succeeds with review null and keeps session", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({
+      status: "in_progress",
+      phase: "finalize",
+      attempts: 2,
+      session: "s1",
+      review: null,
+    }),
+  ]);
+  await expectOk(dir, [
+    "phase-pass",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--from",
+    "finalize",
+    "--to",
+    "rebase_fix",
+  ]);
+  const item = await readItem(dir);
+  assertEquals(item.phase, "rebase_fix");
+  assertEquals(item.attempts, 0);
+  assertEquals(item.status, "in_progress");
+  assertEquals(item.session, "s1");
+  assertEquals(item.review, null);
+});
+
 Deno.test("T-V-rebase-done-1: succeeds from in_progress/rebase_fix origin, deletes rebase block", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [

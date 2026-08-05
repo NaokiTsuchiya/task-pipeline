@@ -477,6 +477,12 @@ state.ts rebase-start --state-dir <dir> --id <id> --session <s> \
 効果: `status→"in_progress", phase→"rebase_fix", attempts→0, session→<s>,
 review.rebase.resolve_pending→false`。
 成功: `{"ok": true, "id": "<id>", "status": "in_progress", "phase": "rebase_fix"}`。
+前提から分かるとおり、**この verb は `in_review` のタスクを `rebase_fix` へ戻す用途にしか使えない**。
+`finalize` フェーズで executor が衝突して止まったタスク (`status: in_progress`。最初の PR を出す
+直前なら `review` も null) は `rebase-record`/`rebase-resolve-pending` も含めてこの一族の verb を
+1 つも通せないので、`phase-pass --from finalize --to rebase_fix` で遷移する
+(`T-V-rebase-start-3`/`T-V-phase-pass-4` が両側を固定。運用は SKILL.md の
+「解決サイクル」の「finalize から入る経路」)。
 
 ### `rebase-done`
 

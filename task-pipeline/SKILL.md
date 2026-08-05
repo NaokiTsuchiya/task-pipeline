@@ -204,7 +204,7 @@ Return only what the adapter file specifies for this operation.
    - `BLOCKED` → 即座にタスクを blocked にする (リトライしない)。`state.ts block --id <id> --reason <理由>` を呼び (`session` は null に戻る — 実行エージェントはもう居ない)、アダプタで `mark <id> blocked <理由>`、次のタスクは次イテレーションに回す。
    - `DONE` で、`<name>` が state.json の `phase` と一致 → 検証ゲートへ。
    - `DONE` で、`<name>` が state.json の `phase` と不一致 (プロトコル行の重複再送など) → 無視する。
-   - `REBASE-CONFLICT — <パス>` → 載せ直しが衝突で止まった。`phase` が `finalize` なら (PR を出す・押し直す直前の載せ直し) 下記「コンフリクトのトリアージ」の手順 3 以降をそのまま行い、`rebase_fix` なら下記「解決サイクル」の諦め方に入る。**どちらでも blocked にはしない。**
+   - `REBASE-CONFLICT — <パス>` → 載せ直しが衝突で止まった。`phase` が `finalize` なら (PR を出す・押し直す直前の載せ直し) 下記「コンフリクトのトリアージ」の**手順 3 だけ**を行い、その結果を持って「解決サイクル」の**「finalize から入る経路」**へ合流する (**手順 4・5 の `rebase-record` / `rebase-resolve-pending` は呼ばない** — どちらも前提に `status=="in_review"` を含み、finalize 中のタスクは `status: in_progress` なので必ず `conflict` で失敗する。理由と代わりの手順は同節)。`rebase_fix` なら下記「解決サイクル」の諦め方に入る。**どちらでも blocked にはしない。**
 6. **検証ゲート**: フレッシュな検証エージェントを **毎回新規に** 同期起動する (subagent_type: `task-pipeline-verifier`)。起動前に、判定 JSON の書き込み先パスを組み立てる: `runs/<id>/verdicts/<phase>-<attempt>.json` (attempt は `attempts` の現在値・0 始まり。`phase` が `pr_fix` のときは対応する findings の連番 `<n>` を含めて `pr_fix-<n>-<attempt>.json`、`rebase_fix` のときは対応する `rebase-fix-<n>.md` の連番で `rebase_fix-<n>-<attempt>.json` — 修正・解決サイクルごとに `attempts` が 0 に戻るので、連番が無いと前サイクルの判定を上書きする)。ファイル名を組み立てる責務は引き続きオーケストレータにあり、verifier には組み立てた絶対パスをそのまま渡す:
    ```
    You are a fresh, independent verifier.
@@ -232,6 +232,9 @@ Return only what the adapter file specifies for this operation.
            - 例: `<id> 更新 (指摘 <n> 件対応): <PR URL>` / `<id> 更新 (載せ直し → <base>): <PR URL>`
            - **素の force push (下記「残った PR を新しい基点へ載せ直す」) では送らない** — 詳細と理由は同節に書く。
        - **rebase_fix からの復帰でここに来たときも `mark` は呼び直さない** (トラッカー側は in_review のままで変化していない)。`state.ts rebase-done --id <id> --tip <新tip>` を呼ぶ (`review.tip` を新しい tip に更新し、`review.rebase` を削除する、を単一の書き込みで行う)。続けて `state.ts watch-set --id <id> --state watching` で `watch.state` を `watching` に戻し、watch を張り直す (`watch.handled` も `fix_attempts` もそのまま保つ — 載せ直しはレビュー指摘への往復ではない)。**この 2 つの書き込みが両方成功したら、更新時の通知を 1 本送る** (文面は上記「更新時の通知」の規定に従う。PR URL と「載せ直し先」を含める)。
+         - **これは `review.rebase` を持つタスクに限る** (「残った PR を新しい基点へ載せ直す」の経路で衝突し、`rebase-record` で控えが残っているもの)。`rebase_fix` に **`finalize` から入った経路** (解決サイクルの「finalize から入る経路」) には `review.rebase` が無く、`rebase-done` は前提 (`review!=null && review.rebase!=null`) を満たさず `conflict` で失敗する。`watch-set` も `review.watch` が無ければ同じく失敗する。この経路では代わりに:
+           - **最初の PR を出す直前だった場合** (`review` が null) → 上のレビュー待ち処理を**通常どおり「最初の 1 回」として**行う (`in-review` で `review` を埋め、`mark <id> in_review <PR URL>`、`watch-init`、最初の 1 回の通知)。`rebase-done` も `watch-set` も呼ばない。
+           - **`pr_fix` の押し直し直前だった場合** (`review` は既にある) → `rebase-done` は呼ばず、下の `pr_fix` からの復帰の行 (`fix-done` → `in-review` → `watch-set --state watching`) をそのまま行い、更新時の通知を 1 本送る (対応した指摘の件数に加えて「載せ直し先」も添える)。
       - **pr_fix からの復帰でここに来たときは、上の `in-review` を呼ぶより前に `state.ts fix-done --id <id>` を呼ぶ** (前提: `status=="in_progress" && phase=="finalize" && review.watch!=null`。`in-review` は `status→in_review, phase→null` に書き換えるため、先に `fix-done` を呼ばないとこの前提が崩れて `conflict` で失敗する。効果: `watch.pending_ids` を重複無しで `watch.handled` へ合流し、`pending_ids→[]`, `findings→null` を単一の原子的書き込みで行う)。**併せて `mark` も呼び直さない** — トラッカー側は in_review のままで何も変わっておらず、呼べば重複コメントになるだけである。`fix-done` の後に `in-review` を呼び、続けて `state.ts watch-set --id <id> --state watching` で `watch.state` を `watching` に戻す (`watch.fix_attempts` は保たれる)。**この `fix-done` → `in-review` の順序を守らないと、いま対応したばかりの指摘が `pending_ids` に残ったまま `handled` に合流せず、次の catch-up 観測で未対応として再浮上する。** 続けて `state.ts watch-set --id <id> --state watching` まで成功したら、**更新時の通知を 1 本送る** (文面は上記「更新時の通知」の規定に従う。PR URL と対応した指摘の件数を含める)。
    - **FAIL** → (判定 JSON は verifier が起動時に渡した verdict path へ既に書いている — オーケストレータは書かない) `state.ts phase-fail --id <id> --phase <phase>` を呼んで `attempts` を +1 する。SendMessage で実行エージェントへ「Fix required. Read required_fixes from `<verdict path の絶対パス>` and address them in phase `<phase>`.」を送る (required_fixes の中身をそのまま転記せず、ファイルのパスだけを渡す)。修正・再停止後に **新しい** 検証エージェントで再検証する。
 
@@ -449,17 +452,24 @@ done を回収したら、続けて**プロジェクト側のブランチを `or
 4. 返った JSON を `state.ts rebase-record --id <id> --blocked-onto <現在の origin/<base> の sha> --reason conflict --kind <kind> --cause <cause> --report <report>` で `review.rebase` に控え、**報告は 1〜2 行**にする (`<id>: origin/<base> へ載せ直せず (overlap: 同じ関数を両側が変更)。次: <next> — <report のパス>`)。
 5. `kind` で分岐: **`superseded`** → 解決しない。その PR がもう不要かもしれないことを報告に明示して終える (パイプラインは PR を閉じない)。**それ以外** → `state.ts rebase-resolve-pending --id <id> --from-tip <旧 tip>` を呼んで下記の解決サイクルへ。
 
+**手順 4・5 は `status: in_review` のタスク (この節を上から通ってきた載せ直し) 専用である。** `REBASE-CONFLICT` の停止通知から手順 3 だけを行った場合 (タスクは `status: in_progress`, `phase: finalize`)、`rebase-record` の前提は `status=="in_review" && review!=null`、`rebase-resolve-pending` の前提は `status=="in_review" && review.rebase!=null` なので、**どちらも必ず `conflict` で失敗する** — `pr_fix` の押し直し直前で `review` が既にあっても、`status` が `in_review` でないため同じく失敗する。この場合は控える先 (`review.rebase`) 自体が無いので state には何も書かず、返った JSON と控え・レポートのパスを**そのイテレーション内で持ち回り**、報告 1〜2 行を出したうえで下記「解決サイクル」の**「finalize から入る経路」**へ入る (`kind` が `superseded` でも実行エージェントは停止したまま残るので、そこの諦め方と同じく **finalize を `rebase: off` 付きで送り直し**、この変更はもう不要かもしれないことを報告に明示する)。
+
 #### 解決サイクル (rebase_fix)
 
 衝突の解消もパイプラインがやるが、コードの変更なので他のフェーズと同じ扱い — **実行エージェントが解き、フレッシュな検証ゲートが通してからでなければ push しない** (オーケストレーターが自分で解くことはしない。相手側の変更を黙って捨てても差分上は「解決済み」に見えるため、検証は必須)。対象は `review.rebase.resolve_pending` が真のタスクで、毎イテレーションの追従処理で拾う (修正サイクルと同じ位置)。
-**`review` がまだ無いタスク** (最初の PR を出す直前に executor が衝突) **では、そのイテレーション内でそのまま手順 1 に入る** (`resolve_pending`/`from_tip` は使わない — rebase は executor が既に abort 済み)。諦めるときは下の「諦め方」の代わりに **finalize を `rebase: off` 付きで送り直し、古い基点のまま PR を出させる**。
+**finalize から入る経路** (executor が `REBASE-CONFLICT` で停止した場合 — 最初の PR を出す直前、または `pr_fix` の押し直し直前に衝突): **そのイテレーション内でそのまま手順 1 に入る**。rebase は executor が既に abort 済みなので `resolve_pending`/`from_tip` は使わない。手順 0 は行わず (このタスクは既に飛行中で、預けられる `resolve_pending` も `review.watch` も無い — `watch-set` は `review.watch` が無いと失敗する)、手順 1 の verb だけが下記のとおり異なり、手順 2〜4 は同じである。
 
-0. 自分が所有する別の仕上げが既に `in_progress` なら始めない (修正サイクル手順 0 と同じ)。`resolve_pending` を真のまま置き、`state.ts watch-set --id <id> --session null` を呼んで次のイテレーションでここから拾い直す。
+- **この経路では `review.rebase` を触る verb を 1 つも呼べない** (`rebase-record` / `rebase-resolve-pending` / `rebase-start` / `rebase-give-up`)。タスクは `status: in_progress` (`phase: finalize`) で、これらの前提はいずれも `status=="in_review"` を含むためで、`pr_fix` の押し直し直前で `review` が既にある場合も同じく `conflict` で失敗する。衝突の控えとトリアージレポートのパスは state に置かず、そのイテレーション内で持ち回って手順 2 の SendMessage に載せる。
+- **諦めるとき**は下の「諦め方」(`rebase-give-up` を使う) の代わりに、**finalize を `rebase: off` 付きで送り直し、古い基点のまま PR を出させる (押し直させる)**。
+- 解消できて `finalize` → `FINALIZED` まで進んだときのレビュー待ち処理は、`rebase-done` を呼ばない別扱いになる (上記「レビュー待ち処理」の `rebase_fix` からの復帰の行の下段)。
+
+0. 自分が所有する別の仕上げが既に `in_progress` なら始めない (修正サイクル手順 0 と同じ)。`resolve_pending` を真のまま置き、`state.ts watch-set --id <id> --session null` を呼んで次のイテレーションでここから拾い直す (**finalize から入る経路ではこの手順を行わない** — 上記)。
 1. `state.ts rebase-start --id <id> --session <自分の id>` を呼ぶ (`status: in_progress, phase: rebase_fix, attempts: 0, session: <自分の id>, resolve_pending: false` を単一の書き込み)。**トラッカーへの `mark` はしない。この着手は飛行中の上限の対象外**。
+   **finalize から入る経路では代わりに `state.ts phase-pass --id <id> --from finalize --to rebase_fix` を呼ぶ** (`phase→rebase_fix, attempts→0` を単一の書き込み。前提は `status=="in_progress" && phase=="finalize"` だけで、`rebase-start` と違い `review` を一切見ない。`--from`/`--to` は `finalize`/`rebase_fix` を含む固定トークンを許容する)。`phase-pass` は `session` を書き換えないが、**この経路のタスクの `session` は `claim` / `set-executor` の時点で既に自分のものになっている**ので追加の書き込みは要らない (自分の実行エージェントからの停止通知でここへ来ており、`executor` が一致しない通知は手順 5 で既に捨てられている)。
 2. 実行エージェントへ SendMessage:「Rebase conflict. Rebase the branch onto `origin/<base>` and resolve the conflicts as phase "rebase_fix". conflict capture: `<.diff の絶対パス>` / triage: `<report の絶対パス>`.」送信できなければ、タスク実行の手順 3 と同じ形で新しい実行エージェントを起動し、Begin 行を「Begin with phase "rebase_fix". Rebase onto `origin/<base>`. conflict capture: `<パス>` / triage: `<パス>`.」に変える (**rebase 自体を実行エージェントにやらせる** — 検証を通っていない変更が finalize に混ざらないように)。
 3. `PHASE rebase_fix DONE` の停止通知 → フレッシュな検証ゲート (phase: `rebase_fix`、判定は `verdicts/rebase_fix-<n>-<attempt>.json`) → PASS なら通常どおり `finalize` → `FINALIZED` でレビュー待ち処理へ戻る。
 4. **`REBASE-CONFLICT — <パス>` で停止したら解消できなかったということ**。下の「諦め方」へ。FAIL は同じリトライ上限 (3 回)、**使い切っても blocked にしない** — 同じく「諦め方」へ。
-**諦め方**: `git -C <worktree> rebase --abort` (途中なら) の後 `git -C <worktree> reset --hard <review.rebase.from_tip>` で載せ直しを取り消し、`state.ts rebase-give-up --id <id> --blocked-onto <現在の origin/<base> の sha>` を呼んで `status: in_review` に戻し (`review.rebase.reason→conflict`、`blocked_onto` を更新。`kind`/`cause`/`report`/`from_tip` は既存値のまま)、トリアージのレポートのパスを添えて報告する。**ここは「リトライ上限」の唯一の例外である** — PR は古い基点のまま生きていてレビューできる状態は失われていない。
+**諦め方** (`review.rebase` を持つタスク専用。**finalize から入る経路では上記のとおり finalize を `rebase: off` 付きで送り直す**): `git -C <worktree> rebase --abort` (途中なら) の後 `git -C <worktree> reset --hard <review.rebase.from_tip>` で載せ直しを取り消し、`state.ts rebase-give-up --id <id> --blocked-onto <現在の origin/<base> の sha>` を呼んで `status: in_review` に戻し (`review.rebase.reason→conflict`、`blocked_onto` を更新。`kind`/`cause`/`report`/`from_tip` は既存値のまま)、トリアージのレポートのパスを添えて報告する。**ここは「リトライ上限」の唯一の例外である** — PR は古い基点のまま生きていてレビューできる状態は失われていない。
 
 ### タスクメトリクスの収集
 
