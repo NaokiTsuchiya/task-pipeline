@@ -501,6 +501,29 @@ give-up のままである。現行 SKILL.md では「この経路では rebase-
 }
 ```
 
+### 3.1b ノードごとのスキーマ — 判別付き oneOf
+
+v1 のスキーマは全フィールドを常に required にして null を許す平坦な形だった。v2 では
+queueItem を **progress と artifact.state をタグにした oneOf (tagged union)** として
+宣言し、ノードに存在しないフィールドはキーごと無いことにする:
+
+| ノード | そのノードにだけある形 |
+| --- | --- |
+| P: `queued` / `resting` | `run: null`、`blocked_reason: null` |
+| P: `running` | `run: { kind, gate, phase, attempts, executor, executor_last_event_at, takeover_at }`。`gate` は kind==initial のとき、かつそのときに限り非 null。`phase` は kind の列 + 迂回の要素に限る |
+| P: `blocked` | `run: null`、`blocked_reason: string` (非 null) |
+| A: `none` | `artifact: { state: "none" }` — 他のキーは無い |
+| A: `open` | グループ欄 {ref, branch, tip, base} + `follow` (ref が PR URL のとき object、それ以外 null)。follow の中は attention / asks / ledger / probe の全キー |
+| A: `merged` | グループ欄のみ。`follow` キー自体が無い |
+| A: `withdrawn` | グループ欄 + `asked: bool` + `note: string\|null`。`follow` キー自体が無い |
+
+これにより、1.5 節の不変条件 1 (run ⇔ running)・「merged / withdrawn に follow は
+無い」・gate の iff は**スキーマの構造として表現され**、`validate` 単体で違反が検出
+できる (v1 の欠陥 5「到達不能な組を書き込めた」への防波堤が、実行時アサーションと
+テストに加えてスキーマ層にも立つ)。実行時検査 (`assertItemInvariants` 相当) に残るのは
+スキーマで表現しにくい領域間の制約 (merged ⇒ resting、running(pr_fix) ⇒ open ∧
+asks.fix.taken、probe.proc ⇒ resting) だけになる。
+
 トップレベル (tracker / source / queue / candidates / relisted / promoted /
 withdrawn_branches / history / stalled / stalled_since) は変更しない。
 `schema_version` を 2 に上げる。
