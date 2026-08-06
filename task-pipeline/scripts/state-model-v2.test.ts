@@ -26,8 +26,11 @@ import {
   isFollowTarget,
   isLegalRunNode,
   listRunNodes,
+  makeFixAsk,
+  makeFollow,
+  makeProbe,
+  makeRebaseAsk,
   P_NODE_KEYS,
-  phasesForAxis,
   PROGRESS_VALUES,
   type RebaseAsk,
   rebaseAskAxisOf,
@@ -116,26 +119,24 @@ Deno.test("T-V2-NODE-1: legal P nodes are exactly the 19 nodes of design 1.5", (
   );
 });
 
-Deno.test("T-V2-NODE-2: phasesForAxis returns the designed phase counts and legality", () => {
-  const byAxis = new Map(
-    RUN_AXES.map((a) => [`${a.kind}/${a.gate ?? "-"}`, a]),
-  );
+Deno.test("T-V2-NODE-2: axis.phases() returns the designed phase counts and legality", () => {
+  const byAxis = new Map(RUN_AXES.map((a) => [a.axisKey(), a]));
 
   // 正例: 各axisの列 (数と内容)
   assertEquals(
-    phasesForAxis(byAxis.get("initial/full")!),
+    byAxis.get("initial/full")!.phases(),
     ["research", "plan", "implement", "report", "finalize", "rebase_fix"],
   );
   assertEquals(
-    phasesForAxis(byAxis.get("initial/light")!),
+    byAxis.get("initial/light")!.phases(),
     ["research+plan", "implement", "report", "finalize", "rebase_fix"],
   );
-  assertEquals(phasesForAxis(byAxis.get("pr_fix/-")!), [
+  assertEquals(byAxis.get("pr_fix")!.phases(), [
     "pr_fix",
     "finalize",
     "rebase_fix",
   ]);
-  assertEquals(phasesForAxis(byAxis.get("rebase_fix/-")!), [
+  assertEquals(byAxis.get("rebase_fix")!.phases(), [
     "rebase_fix",
     "finalize",
   ]);
@@ -181,67 +182,77 @@ Deno.test("T-V2-NODE-3: RunNode.key() matches the standalone P_NODE_KEYS encodin
 // T-V2-REBASE-ASK / T-V2-FIXASK — 領域Aのサブ軸導出 (受け入れ条件3)
 // ---------------------------------------------------------------------------
 
+// テスト用の rebase-ask (resolve/taken だけがこのテストの関心事)。
+function rebaseAskOf(resolve: boolean, taken: boolean) {
+  return makeRebaseAsk({
+    blocked_onto: "abc",
+    reason: "conflict",
+    at: "2026-08-07T00:00:00Z",
+    resolve,
+    taken,
+  });
+}
+
 Deno.test("T-V2-REBASE-ASK-1: derivation order is taken -> resolve -> quiet, total", () => {
   const cases: Array<[RebaseAsk, "taken" | "queued" | "quiet"]> = [
     [null, "quiet"],
-    [
-      {
-        blocked_onto: "abc",
-        reason: "conflict",
-        at: "2026-08-07T00:00:00Z",
-        resolve: false,
-        taken: false,
-      },
-      "quiet",
-    ],
-    [
-      {
-        blocked_onto: "abc",
-        reason: "conflict",
-        at: "2026-08-07T00:00:00Z",
-        resolve: true,
-        taken: false,
-      },
-      "queued",
-    ],
+    [rebaseAskOf(false, false), "quiet"],
+    [rebaseAskOf(true, false), "queued"],
     // 受け入れ条件3の反例: taken=true かつ resolve=false でも taken に分類される
     // (taken が resolve より優先する)
-    [
-      {
-        blocked_onto: "abc",
-        reason: "conflict",
-        at: "2026-08-07T00:00:00Z",
-        resolve: false,
-        taken: true,
-      },
-      "taken",
-    ],
+    [rebaseAskOf(false, true), "taken"],
     // 優先順位の確認: resolve=true が同時に立っていても taken が勝つ
-    [
-      {
-        blocked_onto: "abc",
-        reason: "conflict",
-        at: "2026-08-07T00:00:00Z",
-        resolve: true,
-        taken: true,
-      },
-      "taken",
-    ],
+    [rebaseAskOf(true, true), "taken"],
   ];
 
   for (const [input, expected] of cases) {
-    assertEquals(rebaseAskAxisOf(input), expected, JSON.stringify(input));
+    assertEquals(
+      rebaseAskAxisOf(input),
+      expected,
+      `resolve/taken = ${input?.resolve}/${input?.taken}`,
+    );
+    // レコードが有るときは、レコード自身の axis() が同じ判定を返す
+    if (input !== null) assertEquals(input.axis(), expected);
   }
+});
+
+// isResolveQueued() / isQuiet() は axis() の中からしか呼ばれない (isQuiet() に至っては
+// 実装側の呼び出しが無い) ため、axis() の出力だけを見るテストでは誤実装を観測できない —
+// axis() は isTaken() を先に見るので、taken=true の入力ではこれらの戻り値が結果に出ない。
+// そこで両述語を直接呼ぶ代表ケースを (taken, resolve) の3クラスずつ置く。
+Deno.test("T-V2-REBASE-ASK-2: isResolveQueued() is false unless resolve is declared and unconsumed", () => {
+  // 未消費の解決要求だけが真
+  assert(rebaseAskOf(true, false).isResolveQueued());
+  // resolve が立っていない
+  assertFalse(rebaseAskOf(false, false).isResolveQueued());
+  // 消費済み (taken) は、resolve が立っていても queued ではない。
+  // このクラスが `() => fields.resolve` (taken の連言落ち) を検出する。
+  assertFalse(rebaseAskOf(true, true).isResolveQueued());
+});
+
+Deno.test("T-V2-REBASE-ASK-3: isQuiet() is true only for the guard-only record", () => {
+  // ガードの控えだけ (発火可否を変えない)
+  assert(rebaseAskOf(false, false).isQuiet());
+  // 解決要求が queued に立っている
+  assertFalse(rebaseAskOf(true, false).isQuiet());
+  // 消費済み (taken)。このクラスが `() => !fields.resolve` (taken を見ない実装) を検出する。
+  assertFalse(rebaseAskOf(false, true).isQuiet());
 });
 
 Deno.test("T-V2-FIXASK-1: null/pending/taken classes", () => {
   const cases: Array<[FixAsk, "null" | "pending" | "taken"]> = [
     [null, "null"],
-    [{ ids: ["gh-1"], findings: "f", taken: false }, "pending"],
-    [{ ids: ["gh-1"], findings: "f", taken: true }, "taken"],
+    [makeFixAsk({ ids: ["gh-1"], findings: "f", taken: false }), "pending"],
+    [makeFixAsk({ ids: ["gh-1"], findings: "f", taken: true }), "taken"],
   ];
   for (const [input, expected] of cases) {
-    assertEquals(fixAskAxisOf(input), expected, JSON.stringify(input));
+    assertEquals(fixAskAxisOf(input), expected, `taken = ${input?.taken}`);
+    if (input !== null) {
+      // レコード自身のメソッドが同じ判定を返す
+      assertEquals(input.axis(), expected);
+      assertEquals(input.isTaken(), expected === "taken");
+      assertEquals(input.isPending(), expected === "pending");
+    }
   }
 });
 
@@ -291,14 +302,14 @@ Deno.test("T-V2-INV-2: artifact.state==merged implies progress==resting", () => 
 });
 
 Deno.test("T-V2-INV-3: running(pr_fix) implies open + follow + asks.fix.taken", () => {
-  const openFollowTaken: FollowRecord = {
+  const openFollowTaken: FollowRecord = makeFollow({
     attention: "auto",
     asks: {
-      fix: { ids: ["gh-1"], findings: "f", taken: true },
+      fix: makeFixAsk({ ids: ["gh-1"], findings: "f", taken: true }),
       rebase: null,
     },
-    probe: { proc: null },
-  };
+    probe: makeProbe({ proc: null }),
+  });
   assert(
     invariantPrFixImpliesOpenTaken(
       "running",
@@ -333,14 +344,14 @@ Deno.test("T-V2-INV-3: running(pr_fix) implies open + follow + asks.fix.taken", 
   );
 
   // 反例: pr_fix実行中なのに asks.fix.taken が立っていない
-  const openFollowNotTaken: FollowRecord = {
+  const openFollowNotTaken: FollowRecord = makeFollow({
     attention: "auto",
     asks: {
-      fix: { ids: ["gh-1"], findings: "f", taken: false },
+      fix: makeFixAsk({ ids: ["gh-1"], findings: "f", taken: false }),
       rebase: null,
     },
-    probe: { proc: null },
-  };
+    probe: makeProbe({ proc: null }),
+  });
   assertFalse(
     invariantPrFixImpliesOpenTaken(
       "running",
@@ -352,29 +363,31 @@ Deno.test("T-V2-INV-3: running(pr_fix) implies open + follow + asks.fix.taken", 
 });
 
 Deno.test("T-V2-INV-4: probe.proc != null implies progress == resting", () => {
-  assert(invariantProbeProcImpliesResting("resting", "watch-proc-1"));
-  assert(invariantProbeProcImpliesResting("running", null)); // vacuous
-  assertFalse(invariantProbeProcImpliesResting("running", "watch-proc-1"));
-  assertFalse(invariantProbeProcImpliesResting("queued", "watch-proc-1"));
+  const leased = makeProbe({ proc: "watch-proc-1" });
+  const idle = makeProbe({ proc: null });
+  assert(leased.hasLease());
+  assertFalse(idle.hasLease());
+
+  assert(invariantProbeProcImpliesResting("resting", leased));
+  assert(invariantProbeProcImpliesResting("running", idle)); // vacuous: no lease
+  assert(invariantProbeProcImpliesResting("running", null)); // vacuous: no probe
+  assertFalse(invariantProbeProcImpliesResting("running", leased));
+  assertFalse(invariantProbeProcImpliesResting("queued", leased));
 });
 
 Deno.test("T-V2-INV-5: taken (fix or rebase) implies progress == running", () => {
-  const fixTaken: FixAsk = { ids: ["gh-1"], findings: "f", taken: true };
-  const fixPending: FixAsk = { ids: ["gh-1"], findings: "f", taken: false };
-  const rebaseTaken: RebaseAsk = {
-    blocked_onto: "abc",
-    reason: "conflict",
-    at: "2026-08-07T00:00:00Z",
-    resolve: false,
+  const fixTaken: FixAsk = makeFixAsk({
+    ids: ["gh-1"],
+    findings: "f",
     taken: true,
-  };
-  const rebaseQuiet: RebaseAsk = {
-    blocked_onto: "abc",
-    reason: "conflict",
-    at: "2026-08-07T00:00:00Z",
-    resolve: false,
+  });
+  const fixPending: FixAsk = makeFixAsk({
+    ids: ["gh-1"],
+    findings: "f",
     taken: false,
-  };
+  });
+  const rebaseTaken: RebaseAsk = rebaseAskOf(false, true);
+  const rebaseQuiet: RebaseAsk = rebaseAskOf(false, false);
 
   // 両方false: 無条件でtrue
   assert(invariantTakenImpliesRunning("resting", fixPending, rebaseQuiet));
@@ -411,12 +424,22 @@ Deno.test("T-V2-STATUS-DERIVE-1: status(P, A) formula", () => {
 // T-V2-FOLLOW-TARGET — 追従対象の導出式 (1.3節)
 // ---------------------------------------------------------------------------
 
+// follow は必ず makeFollow で組む — メソッドは生成時の値を閉じ込めるので、
+// 既存レコードのスプレッドで一部だけ差し替えると判定が古い値のまま残る。
+function followOf(
+  attention: Attention,
+  fix: FixAsk,
+  rebase: RebaseAsk,
+): FollowRecord {
+  return makeFollow({
+    attention,
+    asks: { fix, rebase },
+    probe: makeProbe({ proc: null }),
+  });
+}
+
 Deno.test("T-V2-FOLLOW-TARGET-1: derivation and its negated-condition counterexamples", () => {
-  const targetFollow: FollowRecord = {
-    attention: "auto",
-    asks: { fix: null, rebase: null },
-    probe: { proc: null },
-  };
+  const targetFollow = followOf("auto", null, null);
 
   // 正例: 全条件を満たす最小の組
   assert(isFollowTarget("resting", "open", targetFollow));
@@ -433,39 +456,64 @@ Deno.test("T-V2-FOLLOW-TARGET-1: derivation and its negated-condition counterexa
   // 反例: attention != auto
   const humanAttention: Attention = { human: "manual" };
   assertFalse(
-    isFollowTarget("resting", "open", {
-      ...targetFollow,
-      attention: humanAttention,
-    }),
+    isFollowTarget("resting", "open", followOf(humanAttention, null, null)),
   );
 
   // 反例: fix-ask != null (pending)
   assertFalse(
-    isFollowTarget("resting", "open", {
-      ...targetFollow,
-      asks: {
-        fix: { ids: ["gh-1"], findings: "f", taken: false },
-        rebase: null,
-      },
-    }),
+    isFollowTarget(
+      "resting",
+      "open",
+      followOf(
+        "auto",
+        makeFixAsk({ ids: ["gh-1"], findings: "f", taken: false }),
+        null,
+      ),
+    ),
   );
 
   // 反例: rebase-ask != quiet (queued)
   assertFalse(
-    isFollowTarget("resting", "open", {
-      ...targetFollow,
-      asks: {
-        fix: null,
-        rebase: {
-          blocked_onto: "abc",
-          reason: "conflict",
-          at: "2026-08-07T00:00:00Z",
-          resolve: true,
-          taken: false,
-        },
-      },
-    }),
+    isFollowTarget(
+      "resting",
+      "open",
+      followOf("auto", null, rebaseAskOf(true, false)),
+    ),
   );
+});
+
+Deno.test("T-V2-FOLLOW-SUBAXES-1: follow.subAxes() reports the three sub-axis coordinates", () => {
+  assertEquals(followOf("auto", null, null).subAxes(), {
+    attention: "auto",
+    fixAsk: "null",
+    rebaseAsk: "quiet",
+  });
+
+  assertEquals(
+    followOf(
+      { human: "fix_limit" },
+      makeFixAsk({ ids: ["gh-1"], findings: "f", taken: true }),
+      rebaseAskOf(true, false),
+    ).subAxes(),
+    { attention: "human", fixAsk: "taken", rebaseAsk: "queued" },
+  );
+
+  // hasTakenFixAsk() は不変条件3が問うもの — 軸の taken と一致する
+  assert(
+    followOf(
+      "auto",
+      makeFixAsk({ ids: ["gh-1"], findings: "f", taken: true }),
+      null,
+    ).hasTakenFixAsk(),
+  );
+  assertFalse(
+    followOf(
+      "auto",
+      makeFixAsk({ ids: ["gh-1"], findings: "f", taken: false }),
+      null,
+    ).hasTakenFixAsk(),
+  );
+  assertFalse(followOf("auto", null, null).hasTakenFixAsk());
 });
 
 // ---------------------------------------------------------------------------

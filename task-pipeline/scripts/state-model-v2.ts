@@ -9,6 +9,10 @@
 //   (後続issue)。ここにあるのは領域P/Aの語彙・ノード導出・不変条件検査・到達可能性
 //   テストの枠のみ — apply系のverb関数は1つも無い。
 // - Deno API を呼ばない純粋関数群 (state-schema.ts / state-ownership.ts と同型)。
+// - レコード (axis / ask / probe / follow) は素の値比較を外へ散らさず、意味のある名前の
+//   メソッドで問い合わせる形にしてある。**生成は必ず対応する make* ファクトリを使うこと** —
+//   メソッドは生成時の値を閉じ込めるので、既存レコードをスプレッドして一部フィールドだけ
+//   差し替えると、メソッドが古い値のまま答える。差し替えたいときは make* で組み直す。
 //
 // テスト: state-model-v2.test.ts (直接importで検査)。実行は tests/state-model-v2.test.sh
 // (deno fmt/lint/check/test を通しで回す) 経由、または tests/run.sh の glob 自動検出。
@@ -41,28 +45,33 @@ export const FINALIZE_PHASE = "finalize" as const;
 // どの kind の finalize にも rebase_fix フェーズへの迂回辺がある (1.2節)。
 export const REBASE_FIX_DETOUR_PHASE = "rebase_fix" as const;
 
-export interface RunAxis {
-  readonly kind: RunKind;
-  readonly gate: Gate | null; // kind=="initial" のとき、かつそのときに限り非null
+// initial は gate を必ず持ち、それ以外の kind は必ず持たない。この差を同じ型の
+// `gate: Gate | null` で潰さず、判別可能ユニオンとして型を分ける — 「gate は
+// kind==initial のとき、かつそのときに限り非null」(1.2節) が型の構造そのものになる。
+export type FixRunKind = Exclude<RunKind, "initial">;
+
+interface RunAxisMethods {
+  // 自身のキー文字列 (PHASES_BY_AXIS の引き先であり、ノードキーの構成要素)。
+  axisKey(): string;
+  // 迂回フェーズ込みの、この axis の全フェーズ列。
+  phases(): readonly string[];
 }
 
-// kind×gate の4組。initial だけが gate を持つ (full/light)。pr_fix / rebase_fix は
-// gate=null (1.2節の表そのもの)。
-export const RUN_AXES: readonly RunAxis[] = [
-  { kind: "initial", gate: "full" },
-  { kind: "initial", gate: "light" },
-  { kind: "pr_fix", gate: null },
-  { kind: "rebase_fix", gate: null },
-];
-
-function runAxisKey(axis: RunAxis): string {
-  return axis.gate === null ? axis.kind : `${axis.kind}/${axis.gate}`;
+export interface InitialRunAxis extends RunAxisMethods {
+  readonly kind: "initial";
+  readonly gate: Gate;
 }
+
+export interface FixRunAxis extends RunAxisMethods {
+  readonly kind: FixRunKind;
+  readonly gate: null;
+}
+
+export type RunAxis = InitialRunAxis | FixRunAxis;
 
 // axisKey → 迂回フェーズ込みの全フェーズ列 (検証フェーズ + finalize + 迂回rebase_fix)。
 // rebase_fix kind 自身は既に rebase_fix を主フェーズとして持つため、末尾に別途足さない
-// (research.mdの表: 6/5/3/2)。「動的に末尾へ足すかどうかを毎回判定する」形ではなく、
-// 各axisの確定した列として最初から宣言する (PRレビュー指摘: 動的合成に意味が無い)。
+// (research.mdの表: 6/5/3/2)。
 const PHASES_BY_AXIS: Readonly<Record<string, readonly string[]>> = {
   "initial/full": [
     ...INITIAL_GATE_PHASE_SEQUENCES.full,
@@ -78,37 +87,57 @@ const PHASES_BY_AXIS: Readonly<Record<string, readonly string[]>> = {
   "rebase_fix": [REBASE_FIX_DETOUR_PHASE, FINALIZE_PHASE],
 };
 
-export function phasesForAxis(axis: RunAxis): readonly string[] {
-  const phases = PHASES_BY_AXIS[runAxisKey(axis)];
+function phasesByAxisKey(axisKey: string): readonly string[] {
+  const phases = PHASES_BY_AXIS[axisKey];
   if (phases === undefined) {
-    throw new Error(`BUG: unknown run axis ${runAxisKey(axis)}`);
+    throw new Error(`BUG: unknown run axis ${axisKey}`);
   }
   return phases;
 }
 
-// RunAxis (kind×gate) に phase を合成した形であることを型でも表す (extends RunAxis)。
-// key() は自身のキー文字列 ("queued"/"resting"/"blocked" と同じ語彙の
-// `running(${kind},${gate|"-"},${phase})`) を返す — ノード自身がキーを返すメソッドを
-// 持つ形にした (独立関数を都度呼ぶのではなく、生成時にノードへ束ねる)。
-export interface RunNode extends RunAxis {
-  readonly phase: string;
-  key(): string;
+export function makeInitialAxis(gate: Gate): InitialRunAxis {
+  const axisKey = `initial/${gate}`;
+  return {
+    kind: "initial",
+    gate,
+    axisKey: () => axisKey,
+    phases: () => phasesByAxisKey(axisKey),
+  };
 }
 
-function makeRunNode(axis: RunAxis, phase: string): RunNode {
-  const { kind, gate } = axis;
+export function makeFixAxis(kind: FixRunKind): FixRunAxis {
   return {
     kind,
-    gate,
-    phase,
-    key: () => `running(${kind},${gate ?? "-"},${phase})`,
+    gate: null,
+    axisKey: () => kind,
+    phases: () => phasesByAxisKey(kind),
   };
+}
+
+// kind×gate の4組 (1.2節の表そのもの)。
+export const RUN_AXES: readonly RunAxis[] = [
+  makeInitialAxis("full"),
+  makeInitialAxis("light"),
+  makeFixAxis("pr_fix"),
+  makeFixAxis("rebase_fix"),
+];
+
+// RunAxis に phase を合成した形であることを型でも表す (RunAxis との交差型)。
+// key() はノード自身のキー文字列を返すメソッド (axis 側の axisKey() とは別物)。
+export type RunNode = RunAxis & {
+  readonly phase: string;
+  key(): string;
+};
+
+function makeRunNode(axis: RunAxis, phase: string): RunNode {
+  const key = `running(${axis.kind},${axis.gate ?? "-"},${phase})`;
+  return { ...axis, phase, key: () => key };
 }
 
 export function listRunNodes(): readonly RunNode[] {
   const nodes: RunNode[] = [];
   for (const axis of RUN_AXES) {
-    for (const phase of phasesForAxis(axis)) {
+    for (const phase of axis.phases()) {
       nodes.push(makeRunNode(axis, phase));
     }
   }
@@ -127,7 +156,9 @@ export const P_NODE_KEYS: readonly string[] = [
   ...listRunNodes().map((node) => node.key()),
 ];
 
-// 任意の (kind, gate, phase) 組が RUN_AXES × phasesForAxis の宣言に含まれるかを判定。
+// 任意の (kind, gate, phase) 組が RUN_AXES × axis.phases() の宣言に含まれるかを判定。
+// 引数は外から来る素の形 (型で守られていないデータ) を受けるため、判別可能ユニオンの
+// RunAxis ではなく平坦な形で受ける。
 export function isLegalRunNode(
   node: {
     readonly kind: RunKind;
@@ -139,7 +170,7 @@ export function isLegalRunNode(
     a.kind === node.kind && a.gate === node.gate
   );
   if (axis === undefined) return false;
-  return phasesForAxis(axis).includes(node.phase);
+  return axis.phases().includes(node.phase);
 }
 
 // ---------------------------------------------------------------------------
@@ -164,22 +195,52 @@ export type HumanAttentionReason =
 
 export type Attention = "auto" | { readonly human: HumanAttentionReason };
 
-export interface FixAskRecord {
+export const FIX_ASK_AXIS_VALUES = ["null", "pending", "taken"] as const;
+export type FixAskAxis = (typeof FIX_ASK_AXIS_VALUES)[number];
+
+// レコードが存在するときに取りうる軸 ("null" は「レコードが無い」の意味なので除く)。
+export type PresentFixAskAxis = Exclude<FixAskAxis, "null">;
+
+export interface FixAskFields {
   readonly ids: readonly string[];
   readonly findings: string;
   readonly taken: boolean;
 }
-export type FixAsk = FixAskRecord | null;
 
-export const FIX_ASK_AXIS_VALUES = ["null", "pending", "taken"] as const;
-export type FixAskAxis = (typeof FIX_ASK_AXIS_VALUES)[number];
-
-export function fixAskAxisOf(fixAsk: FixAsk): FixAskAxis {
-  if (fixAsk === null) return "null";
-  return fixAsk.taken ? "taken" : "pending";
+// 値の素の比較 (`fix.taken === true` 等) を外に散らさず、意味のある名前のメソッドで
+// 与える (レビュー指摘 rv-4876745244)。
+export interface FixAskRecord extends FixAskFields {
+  // 要求が仕上げ run に消費済みか (fix-start が taken を立てた後か)。
+  isTaken(): boolean;
+  // 未消費の要求として保留中か。
+  isPending(): boolean;
+  axis(): PresentFixAskAxis;
 }
 
-export interface RebaseAskRecord {
+export function makeFixAsk(fields: FixAskFields): FixAskRecord {
+  const { ids, findings, taken } = fields;
+  return {
+    ids,
+    findings,
+    taken,
+    isTaken: () => taken,
+    isPending: () => !taken,
+    axis: () => (taken ? "taken" : "pending"),
+  };
+}
+
+export type FixAsk = FixAskRecord | null;
+
+// null (レコード自体が無い) を含めた3値への導出。レコードが有るときの判定は
+// レコード自身の axis() が持ち、ここは null の場合だけを足す薄い包み。
+export function fixAskAxisOf(fixAsk: FixAsk): FixAskAxis {
+  return fixAsk === null ? "null" : fixAsk.axis();
+}
+
+export const REBASE_ASK_AXIS_VALUES = ["taken", "queued", "quiet"] as const;
+export type RebaseAskAxis = (typeof REBASE_ASK_AXIS_VALUES)[number];
+
+export interface RebaseAskFields {
   readonly blocked_onto: string;
   readonly reason: string;
   readonly kind?: string;
@@ -190,32 +251,57 @@ export interface RebaseAskRecord {
   readonly from_tip?: string;
   readonly taken: boolean;
 }
+
+export interface RebaseAskRecord extends RebaseAskFields {
+  // 要求が解決サイクル run に消費済みか。
+  isTaken(): boolean;
+  // 解決サイクル行きが宣言されていて、まだ消費されていないか。
+  isResolveQueued(): boolean;
+  // 発火可否を変えない、載せ直しガードの控えだけの状態か。
+  isQuiet(): boolean;
+  // 判定順: taken が真 → "taken"、resolve が真 → "queued"、それ以外 → "quiet" (1.5節)。
+  axis(): RebaseAskAxis;
+}
+
+export function makeRebaseAsk(fields: RebaseAskFields): RebaseAskRecord {
+  const isTaken = () => fields.taken;
+  const isResolveQueued = () => !fields.taken && fields.resolve;
+  const axis = (): RebaseAskAxis => {
+    if (isTaken()) return "taken";
+    if (isResolveQueued()) return "queued";
+    return "quiet";
+  };
+  return {
+    ...fields,
+    isTaken,
+    isResolveQueued,
+    isQuiet: () => axis() === "quiet",
+    axis,
+  };
+}
+
 export type RebaseAsk = RebaseAskRecord | null;
 
-export const REBASE_ASK_AXIS_VALUES = ["taken", "queued", "quiet"] as const;
-export type RebaseAskAxis = (typeof REBASE_ASK_AXIS_VALUES)[number];
-
-// 判定順: taken が真 → "taken"、resolve が真 → "queued"、それ以外 → "quiet" (1.5節に明記)。
+// null (レコード自体が無い) も "quiet" に落ちる — 1.5節が「記録なし」と「ガードの控え
+// だけがある」を同じ座標として扱うと明記しているため。
 export function rebaseAskAxisOf(rebaseAsk: RebaseAsk): RebaseAskAxis {
-  if (rebaseAsk === null) return "quiet";
-  if (rebaseAsk.taken) return "taken";
-  if (rebaseAsk.resolve) return "queued";
-  return "quiet";
+  return rebaseAsk === null ? "quiet" : rebaseAsk.axis();
 }
 
 // probe レコードのうち不変条件4の検査に要る最小形 (proc の有無だけ。他フィールド
 // (proc_started_at/sig/head/ci/checked_at/errors/note) はこのタスクでは扱わない)。
-export interface ProbeRecord {
+export interface ProbeFields {
   readonly proc: string | null;
 }
 
-export interface FollowRecord {
-  readonly attention: Attention;
-  readonly asks: {
-    readonly fix: FixAsk;
-    readonly rebase: RebaseAsk;
-  };
-  readonly probe: ProbeRecord;
+export interface ProbeRecord extends ProbeFields {
+  // 追従プロセスのリースが張られているか。
+  hasLease(): boolean;
+}
+
+export function makeProbe(fields: ProbeFields): ProbeRecord {
+  const { proc } = fields;
+  return { proc, hasLease: () => proc !== null };
 }
 
 export interface OpenSubAxes {
@@ -224,12 +310,42 @@ export interface OpenSubAxes {
   readonly rebaseAsk: RebaseAskAxis;
 }
 
-// 領域Aのサブ軸座標 (attention 2値 × fix-ask 3値 × rebase-ask 3値。follow の3サブ軸)。
-export function openSubAxesOf(follow: FollowRecord): OpenSubAxes {
+export interface FollowFields {
+  readonly attention: Attention;
+  readonly asks: {
+    readonly fix: FixAsk;
+    readonly rebase: RebaseAsk;
+  };
+  readonly probe: ProbeRecord;
+}
+
+export interface FollowRecord extends FollowFields {
+  // 次アクションを機械に委ねる意図か (人に委ねる human の対)。
+  isAuto(): boolean;
+  fixAxis(): FixAskAxis;
+  rebaseAxis(): RebaseAskAxis;
+  // 消費済みの fix 要求を抱えているか (不変条件3が問うもの)。
+  hasTakenFixAsk(): boolean;
+  // 領域Aのサブ軸座標 (attention 2値 × fix-ask 3値 × rebase-ask 3値)。
+  subAxes(): OpenSubAxes;
+}
+
+export function makeFollow(fields: FollowFields): FollowRecord {
+  const { attention, asks } = fields;
+  const isAuto = () => attention === "auto";
+  const fixAxis = () => fixAskAxisOf(asks.fix);
+  const rebaseAxis = () => rebaseAskAxisOf(asks.rebase);
   return {
-    attention: follow.attention === "auto" ? "auto" : "human",
-    fixAsk: fixAskAxisOf(follow.asks.fix),
-    rebaseAsk: rebaseAskAxisOf(follow.asks.rebase),
+    ...fields,
+    isAuto,
+    fixAxis,
+    rebaseAxis,
+    hasTakenFixAsk: () => asks.fix !== null && asks.fix.isTaken(),
+    subAxes: () => ({
+      attention: isAuto() ? "auto" : "human",
+      fixAsk: fixAxis(),
+      rebaseAsk: rebaseAxis(),
+    }),
   };
 }
 
@@ -279,9 +395,9 @@ export function isFollowTarget(
   if (progress !== "resting") return false;
   if (artifactState !== "open") return false;
   if (follow === null) return false;
-  if (follow.attention !== "auto") return false;
-  if (fixAskAxisOf(follow.asks.fix) !== "null") return false;
-  if (rebaseAskAxisOf(follow.asks.rebase) !== "quiet") return false;
+  if (!follow.isAuto()) return false;
+  if (follow.fixAxis() !== "null") return false;
+  if (follow.rebaseAxis() !== "quiet") return false;
   return true;
 }
 
@@ -324,8 +440,7 @@ export function invariantPrFixImpliesOpenTaken(
   return (
     artifactState === "open" &&
     follow !== null &&
-    follow.asks.fix !== null &&
-    follow.asks.fix.taken === true
+    follow.hasTakenFixAsk()
   );
 }
 
@@ -334,9 +449,10 @@ export function invariantPrFixImpliesOpenTaken(
 // run を作る — 遷移側の責務。ここでは snapshot 上の帰結だけを検査する)
 export function invariantProbeProcImpliesResting(
   progress: Progress,
-  probeProc: string | null,
+  probe: ProbeRecord | null,
 ): boolean {
-  return probeProc === null || progress === "resting";
+  if (probe === null || !probe.hasLease()) return true;
+  return progress === "resting";
 }
 
 // 不変条件5 (検査可能な残差): taken==true ⇒ progress == running。
@@ -356,8 +472,8 @@ export function invariantTakenImpliesRunning(
   fixAsk: FixAsk,
   rebaseAsk: RebaseAsk,
 ): boolean {
-  const anyTaken = (fixAsk !== null && fixAsk.taken) ||
-    (rebaseAsk !== null && rebaseAsk.taken);
+  const anyTaken = (fixAsk !== null && fixAsk.isTaken()) ||
+    (rebaseAsk !== null && rebaseAsk.isTaken());
   return !anyTaken || progress === "running";
 }
 
