@@ -155,6 +155,15 @@ open = {
 - **`probe` (追従プロセスの観測キャッシュとリース)** — `proc` は watch プロセスの
   リース、残りは観測キャッシュ。**「追従中である」という状態は保存しない**。
 
+follow は「現在状態を 1 つ持つ機械」ではなく、状態機械 1 個 (attention) + ラッチ 2 個
+(asks) + 累積データ 2 個 (ledger / probe) の束である。生まれるのは `ship` が open を
+新規作成するとき (ref が PR URL のとき) で、初期値は固定:
+`attention: "auto"`、asks は両方 null、ledger は全て空 (fix_attempts 0)、probe は全て
+null (errors 0)。**`probe.sig: null` が最初の watch 起動を catch-up 観測から始めさせる
+引き金**であり (v1 の watch-init と同じ仕掛け)、`claim` の周回リセット (2.3 節) は
+follow を作り直さずにこの初期値へ部分的に戻す (handled だけ保持)。消滅は親 open を
+出るとき (merged / withdrawn) で、丸ごと消える。
+
 **`attention` は現行 `watch.state` の置き換えだが、意味が違う。** `watch.state ==
 "watching"` は「追従している」という主張だったが、実際に追従しているかとは同期して
 おらず、そこに欠陥が集中した (recover-done / restore が watching を残す、pr_fix 中は
