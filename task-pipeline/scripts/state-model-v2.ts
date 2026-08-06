@@ -59,23 +59,31 @@ function runAxisKey(axis: RunAxis): string {
   return axis.gate === null ? axis.kind : `${axis.kind}/${axis.gate}`;
 }
 
-// axisKey → 主フェーズ列 (検証フェーズ + finalize。迂回フェーズ rebase_fix は含まない)。
-const MAIN_PHASES_BY_AXIS: Readonly<Record<string, readonly string[]>> = {
-  "initial/full": [...INITIAL_GATE_PHASE_SEQUENCES.full, FINALIZE_PHASE],
-  "initial/light": [...INITIAL_GATE_PHASE_SEQUENCES.light, FINALIZE_PHASE],
-  "pr_fix": ["pr_fix", FINALIZE_PHASE],
+// axisKey → 迂回フェーズ込みの全フェーズ列 (検証フェーズ + finalize + 迂回rebase_fix)。
+// rebase_fix kind 自身は既に rebase_fix を主フェーズとして持つため、末尾に別途足さない
+// (research.mdの表: 6/5/3/2)。「動的に末尾へ足すかどうかを毎回判定する」形ではなく、
+// 各axisの確定した列として最初から宣言する (PRレビュー指摘: 動的合成に意味が無い)。
+const PHASES_BY_AXIS: Readonly<Record<string, readonly string[]>> = {
+  "initial/full": [
+    ...INITIAL_GATE_PHASE_SEQUENCES.full,
+    FINALIZE_PHASE,
+    REBASE_FIX_DETOUR_PHASE,
+  ],
+  "initial/light": [
+    ...INITIAL_GATE_PHASE_SEQUENCES.light,
+    FINALIZE_PHASE,
+    REBASE_FIX_DETOUR_PHASE,
+  ],
+  "pr_fix": ["pr_fix", FINALIZE_PHASE, REBASE_FIX_DETOUR_PHASE],
   "rebase_fix": [REBASE_FIX_DETOUR_PHASE, FINALIZE_PHASE],
 };
 
-// axis → 迂回フェーズ込みの全フェーズ列。rebase_fix kind 自身は既に列に
-// rebase_fix を持つため追加しない (research.mdの表: 6/5/3/2)。
 export function phasesForAxis(axis: RunAxis): readonly string[] {
-  const main = MAIN_PHASES_BY_AXIS[runAxisKey(axis)];
-  if (main === undefined) {
+  const phases = PHASES_BY_AXIS[runAxisKey(axis)];
+  if (phases === undefined) {
     throw new Error(`BUG: unknown run axis ${runAxisKey(axis)}`);
   }
-  if (main.includes(REBASE_FIX_DETOUR_PHASE)) return main;
-  return [...main, REBASE_FIX_DETOUR_PHASE];
+  return phases;
 }
 
 export interface RunNode {
