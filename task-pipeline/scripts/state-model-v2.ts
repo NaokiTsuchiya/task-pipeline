@@ -86,27 +86,33 @@ export function phasesForAxis(axis: RunAxis): readonly string[] {
   return phases;
 }
 
-export interface RunNode {
-  readonly kind: RunKind;
-  readonly gate: Gate | null;
+// RunAxis (kind×gate) に phase を合成した形であることを型でも表す (extends RunAxis)。
+// key() は自身のキー文字列 ("queued"/"resting"/"blocked" と同じ語彙の
+// `running(${kind},${gate|"-"},${phase})`) を返す — ノード自身がキーを返すメソッドを
+// 持つ形にした (独立関数を都度呼ぶのではなく、生成時にノードへ束ねる)。
+export interface RunNode extends RunAxis {
   readonly phase: string;
+  key(): string;
 }
 
-// running(...) の16ノードを列挙 (RUN_AXES × phasesForAxis)。
+function makeRunNode(axis: RunAxis, phase: string): RunNode {
+  const { kind, gate } = axis;
+  return {
+    kind,
+    gate,
+    phase,
+    key: () => `running(${kind},${gate ?? "-"},${phase})`,
+  };
+}
+
 export function listRunNodes(): readonly RunNode[] {
   const nodes: RunNode[] = [];
   for (const axis of RUN_AXES) {
     for (const phase of phasesForAxis(axis)) {
-      nodes.push({ kind: axis.kind, gate: axis.gate, phase });
+      nodes.push(makeRunNode(axis, phase));
     }
   }
   return nodes;
-}
-
-// 領域Pの合法ノードキー文字列。"queued" | "resting" | "blocked" |
-// `running(${kind},${gate|"-"},${phase})` の形。
-export function runNodeKey(node: RunNode): string {
-  return `running(${node.kind},${node.gate ?? "-"},${node.phase})`;
 }
 
 export const NON_RUNNING_P_NODE_KEYS = [
@@ -118,7 +124,7 @@ export const NON_RUNNING_P_NODE_KEYS = [
 // 領域Pの合法ノードキー全部 (queued/resting/blocked + running(...)の16) = 19。
 export const P_NODE_KEYS: readonly string[] = [
   ...NON_RUNNING_P_NODE_KEYS,
-  ...listRunNodes().map(runNodeKey),
+  ...listRunNodes().map((node) => node.key()),
 ];
 
 // 任意の (kind, gate, phase) 組が RUN_AXES × phasesForAxis の宣言に含まれるかを判定。

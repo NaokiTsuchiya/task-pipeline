@@ -33,7 +33,6 @@ import {
   rebaseAskAxisOf,
   RUN_AXES,
   RUN_KIND_VALUES,
-  runNodeKey,
 } from "./state-model-v2.ts";
 
 // ---------------------------------------------------------------------------
@@ -159,8 +158,23 @@ Deno.test("T-V2-NODE-2: phasesForAxis returns the designed phase counts and lega
 
   // 正例の網羅性: listRunNodes() の全要素が isLegalRunNode を満たす
   for (const node of listRunNodes()) {
-    assert(isLegalRunNode(node), `expected legal: ${runNodeKey(node)}`);
+    assert(isLegalRunNode(node), `expected legal: ${node.key()}`);
   }
+});
+
+Deno.test("T-V2-NODE-3: RunNode.key() matches the standalone P_NODE_KEYS encoding", () => {
+  // key() がノード自身のメソッドとして生成時に束ねられていること、かつその出力が
+  // P_NODE_KEYS の構築に使ったものと同一であることを確認する。
+  for (const node of listRunNodes()) {
+    assertEquals(
+      node.key(),
+      `running(${node.kind},${node.gate ?? "-"},${node.phase})`,
+    );
+  }
+  assertEquals(
+    listRunNodes().map((n) => n.key()),
+    P_NODE_KEYS.slice(3), // 先頭3件 (queued/resting/blocked) を除いた running(...) 分
+  );
 });
 
 // ---------------------------------------------------------------------------
