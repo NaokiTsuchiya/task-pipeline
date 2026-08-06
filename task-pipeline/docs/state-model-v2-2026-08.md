@@ -44,7 +44,7 @@ queue の各エントリは、次の 2 領域の直積として状態を持つ�
 | --- | --- |
 | `none` | まだ共有できる成果物が無い (未着手、または `finish=none` で working tree に残した) |
 | `open{...}` | ブランチ/PR として出ている。複合状態 (下記 1.3)。マージ待ち |
-| `merged{ref, branch, tip, base}` | ユーザーのマージが証明された。現行の `done` |
+| `merged{ref, branch, tip, base}` | ユーザーのマージが証明された。現行の `done`。真の終端 — 片付けが済んだら `retire` で queue を離脱する (2.5 節) |
 | `withdrawn{ref, branch, tip, base, asked, note}` | PR が未マージで閉じられた。現行の `review.withdrawn` |
 
 `merged` と `withdrawn` はグループ欄 (ref / branch / tip / base) を保持し、`follow` の子
@@ -252,7 +252,8 @@ follow の 3 サブ軸が現行の watch 軸 / rebase 軸に相当する行列�
 | `phase-fail --phase` | running(k, 検証フェーズ) | 同ノード (attempts+1) | — |
 | `block --reason` | running(*) | blocked | — (probe.proc は不変条件 4 で既に null)。session→null |
 | `dequeue` | running(*) | (queue から削除) | — |
-| `restore` | resting, blocked | queued | merged は artifact ごと破棄して none に戻す (マージ済み PR の情報は history とトラッカーに残り、次の engagement は新しい PR を作る)。open/withdrawn/none は不変。probe.proc→null、session→null |
+| `restore` | resting (artifact ≠ merged), blocked | queued | open/withdrawn/none は不変。probe.proc→null、session→null。merged からの復帰経路は無い — merged は `retire` で queue を離脱する終端 (2.5 節)。再オープンは新規候補として通常の承認に入る |
+| `retire` | resting × merged (揮発資源ゼロ) | (queue から削除) | `completed` へ {id, done_at} を控える。同じ書き込みで completed の 24 時間超の控えを掃除する (2.5 節) |
 
 **完了系 (P と A をまたぐ。多段列を 1 イベントに畳んだもの):**
 
@@ -421,7 +422,32 @@ give-up のままである。現行 SKILL.md では「この経路では rebase-
 主張) が消え、mark 導出と gate の不変条件が壊れる」ことを示した。迂回を kind では
 なく phase の往復にすることで、来歴の座標を壊さずに同じ遷移を表現している。
 
-### 2.5 現行 43 verb からの対応表
+### 2.5 queue の純化 — merged は `retire` で離脱する
+
+queue は「未完了の作業集合」であり、**マージが回収され揮発資源も worktree も片付いた
+タスクは queue を離れる**。v1 は done エントリを queue に永久に残していたが、回収後の
+done エントリの読み手は 2 つ — (a) トラッカーの反映遅延で `list` に一瞬再登場したとき
+「完了済み」と判るための照合先、(b) ユーザーが再オープンしたときの復帰先 — しか無く、
+(a) は小さな控えで足り、(b) は復帰ではなく新規実行として扱う方が正しい (マージ済みの
+成果の上に新しい要求が来た、ということだから)。
+
+- **離脱の手順**: done 回収の後処理一式の最後、worktree / branch の片付けが成功したら
+  `retire --id` を呼ぶ。queue からエントリを外し、トップレベルの `completed` 配列へ
+  `{id, done_at}` を控える (単一の書き込み)。片付けに失敗した (未コミット変更が残って
+  いる等) 場合は retire を呼ばずに resting × merged のまま残す — `next` が次の
+  イテレーションで「片付けてから retire」を再導出する (片付けは冪等)。
+- **`completed` の役割と掃除**: `list` に completed の id が再登場したら、relisted と
+  同じ 10 分判定を適用する — 10 分未満なら反映遅延として無視、10 分以上残っていれば
+  ユーザーの再オープンなので**新規候補として通常の承認へ**入れる (restore は使わない)。
+  控えは retire のたびに 24 時間超のものを掃除する — 反映遅延は分単位で解消するので、
+  24 時間はこの照合の用途に十分な保持期間である。
+- **モデルへの波及**: `merged` が真の終端ノードになり (出口は retire のみ)、restore の
+  from から merged が消える。これにより「restore が merged を none に破棄する」という
+  特例規則が不要になり、restore は resting | blocked → queued だけの素直な verb に戻る。
+  queue が有界になるので、`next` の走査も承認手順 1 の除外計算も未完了の作業だけを見れば
+  よくなる。
+
+### 2.6 現行 43 verb からの対応表
 
 | 現行 | v2 | 変化 |
 | --- | --- | --- |
@@ -450,7 +476,8 @@ give-up のままである。現行 SKILL.md では「この経路では rebase-
 | `recover-done` | `merged` | open→merged。watch 静止処理が消える |
 | `withdraw` `withdraw-asked` `withdraw-remove` | 同名 | withdrawn が領域 A のノードになる |
 | `candidates-set` `candidates-drop` `promoted-add` `promoted-drop` `relisted-add` `relisted-drop` `stalled-set` | 同名 | 変更なし |
-| `restore` | `restore` | gate 復元処理が消える (gate は run の中にしか無い)。merged→none を加える |
+| `restore` | `restore` | gate 復元処理が消える (gate は run の中にしか無い)。from から done (merged) が消える |
+| — | `retire` | 新設 (2.5 節)。merged の queue 離脱と completed への控え |
 | — | `next` | 新設 (5 節) |
 
 ## 3. データ — state.json v2
@@ -524,9 +551,9 @@ queueItem を **progress と artifact.state をタグにした oneOf (tagged uni
 スキーマで表現しにくい領域間の制約 (merged ⇒ resting、running(pr_fix) ⇒ open ∧
 asks.fix.taken、probe.proc ⇒ resting) だけになる。
 
-トップレベル (tracker / source / queue / candidates / relisted / promoted /
-withdrawn_branches / history / stalled / stalled_since) は変更しない。
-`schema_version` を 2 に上げる。
+トップレベルは `completed` 配列 (`[{id, done_at}]` — retire の控え。2.5 節) を足す
+以外は変更しない (tracker / source / queue / candidates / relisted / promoted /
+withdrawn_branches / history / stalled / stalled_since)。`schema_version` を 2 に上げる。
 
 ### 3.2 移行
 
@@ -539,7 +566,7 @@ CLI に純関数 `migrateV1toV2` を置き、`init` が `schema_version == 1` �
 | `status: approved` | `progress: queued` |
 | `status: in_progress` + `phase`/`gate`/`attempts`/`executor` 系 | `progress: running`, `run: {kind: phase から導出, gate, phase, attempts, executor…}` — phase が `pr_fix` なら kind=pr_fix、`rebase_fix` なら review.rebase が有れば kind=rebase_fix (解決サイクル)・無ければ kind=initial の迂回とみなす、`finalize` なら **kind は判別不能なので `initial` とみなす** (v1 に来歴が無いこと自体が今回の欠陥。移行時に rebase_fix / finalize 中のタスクが居る場合だけ人が確認する) |
 | `status: in_review` | `progress: resting` |
-| `status: done` | `progress: resting`, `artifact.state: merged` |
+| `status: done` | 原則 queue から外し `completed` へ `{id, done_at: 移行時刻}` を控える (retire 相当)。`worktree` が非 null (片付けが未了) の item だけ `progress: resting`, `artifact.state: merged` で残す |
 | `status: blocked` + `blocked_reason` | `progress: blocked` |
 | `review: null` | `artifact: {state: "none"}` |
 | `review.{ref,branch,tip,base}` | `artifact.{ref,branch,tip,base}` (state: open。`withdrawn: true` なら withdrawn、status done なら merged) |
@@ -617,7 +644,7 @@ PR #28 で解消された確認済み欠陥 12 件 (番号 1・6〜12 はリポ�
 行列テスト (T-MX)・フレームテスト (T-FRAME)・整合テスト (T-ALIGN)・文書照合 (T-D)・
 権限テスト (T-P) の**枠組みはそのまま**で、座標が変わる: P 軸は 19 ノード、A 軸は
 state×attention×fix-ask×rebase-ask のサブ軸。CLI をサブプロセス起動する state.test.ts の
-安全網は verb 対応表 (2.5) に沿って書き直す。
+安全網は verb 対応表 (2.6) に沿って書き直す。
 
 ## 5. 決定論 — `next` が導出するもの
 
@@ -650,6 +677,8 @@ state.json (と state ディレクトリ内で CLI が読めるもの: `task_cou
   引き継ぎ / 何もしない、の分岐 (現行「飛行中の扱い」)
 - **着手可否**: max_open (resting×open×follow の件数)・max_tasks (task_counts の行数)・
   併走の枠 (running の kind 別件数) の判定
+- **回収の後始末**: resting × merged のタスク → 「worktree / branch を片付けて `retire`
+  せよ」(片付けは冪等なので、前回失敗していても同じ導出を繰り返すだけでよい)
 - **観測の依頼**: resting×open×tip≠null のタスクの「マージ証明を git で確認せよ」、
   approved が無いときの「アダプタ list を呼べ」— CLI は git を触れないので、これらは
   アクションではなく**観測依頼**として返し、結果はイベント (verb) として戻る
@@ -663,7 +692,7 @@ state.json (と state ディレクトリ内で CLI が読めるもの: `task_cou
 | --- | --- |
 | 観測結果 (watcher / git / トラッカー) | fix-request、rebase-request、observe、merged、withdraw、review-only、answered-set、dequeue (着手済み検出) |
 | 実行イベント (executor の停止通知と検証判定) | advance、phase-fail、ship、block、rebase-start 入口 b、rebase-forgo、rebase-give-up |
-| 導出判断 (状態から due を計算) | claim、fix-start、rebase-start 入口 a、probe-run、release |
+| 導出判断 (状態から due を計算) | claim、fix-start、rebase-start 入口 a、probe-run、release、retire |
 | 人の操作 | approve、restore、attention-set --auto、withdraw-remove |
 
 - トラッカーの list 結果・タスク本文・gate 宣言 (アダプタ経由)
