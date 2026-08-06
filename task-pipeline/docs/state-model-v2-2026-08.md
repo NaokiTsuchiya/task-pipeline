@@ -633,6 +633,16 @@ state.json (と state ディレクトリ内で CLI が読めるもの: `task_cou
 
 ### 5.2 導出できない入力 (外部から渡すもの)
 
+遷移 (verb) はイベント源で 4 分類でき、`next` が導出できるのは「導出判断」の行だけで
+ある。残り 3 行が、この節で列挙する外部入力に対応する:
+
+| イベント源 | verb の例 |
+| --- | --- |
+| 観測結果 (watcher / git / トラッカー) | fix-request、rebase-request、observe、merged、withdraw、review-only、answered-set、dequeue (着手済み検出) |
+| 実行イベント (executor の停止通知と検証判定) | advance、phase-fail、ship、block、rebase-start 入口 b、rebase-forgo、rebase-give-up |
+| 導出判断 (状態から due を計算) | claim、fix-start、rebase-start 入口 a、probe-run、release |
+| 人の操作 | approve、restore、attention-set --auto、withdraw-remove |
+
 - トラッカーの list 結果・タスク本文・gate 宣言 (アダプタ経由)
 - 実行エージェントの停止通知の行 (`PHASE … DONE` / `BLOCKED` / `FINALIZED` /
   `REBASE-CONFLICT`) と送り元 agentId
