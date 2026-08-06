@@ -1,0 +1,532 @@
+<!--
+  state-model-v2 設計文書 (state-model-v2-2026-08.md) の可視化アーティファクトのソース。
+  公開先: https://claude.ai/code/artifact/0c204752-32f1-4519-b6ed-cdf7ac7c3aad
+  <pre class="mermaid"> の図は claude.ai のアーティファクトランタイムがネイティブ描画する。
+  ローカルでこのファイルを直接開くと図は mermaid ソースのテキストのまま表示される
+  (mermaid 対応ビューアで開くか、公開 URL で見ること)。
+  更新するときはこのファイルを編集し、同じ URL へ再公開する (内容の正は設計文書側)。
+-->
+<title>task-pipeline 状態モデル v2</title>
+<style>
+  :root {
+    --bg: #F5F7F6;
+    --surface: #FFFFFF;
+    --ink: #20262B;
+    --ink-soft: #55605E;
+    --line: #DDE4E1;
+    --p-accent: #0969DA;
+    --p-accent-soft: #E4EEFB;
+    --a-open: #1A7F37;
+    --a-open-soft: #E3F2E7;
+    --a-merged: #8250DF;
+    --a-merged-soft: #EFE8FB;
+    --a-withdrawn: #CF222E;
+    --a-withdrawn-soft: #FBE9EA;
+    --neutral-chip: #EBEFED;
+    --code-bg: #EEF2F0;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0E1412;
+      --surface: #151C1A;
+      --ink: #DCE3E0;
+      --ink-soft: #93A09B;
+      --line: #26302D;
+      --p-accent: #58A6FF;
+      --p-accent-soft: #14263C;
+      --a-open: #3FB950;
+      --a-open-soft: #12291A;
+      --a-merged: #A371F7;
+      --a-merged-soft: #251A3D;
+      --a-withdrawn: #F85149;
+      --a-withdrawn-soft: #3A1512;
+      --neutral-chip: #1D2523;
+      --code-bg: #1A2320;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0E1412; --surface: #151C1A; --ink: #DCE3E0; --ink-soft: #93A09B;
+    --line: #26302D; --p-accent: #58A6FF; --p-accent-soft: #14263C;
+    --a-open: #3FB950; --a-open-soft: #12291A; --a-merged: #A371F7;
+    --a-merged-soft: #251A3D; --a-withdrawn: #F85149; --a-withdrawn-soft: #3A1512;
+    --neutral-chip: #1D2523; --code-bg: #1A2320;
+  }
+  :root[data-theme="light"] {
+    --bg: #F5F7F6; --surface: #FFFFFF; --ink: #20262B; --ink-soft: #55605E;
+    --line: #DDE4E1; --p-accent: #0969DA; --p-accent-soft: #E4EEFB;
+    --a-open: #1A7F37; --a-open-soft: #E3F2E7; --a-merged: #8250DF;
+    --a-merged-soft: #EFE8FB; --a-withdrawn: #CF222E; --a-withdrawn-soft: #FBE9EA;
+    --neutral-chip: #EBEFED; --code-bg: #EEF2F0;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif;
+    line-height: 1.85;
+    margin: 0;
+    font-size: 15px;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+
+  h1, h2, h3 {
+    font-family: "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif JP", serif;
+    font-weight: 600;
+    line-height: 1.4;
+    text-wrap: balance;
+  }
+  h1 { font-size: 32px; margin: 8px 0 12px; }
+  h2 { font-size: 22px; margin: 0 0 12px; }
+  h3 { font-size: 17px; margin: 24px 0 8px; }
+  p { margin: 10px 0; }
+
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  section { margin-top: 64px; }
+  header.hero { border-bottom: 1px solid var(--line); padding-bottom: 32px; }
+  .lede { font-size: 16.5px; max-width: 40em; color: var(--ink); }
+  .lede b { color: var(--p-accent); }
+
+  .chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+  .chip {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--neutral-chip);
+    color: var(--ink-soft);
+    white-space: nowrap;
+  }
+  .chip.p { background: var(--p-accent-soft); color: var(--p-accent); }
+  .chip.open { background: var(--a-open-soft); color: var(--a-open); }
+  .chip.merged { background: var(--a-merged-soft); color: var(--a-merged); }
+  .chip.withdrawn { background: var(--a-withdrawn-soft); color: var(--a-withdrawn); }
+
+  code {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  figure { margin: 20px 0; }
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px 12px 8px;
+    overflow-x: auto;
+  }
+  .diagram pre.mermaid { margin: 0; display: flex; justify-content: center; }
+  figcaption {
+    font-size: 13px;
+    color: var(--ink-soft);
+    margin-top: 8px;
+    line-height: 1.7;
+  }
+  .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .duo { grid-template-columns: 1fr; } }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13.5px;
+    margin: 16px 0;
+  }
+  th {
+    text-align: left;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    font-weight: 500;
+    border-bottom: 1px solid var(--line);
+    padding: 6px 10px 6px 0;
+  }
+  td {
+    border-bottom: 1px solid var(--line);
+    padding: 8px 10px 8px 0;
+    vertical-align: top;
+  }
+  td.num { font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+  .verdict {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+  .verdict.gone { background: var(--a-open-soft); color: var(--a-open); }
+  .verdict.build { background: var(--p-accent-soft); color: var(--p-accent); }
+  .verdict.runtime { background: var(--a-merged-soft); color: var(--a-merged); }
+
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0; }
+  @media (max-width: 720px) { .compare { grid-template-columns: 1fr; } }
+  .compare .col {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 18px;
+  }
+  .compare .col h4 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-weight: 500;
+    color: var(--ink-soft);
+  }
+  .compare ol { margin: 0; padding-left: 20px; }
+  .compare ol li { margin: 4px 0; font-size: 13.5px; }
+  .compare .one {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 14px;
+    color: var(--a-open);
+  }
+  ul { padding-left: 20px; }
+  li { margin: 6px 0; }
+  .footnote {
+    margin-top: 72px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    font-size: 12.5px;
+    color: var(--ink-soft);
+  }
+  .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 14px; font-size: 12.5px; color: var(--ink-soft); }
+  .legend span::before {
+    content: "";
+    display: inline-block;
+    width: 10px; height: 10px;
+    border-radius: 3px;
+    margin-right: 6px;
+    vertical-align: baseline;
+  }
+  .legend .lp::before { background: var(--p-accent); }
+  .legend .lo::before { background: var(--a-open); }
+  .legend .lm::before { background: var(--a-merged); }
+  .legend .lw::before { background: var(--a-withdrawn); }
+</style>
+
+<main>
+<header class="hero">
+  <div class="eyebrow">task-pipeline · 設計文書 · 2026-08-06</div>
+  <h1>状態モデル v2 — 階層化された 2 領域機械</h1>
+  <p class="lede">3 軸直積 (status/phase × watch × rebase) をやめ、タスクの状態を<b>「進行」と「成果物」の 2 つの直交領域</b>の積として持ち直す。watch は成果物 <code>open</code> の子に入れ子にし、「追従中」という主張は保存せず導出する。finalize の来歴は <code>run.kind</code> という座標になり、復帰の多段 verb 列は単一イベント <code>ship</code> に畳まれる。</p>
+  <div class="chip-row">
+    <span class="chip p">敵対検証 13/13 HOLDS</span>
+    <span class="chip">検証サブエージェント 4 体</span>
+    <span class="chip">verb 43 → 事象対応の語彙</span>
+    <span class="chip">schema_version 2</span>
+  </div>
+</header>
+
+<section>
+  <div class="eyebrow">Model — 0</div>
+  <h2>階層の全体像 — 1 枚で</h2>
+  <p>このモデルには<strong>関係が 2 種類</strong>ある。<strong>直交 (∥)</strong>: 領域 P と領域 A は並行に生きる 2 つの機械で、1 つのタスクが常に両方の値を同時に持つ。<strong>階層 (⊃)</strong>: <code>running</code> と <code>open</code> は複合状態で、子 (<code>run</code> / <code>follow</code>) は親のノードに入るときに作られ、<u>親を出るときに丸ごと消える</u>。破線の内側が入れ子である:</p>
+  <figure>
+    <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+    state "領域 P — 進行 (タスクごとに領域 A と並行)" as P {
+        queued --> RUN : (導) claim / fix-start / rebase-start
+        RUN --> resting : (実) ship
+        RUN --> blocked : (実) block
+        resting --> queued : (人) restore
+        blocked --> queued : (人) restore
+        state "running ⊃ run (kind × gate × phase)" as RUN {
+            seq: 検証フェーズ列 (kind と gate で決まる)
+            fin: finalize
+            det: rebase_fix (迂回)
+            seq --> fin : (実) advance
+            fin --> det : (実) rebase-start b
+            det --> fin : (実) advance / forgo
+        }
+    }
+    state "領域 A — 成果物 (タスクごとに領域 P と並行)" as A {
+        none --> OPEN : (実) ship commits≥1
+        OPEN --> merged : (観) merged
+        OPEN --> withdrawn : (観) withdraw
+        merged --> [*] : (導) retire — queue 離脱
+        withdrawn --> OPEN : (実) ship 再走
+        state "open ⊃ follow (ref が PR のときだけ)" as OPEN {
+            attention: attention (auto⇄human)
+            asks: asks (fix / rebase の要求ラッチ)
+            ledger: ledger (handled・fix_attempts…)
+            probe: probe (proc リース + 観測キャッシュ)
+        }
+    }
+</pre>
+    </div>
+    <figcaption>並んだ 2 つの大枠が<strong>直交</strong> (1 つのタスクが常に両方の値を同時に持つ)、枠の入れ子が<strong>階層</strong> (親を出れば子は消える)。<code>run</code> の中身は kind ごとに違う子機械 (次節)、<code>follow</code> の 4 つは状態 1 つ (attention) とデータ 3 つ。</figcaption>
+  </figure>
+  <p>階層の意味は生存期間である。<code>run</code> は claim / fix-start / rebase-start が親 <code>running</code> に入るときに作られ、ship / block / dequeue で親を出ると <code>null</code> に戻る — v1 で gate や executor が in_review / blocked に残骸として残った問題は、この規則そのものが消す。<code>follow</code> も同じで、open が生まれる遷移でだけ作られ、merged / withdrawn へ出ると消える — 「done なのに watching が残る」欠陥クラスの構造的な封じ方がこれである。逆に <code>restore</code> は open を出ない (PR は実際に open のままだから) ので、follow は engagement をまたいで生き続け、handled の記憶が保たれる。</p>
+  <p>なお v1 も実態は同じ階層を持っていた — 「phase が非 null なのは in_progress のときだけ」という制約は、階層を平坦に潰した符号化だった。v2 はその階層をデータの形として明示し、親の外にはみ出していた子相当のフィールド (gate・executor 系・watch) を子の中へ回収したものである。</p>
+  <h3>図の読み方 — すべては 1 つの機械の射影</h3>
+  <p>本ページの図はどれも、<strong>1 つの直積機械を 1 軸に射影したもの</strong>である。エッジの意味は全図で同じ (verb = 原子的なイベント 1 回) だが、<strong>同じ verb が複数の図に同時に現れる</strong>: たとえば <code>ship</code> は領域 P (running→resting)、領域 A (open の更新)、fix-ask (taken→∅)、rebase-ask (降格) の 4 枚にエッジを持ち、これらは単一の原子的書き込みである。ask の図のエッジの多くは「主目的が別の軸にある verb の、この軸への影」— v1 の欠陥はまさにこの影の書き忘れ (block が watch を残す、等) に集中しており、v2 が verb ごとに全軸の from/to を宣言してフレームテストで「宣言外の軸に触れないこと」まで検査するのは、この射影の同期を機械に保証させるためである。</p>
+  <p>エッジには<strong>イベント源のタグ</strong>を付けてある。この 4 分類のうち、状態機械が自力で導出できるのは (導) だけで、残り 3 つは外から注入されるイベントである — <code>next</code> の「導出できる / できない」の線引き (設計文書 5 節) はこの分類と一致する:</p>
+  <div class="chip-row" style="margin-bottom: 8px;">
+    <span class="chip open">(観) 観測結果 — watcher / git / トラッカーが見たもの</span>
+    <span class="chip p">(実) 実行イベント — executor の停止通知と検証判定</span>
+    <span class="chip merged">(導) 導出判断 — 状態から next が「due」と計算するもの</span>
+    <span class="chip">(人) 人の操作 — 承認・再掲・attention の復帰</span>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Model — 1</div>
+  <h2>2 つの直交領域</h2>
+  <p>現行の <code>status</code> は両領域からの<strong>導出値</strong>になる: <code>queued</code>→approved、<code>running</code>→in_progress、<code>blocked</code>→blocked、<code>resting</code> は成果物が <code>merged</code> なら done、それ以外は in_review。「PR を出したまま blocked」のような、v1 で表現できなかった実在の状態が正しく書けるようになる。</p>
+  <div class="duo">
+    <figure>
+      <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+    direction TB
+    [*] --> queued : (人) approve
+    queued --> running : (導) claim
+    running --> resting : (実) ship
+    running --> blocked : (実) block
+    running --> [*] : (観) dequeue
+    resting --> queued : (人) restore
+    blocked --> queued : (人) restore
+</pre>
+      </div>
+      <figcaption><strong>領域 P (進行)</strong> — いま実行の手がどこにあるか。<code>running</code> は run オブジェクト (kind × gate × phase) を持つ複合状態。</figcaption>
+    </figure>
+    <figure>
+      <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+    direction TB
+    [*] --> none
+    none --> open : (実) ship commits≥1
+    open --> open : (実) ship 押し直し
+    open --> merged : (観) merged マージ証明
+    open --> withdrawn : (観) withdraw PR close
+    withdrawn --> open : (実) ship 再走で新 PR
+    merged --> [*] : (導) retire queue 離脱
+    withdrawn --> [*] : (人) withdraw-remove
+</pre>
+      </div>
+      <figcaption><strong>領域 A (成果物)</strong> — 作った変更がどこにあるか。<code>open</code> だけが follow (asks / ledger / probe) の子を持つ。merged / withdrawn に「watching が残る」余地は構造的に無い。merged は真の終端で、worktree の片付けが済んだら <code>retire</code> が queue から外し、トップレベルの <code>completed</code> 配列 ({id, done_at}、24 時間で掃除) に控えだけを残す — 再オープンは restore ではなく新規候補として承認に入る。</figcaption>
+    </figure>
+  </div>
+  <div class="legend">
+    <span class="lp">進行 (領域 P)</span>
+    <span class="lo">open — レビュー待ち</span>
+    <span class="lm">merged — done</span>
+    <span class="lw">withdrawn — 取り下げ</span>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Model — 2</div>
+  <h2>run — kind × gate × phase</h2>
+  <p>フェーズ実行は <code>run</code> オブジェクトの複合状態。<strong>finalize は 1 ノードではなく kind ごとの 3 ノード</strong>になり、「report から来たのか、押し直しなのか、force push なのか」という来歴 (2026-08-05 の実運用障害 2 件の原因だった欠落) が状態の座標として永続化される。gate も run の中にしか存在しないので、restore が gate を戻し忘れて死にノードに着地する回帰 (4620c1f) は表現不能になる。</p>
+  <figure>
+    <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    state "running(initial, full)" as init {
+        direction LR
+        research --> plan : advance
+        plan --> implement : advance
+        implement --> report : advance
+        report --> finalize : advance
+        finalize --> rebase_fix : rebase-start (迂回)
+        rebase_fix --> finalize : advance ┃ rebase-forgo
+    }
+</pre>
+    </div>
+    <figcaption><code>kind=initial</code> (gate=full)。gate=light は research+plan → implement → report → finalize。run の中の辺は<strong>すべて (実)</strong> — executor の停止通知と検証判定だけが駆動する。<strong>迂回 (detour)</strong>: push 直前の載せ直しが衝突 (REBASE-CONFLICT) すると、kind・gate を変えずに phase だけが rebase_fix へ寄り道する — 来歴の座標を壊さないので、ship の mark / notify 導出は割り込みに対して安定。</figcaption>
+  </figure>
+  <div class="duo">
+    <figure>
+      <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    state "running(pr_fix)" as pf {
+        direction LR
+        pr_fix --> finalize : advance
+        finalize --> rebase_fix : 迂回
+        rebase_fix --> finalize : advance ┃ forgo
+    }
+</pre>
+      </div>
+      <figcaption><code>kind=pr_fix</code> — レビュー指摘の修正。<code>fix-start</code> が asks.fix を消費して開始 (fix_attempts 上限 3 のラッチは attention→human(fix_limit))。</figcaption>
+    </figure>
+    <figure>
+      <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    state "running(rebase_fix)" as rf {
+        direction LR
+        rebase_fix --> finalize : advance
+        finalize --> rebase_fix : 再衝突 (迂回)
+    }
+</pre>
+      </div>
+      <figcaption><code>kind=rebase_fix</code> — resting から入る解決サイクル専用 (asks.rebase=queued を消費)。失敗出口は <code>rebase-give-up</code> (resting へ。push の義務なし)。迂回の失敗出口 <code>rebase-forgo</code> とは kind で排他に分かれる。</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Model — 3</div>
+  <h2>follow — watch を 3 つに分解する</h2>
+  <p>v1 の <code>review.watch</code> は性質の違う 3 つを束ねていた。v2 は <code>open.follow</code> の下で分離する: <strong>ledger</strong> (周回の帳簿 — handled は PR の寿命全体、fix_attempts は claim 境界でリセット)、<strong>asks</strong> (未処理の要求ラッチ)、<strong>probe</strong> (観測キャッシュとプロセスリース)。「watching / stopped」という活動の主張は消え、耐久的な意図 <code>attention</code> と導出式に置き換わる:</p>
+  <p><code>追従対象 ⇔ resting ∧ open ∧ attention=auto ∧ fix-ask が null ∧ rebase-ask が quiet</code></p>
+  <h3>誕生と初期値</h3>
+  <p>follow は「現在状態を 1 つ持つ機械」ではなく、<strong>状態機械 1 個 (attention) + ラッチ 2 個 (asks) + 累積データ 2 個 (ledger / probe) の束</strong>である。生まれるのは <code>ship</code> が open を新規作成するとき (ref が PR URL のとき) で、初期値は固定:</p>
+  <div class="compare"><div class="col" style="grid-column: 1 / -1;">
+  <pre style="margin:0; font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 12.5px; line-height: 1.7; overflow-x: auto;">follow = {
+  attention: "auto",                      <span style="color:var(--ink-soft)">// 機械に委ねる、から始まる</span>
+  asks:   { fix: null, rebase: null },    <span style="color:var(--ink-soft)">// 要求はまだ届いていない</span>
+  ledger: { handled: [], fix_attempts: 0, review_only: [], answered: [] },
+  probe:  { proc: null, sig: null, head: null, ci: null, errors: 0, … },
+}</pre>
+  </div></div>
+  <p style="font-size:13.5px;"><code>probe.sig: null</code> が最初の watch 起動を <strong>catch-up 観測</strong> (張る前に 1 回深く観測し、基準署名に焼き込まれる前の指摘を回収する) から始めさせる引き金になっている。周回境界の <code>claim</code> は follow を作り直さず、<strong>handled を保持したまま round 系 (fix_attempts / review_only / answered / asks / sig / attention) だけを初期値に戻す</strong> — v1 の <code>watch-init --preserve-handled</code> の呼び分けが、この部分リセットとして構造化された。消滅は親 open を出るとき (merged / withdrawn) で、丸ごと消える。</p>
+  <h3>attention — 委ね先を表す 2 状態機械</h3>
+  <p>follow の中で唯一の「本物の状態機械」。この PR の次アクションを<strong>機械に委ねる (auto) か、人に委ねる (human + 理由) か</strong>だけを表し、「追従している」という活動の主張はしない。</p>
+  <figure>
+    <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+    direction LR
+    [*] --> auto : (実) follow 生成 / (導) claim リセット
+    auto --> human : (導) fix-start 上限超 fix_limit
+    auto --> human : (観) observe errors×3
+    auto --> human : (人) attention-set manual
+    human --> auto : (人) attention-set --auto 再開
+</pre>
+    </div>
+    <figcaption>human への 3 遷移はどれも同じ書き込みで session→null / probe.proc→null (揮発資源を手放し、他セッションの回収遅延 90 分を防ぐ)。人が auto に戻すのが唯一の手編集ポイントで、そのとき probe.errors も 0 に戻る。</figcaption>
+  </figure>
+  <h3>asks — 外から届く要求の 2 本のラッチ</h3>
+  <p>「直してほしい指摘が来ている」(fix) と「載せ直しが要る」(rebase) の未処理要求。下の 2 枚の図は<strong>タスクではなく要求そのもののライフサイクル</strong>で、ask の現在値がタスク側の verb の発火可否を決めるゲートになる — pending なら <code>fix-start</code> が呼べて watch は張らない、queued なら <code>rebase-start</code>、両方が静かなら追従対象、という具合である。<strong>受理は resting のときだけ、消費は仕上げ run の開始</strong> — この非対称が、要求の取りこぼしと二重消費の両方を防ぐ。</p>
+  <div class="duo">
+    <figure>
+      <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+    direction TB
+    state "∅ (要求なし)" as none
+    [*] --> none : follow 生成 / claim リセット
+    none --> pending : (観) fix-request 指摘が届く
+    pending --> taken : (導) fix-start 修正 run 開始
+    taken --> none : (実) ship handled へ合流
+</pre>
+      </div>
+      <figcaption><strong>fix-ask</strong> — 一方向の消費サイクル。上限超の fix-start は pending のまま attention だけを human(fix_limit) に倒すので、人が再開すれば同じ要求から続けられる。</figcaption>
+    </figure>
+    <figure>
+      <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+    direction TB
+    state "quiet (∅ またはガード控え)" as quiet
+    [*] --> quiet : follow 生成 / claim リセット
+    quiet --> queued : (観) rebase-request --resolve
+    queued --> taken : (導) rebase-start a
+    taken --> quiet : (実) rebase-give-up
+    taken --> quiet : (実) ship 消費
+    queued --> quiet : (実) ship 降格
+</pre>
+      </div>
+      <figcaption><strong>rebase-ask</strong> — 3 値は導出 (優先順: taken → queued → quiet)。quiet は「要求なし」と「載せ直しガードの控え (blocked_onto) だけがある」を区別しない — どちらも verb の発火可否を変えない純データ差だから。give-up は控えに戻り、ship は消費または降格で必ず quiet に落とす。</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Data</div>
+  <h2>各ノードのスキーマ — 判別付き oneOf</h2>
+  <p>v1 のスキーマは全フィールドを常に required にして null を許す平坦な形だった。v2 では queueItem を <strong>progress と artifact.state をタグにした oneOf (tagged union)</strong> にし、<u>ノードに存在しないフィールドはキーごと無い</u>。不変条件の多く (run ⇔ running、merged / withdrawn に follow は無い、gate の iff) がスキーマの構造になり、<code>validate</code> 単体で死に組が検出できる — 欠陥 5「到達不能な組を書き込めた」への防波堤がスキーマ層にも立つ。</p>
+  <table>
+    <thead><tr><th>ノード</th><th>そのノードにだけある形</th></tr></thead>
+    <tbody>
+      <tr><td><span class="chip p">P: queued / resting</span></td><td><code>run: null</code>、<code>blocked_reason: null</code></td></tr>
+      <tr><td><span class="chip p">P: running</span></td><td><code>run: { kind, gate, phase, attempts, executor, executor_last_event_at, takeover_at }</code> — gate は kind==initial のとき、かつそのときに限り非 null。phase は kind の列 + 迂回の要素のみ</td></tr>
+      <tr><td><span class="chip p">P: blocked</span></td><td><code>run: null</code>、<code>blocked_reason: string</code> (非 null)</td></tr>
+      <tr><td><span class="chip">A: none</span></td><td><code>artifact: { state: "none" }</code> — 他のキーは無い</td></tr>
+      <tr><td><span class="chip open">A: open</span></td><td>グループ欄 {ref, branch, tip, base} + <code>follow</code> (ref が PR URL のとき object、それ以外 null)。follow の中は attention / asks / ledger / probe の全キー</td></tr>
+      <tr><td><span class="chip merged">A: merged</span></td><td>グループ欄のみ。<code>follow</code> キー自体が無い</td></tr>
+      <tr><td><span class="chip withdrawn">A: withdrawn</span></td><td>グループ欄 + <code>asked: bool</code> + <code>note</code>。<code>follow</code> キー自体が無い</td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:13px; color:var(--ink-soft);">スキーマで表現しにくい領域間の制約 (merged ⇒ resting、running(pr_fix) ⇒ open ∧ asks.fix.taken、probe.proc ⇒ resting) だけが実行時アサーションに残る。</p>
+</section>
+
+<section>
+  <div class="eyebrow">Transitions</div>
+  <h2>ship — 復帰の多段列を 1 イベントに畳む</h2>
+  <p>v1 で最も壊れやすかったのは FINALIZED 後の verb 列だった (順序を誤ると前提違反や指摘の再浮上)。v2 では列全体が原子的な 1 書き込みになり、kind による分岐はデータの有無に吸収される。応答 JSON が通知 (initial/update/none) と mark の要否を返すので、「最初の 1 回か更新か」を経路記憶で判別する必要も消える。</p>
+  <div class="compare">
+    <div class="col">
+      <h4>v1 — pr_fix からの復帰 (3 verb、この順のみ)</h4>
+      <ol>
+        <li><code>fix-done</code> — 必ず in-review より前</li>
+        <li><code>in-review</code> — 4 フラグ付き</li>
+        <li><code>watch-set --state watching</code></li>
+      </ol>
+    </div>
+    <div class="col">
+      <h4>v2</h4>
+      <p class="one">ship --commits N --ref … --tip …</p>
+      <p style="font-size:13px; margin:6px 0 0; color:var(--ink-soft);">taken の ask を消費 (handled 合流)、tip 更新、sig リセット、session 判定まで単一の原子的書き込み。</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="eyebrow">Verification</div>
+  <h2>確認済み欠陥 13 件の行き先</h2>
+  <p>フレッシュな文脈の敵対検証者に「v2 モデルで同じ実害を起こすイベント列を構成せよ」と課した結果、13 件すべての主張が防衛された (HOLDS 13/13)。検証が新設機構の縁に見つけた穴 (taken のラッチ残留・withdrawn 再走の未定義・kind 上書きによる来歴消失など) は文書に反映済み。</p>
+  <table>
+    <thead><tr><th>#</th><th>欠陥 (v1)</th><th>v2 での扱い</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td>phase-pass が任意の辺 (飛び越し・逆行・gate 違い) を通した</td><td><span class="verdict build">構築時に落ちる</span></td></tr>
+      <tr><td class="num">2</td><td>in-review が review を丸ごと置換し watch を破壊 (issue #13)</td><td><span class="verdict gone">表現不能</span></td></tr>
+      <tr><td class="num">3</td><td>復帰のたびに fix_attempts が 0 に戻り上限 3 が無効 (issue #15)</td><td><span class="verdict gone">表現不能</span></td></tr>
+      <tr><td class="num">4</td><td>block が watch を watching のまま残した</td><td><span class="verdict gone">表現不能</span></td></tr>
+      <tr><td class="num">5</td><td>到達不能な (status, phase) の組を書き込めた</td><td><span class="verdict build">構築時に落ちる</span></td></tr>
+      <tr><td class="num">6</td><td>watch-set が飛行中タスクの session を null に落とせた</td><td><span class="verdict runtime">実行時 + 構築時</span></td></tr>
+      <tr><td class="num">7</td><td>recover-done が watch を watching のまま残した</td><td><span class="verdict gone">表現不能</span></td></tr>
+      <tr><td class="num">8</td><td>restore が前周回の watch を持ち越した</td><td><span class="verdict gone">表現不能</span></td></tr>
+      <tr><td class="num">9</td><td>fix-start の上限がラッチしなかった</td><td><span class="verdict build">構築時に落ちる</span></td></tr>
+      <tr><td class="num">10</td><td>飛行中の rebase-done が give-up の前提を永久に壊せた</td><td><span class="verdict runtime">実行時 + 構築時</span></td></tr>
+      <tr><td class="num">11</td><td>rebase-start が finalize 入口から呼べず回避策が要った</td><td><span class="verdict build">構築時に落ちる</span></td></tr>
+      <tr><td class="num">12</td><td>衝突なしの背景載せ直しで tip 更新経路が詰まった</td><td><span class="verdict gone">表現不能</span></td></tr>
+      <tr><td class="num">別</td><td>(research, gate:light) の死にノード回帰 (4620c1f)</td><td><span class="verdict gone">表現不能</span></td></tr>
+    </tbody>
+  </table>
+  <p style="font-size:13px; color:var(--ink-soft);">「表現不能」= その壊れ方が状態として書けない / 「構築時」= 宣言・型・行列テストで検出 / 「実行時」= 前提違反 conflict。拡張 (フェーズ・gate・kind・asks の追加) はそれぞれ union の網羅 switch かスキーマ突き合わせのメタテストで落ちる。全ノード到達可能性テストを新設し、死に組の検出を人力レビューから機械の網に移す。</p>
+</section>
+
+<section>
+  <div class="eyebrow">Determinism</div>
+  <h2>next — 「次に何をするか」の導出</h2>
+  <p>読み取り専用 verb <code>next</code> が、state.json + 明示された文脈 (now / session / 生存一覧 / 設定) から、担当判定・追従の要否・サイクル分岐 (rebase 優先)・FINALIZED 後の処理・生存管理・着手可否を導出する。git やトラッカーが要る判断は「観測依頼」として返し、結果はイベント (verb) として戻る — CLI の権限封じ込めは緩めない。SKILL.md に残るのはサブエージェントの起動形と作業手順だけになる。</p>
+  <ul>
+    <li><strong>#30</strong> (往復プロトコル + finalize 来歴) — 来歴は構造で解決。「v2 の上に next を実装する」に書き直し</li>
+    <li><strong>#23</strong> (gate の親状態化) — この設計そのもの。実装で閉じる</li>
+    <li><strong>#24</strong> (restore で rebase 静止) — 不要になる (asks は resting でしか書けず、claim がリセット)</li>
+    <li><strong>#31 / #32</strong> — v2 実装に吸収、<strong>#21 / #26 / #22</strong> — 対象が v2 に変わって残る</li>
+  </ul>
+</section>
+
+<div class="footnote">
+  設計文書: <code>task-pipeline/docs/state-model-v2-2026-08.md</code> (ブランチ claude/state-model-v2-design, ccb6151) · 教訓 3 本を docs/lessons/ に追加 · 検証: 欠陥敵対構成 / SKILL.md 608 行の全経路照合 / 内部整合 / 修正後再検証の 4 体 · テスト: 全 15 スイート PASS
+</div>
+</main>
