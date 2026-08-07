@@ -1,8 +1,15 @@
 // task-pipeline/scripts/state-transitions-v2.test.ts
 //
-// state-transitions-v2.ts (状態モデル v2 の遷移: apply 群と VERB_SPEC) のテスト。
-// 直接importで純粋関数をそのまま呼ぶ。v1 の 3 層テスト (T-ALIGN / T-MX / T-FRAME) に
-// 相当する層を v2 の座標 (領域P 19 × 領域A 23) の上で組み直したもの:
+// 状態モデル v2 の遷移 (apply 群と VERB_SPEC) のテスト。直接importで純粋関数をそのまま
+// 呼ぶ。import 先は検査対象の層を名指しする:
+//
+//   ./state-transitions-v2.ts        層 10 の apply 群と公開 API (再 export 済みのもの)
+//   ./state-transitions-v2-nodes.ts  層 3〜6 の宣言・導出ビュー・引き当て (公開面には無い)
+//
+// 層の一覧は state-transitions-v2-types.ts の冒頭にある。
+//
+// テストの構成は v1 の 3 層テスト (T-ALIGN / T-MX / T-FRAME) に相当する層を、v2 の座標
+// (領域P 19 × 領域A 23) の上で組み直したもの:
 //
 //   T-V2T-ALIGN  宣言と実装の整合 — VERB_SPEC・advance の辺・ノード集合・形状宣言と
 //                実装の出力が食い違えば落ちる。フィクスチャ網羅のメタテストを含む。
@@ -27,18 +34,10 @@ import {
   type Progress,
   type ReachabilityEdge,
 } from "./state-model-v2.ts";
+// 層 10 (公開面) — apply 群と、そこから再 export されている公開 API。
 import {
-  A_NODE_KEYS,
-  A_NODE_KEYS_EXCEPT_MERGED,
-  A_NODE_MERGED,
-  A_NODE_NONE,
-  A_NODE_OPEN_NO_FOLLOW,
-  A_OPEN_FOLLOW,
-  A_OPEN_FOLLOW_KEYS,
-  A_OPEN_FOLLOW_NODES,
   ADVANCE_EDGES,
   advanceTargetsOf,
-  type ANodeKey,
   aNodeKeyOf,
   applyAdvance,
   applyAnsweredSet,
@@ -85,16 +84,8 @@ import {
   ITEM_SHAPE,
   LEDGER_SHAPE,
   type LedgerEntry,
-  openNodeKey,
-  openNodeOf,
-  P_CYCLE_REBASE_KEYS,
-  P_DETOUR_KEYS,
-  P_FINALIZE_KEYS,
-  P_RUNNING_KEYS,
-  P_VERIFIED_KEYS,
   pNodeKeyOf,
   PROBE_SHAPE,
-  PRODUCT_NODE_KEYS,
   productKey,
   productKeyOf,
   REBASE_ASK_SHAPE,
@@ -112,6 +103,27 @@ import {
   type VerbName,
   type VerbSpecV2,
 } from "./state-transitions-v2.ts";
+// 層 3〜6 (内部) — 宣言・導出ビュー・引き当てを直接検査するため、層を名指しで import
+// する (公開面には出ていないもの)。
+import {
+  A_NODE_KEYS,
+  A_NODE_KEYS_EXCEPT_MERGED,
+  A_NODE_MERGED,
+  A_NODE_NONE,
+  A_NODE_OPEN_NO_FOLLOW,
+  A_OPEN_FOLLOW,
+  A_OPEN_FOLLOW_KEYS,
+  A_OPEN_FOLLOW_NODES,
+  type ANodeKey,
+  openNodeKey,
+  openNodeOf,
+  P_CYCLE_REBASE_KEYS,
+  P_DETOUR_KEYS,
+  P_FINALIZE_KEYS,
+  P_RUNNING_KEYS,
+  P_VERIFIED_KEYS,
+  PRODUCT_NODE_KEYS,
+} from "./state-transitions-v2-nodes.ts";
 
 // ---------------------------------------------------------------------------
 // 依存ゼロの assert (state-model-v2.test.ts / state-transitions.test.ts と同じ流儀)
