@@ -1,0 +1,335 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "queueItem": {
+      "oneOf": [
+        { "$ref": "#/$defs/itemAtRest" },
+        { "$ref": "#/$defs/itemRunning" },
+        { "$ref": "#/$defs/itemBlocked" }
+      ]
+    },
+    "itemAtRest": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "progress": { "type": "string", "enum": ["queued", "resting"] },
+        "run": { "type": "null" },
+        "blocked_reason": { "type": "null" },
+        "artifact": { "$ref": "#/$defs/artifact" },
+        "worktree": { "type": ["string", "null"] },
+        "base": { "type": ["string", "null"] },
+        "session": { "type": ["string", "null"] }
+      },
+      "required": ["id", "title", "progress", "run", "blocked_reason", "artifact", "worktree", "base", "session"],
+      "additionalProperties": false
+    },
+    "itemRunning": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "progress": { "type": "string", "enum": ["running"] },
+        "run": { "$ref": "#/$defs/run" },
+        "blocked_reason": { "type": "null" },
+        "artifact": { "$ref": "#/$defs/artifact" },
+        "worktree": { "type": ["string", "null"] },
+        "base": { "type": ["string", "null"] },
+        "session": { "type": ["string", "null"] }
+      },
+      "required": ["id", "title", "progress", "run", "blocked_reason", "artifact", "worktree", "base", "session"],
+      "additionalProperties": false
+    },
+    "itemBlocked": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "progress": { "type": "string", "enum": ["blocked"] },
+        "run": { "type": "null" },
+        "blocked_reason": { "type": "string" },
+        "artifact": { "$ref": "#/$defs/artifact" },
+        "worktree": { "type": ["string", "null"] },
+        "base": { "type": ["string", "null"] },
+        "session": { "type": ["string", "null"] }
+      },
+      "required": ["id", "title", "progress", "run", "blocked_reason", "artifact", "worktree", "base", "session"],
+      "additionalProperties": false
+    },
+    "run": {
+      "oneOf": [
+        { "$ref": "#/$defs/runInitialFull" },
+        { "$ref": "#/$defs/runInitialLight" },
+        { "$ref": "#/$defs/runPrFix" },
+        { "$ref": "#/$defs/runRebaseFix" }
+      ]
+    },
+    "runInitialFull": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["initial"] },
+        "gate": { "type": "string", "enum": ["full"] },
+        "phase": { "type": "string", "enum": ["research", "plan", "implement", "report", "finalize", "rebase_fix"] },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "executor": { "type": ["string", "null"] },
+        "executor_last_event_at": { "type": ["string", "null"] },
+        "takeover_at": { "type": ["string", "null"] }
+      },
+      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at"],
+      "additionalProperties": false
+    },
+    "runInitialLight": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["initial"] },
+        "gate": { "type": "string", "enum": ["light"] },
+        "phase": { "type": "string", "enum": ["research+plan", "implement", "report", "finalize", "rebase_fix"] },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "executor": { "type": ["string", "null"] },
+        "executor_last_event_at": { "type": ["string", "null"] },
+        "takeover_at": { "type": ["string", "null"] }
+      },
+      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at"],
+      "additionalProperties": false
+    },
+    "runPrFix": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["pr_fix"] },
+        "gate": { "type": "null" },
+        "phase": { "type": "string", "enum": ["pr_fix", "finalize", "rebase_fix"] },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "executor": { "type": ["string", "null"] },
+        "executor_last_event_at": { "type": ["string", "null"] },
+        "takeover_at": { "type": ["string", "null"] }
+      },
+      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at"],
+      "additionalProperties": false
+    },
+    "runRebaseFix": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string", "enum": ["rebase_fix"] },
+        "gate": { "type": "null" },
+        "phase": { "type": "string", "enum": ["rebase_fix", "finalize"] },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "executor": { "type": ["string", "null"] },
+        "executor_last_event_at": { "type": ["string", "null"] },
+        "takeover_at": { "type": ["string", "null"] }
+      },
+      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at"],
+      "additionalProperties": false
+    },
+    "artifact": {
+      "oneOf": [
+        { "$ref": "#/$defs/artifactNone" },
+        { "$ref": "#/$defs/artifactOpen" },
+        { "$ref": "#/$defs/artifactMerged" },
+        { "$ref": "#/$defs/artifactWithdrawn" }
+      ]
+    },
+    "artifactNone": {
+      "type": "object",
+      "properties": {
+        "state": { "type": "string", "enum": ["none"] }
+      },
+      "required": ["state"],
+      "additionalProperties": false
+    },
+    "artifactOpen": {
+      "type": "object",
+      "properties": {
+        "state": { "type": "string", "enum": ["open"] },
+        "ref": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "tip": { "type": ["string", "null"] },
+        "base": { "type": ["string", "null"] },
+        "follow": { "$ref": "#/$defs/follow" }
+      },
+      "required": ["state", "ref", "branch", "tip", "base", "follow"],
+      "additionalProperties": false
+    },
+    "artifactMerged": {
+      "type": "object",
+      "properties": {
+        "state": { "type": "string", "enum": ["merged"] },
+        "ref": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "tip": { "type": ["string", "null"] },
+        "base": { "type": ["string", "null"] }
+      },
+      "required": ["state", "ref", "branch", "tip", "base"],
+      "additionalProperties": false
+    },
+    "artifactWithdrawn": {
+      "type": "object",
+      "properties": {
+        "state": { "type": "string", "enum": ["withdrawn"] },
+        "ref": { "type": ["string", "null"] },
+        "branch": { "type": ["string", "null"] },
+        "tip": { "type": ["string", "null"] },
+        "base": { "type": ["string", "null"] },
+        "asked": { "type": "boolean" },
+        "note": { "type": ["string", "null"] }
+      },
+      "required": ["state", "ref", "branch", "tip", "base", "asked", "note"],
+      "additionalProperties": false
+    },
+    "follow": {
+      "type": ["object", "null"],
+      "properties": {
+        "attention": { "$ref": "#/$defs/attention" },
+        "asks": { "$ref": "#/$defs/asks" },
+        "ledger": { "$ref": "#/$defs/ledger" },
+        "probe": { "$ref": "#/$defs/probe" }
+      },
+      "required": ["attention", "asks", "ledger", "probe"],
+      "additionalProperties": false
+    },
+    "attention": {
+      "oneOf": [
+        { "type": "string", "enum": ["auto"] },
+        { "$ref": "#/$defs/attentionHuman" }
+      ]
+    },
+    "attentionHuman": {
+      "type": "object",
+      "properties": {
+        "human": { "type": "string", "enum": ["fix_limit", "errors", "manual"] }
+      },
+      "required": ["human"],
+      "additionalProperties": false
+    },
+    "asks": {
+      "type": "object",
+      "properties": {
+        "fix": { "$ref": "#/$defs/fixAsk" },
+        "rebase": { "$ref": "#/$defs/rebaseAsk" }
+      },
+      "required": ["fix", "rebase"],
+      "additionalProperties": false
+    },
+    "fixAsk": {
+      "type": ["object", "null"],
+      "properties": {
+        "ids": { "type": "array", "items": { "type": "string" } },
+        "findings": { "type": ["string", "null"] },
+        "taken": { "type": "boolean" }
+      },
+      "required": ["ids", "findings", "taken"],
+      "additionalProperties": false
+    },
+    "rebaseAsk": {
+      "type": ["object", "null"],
+      "properties": {
+        "blocked_onto": { "type": "string" },
+        "reason": { "type": "string", "enum": ["dirty", "diverged", "conflict", "push"] },
+        "at": { "type": "string" },
+        "kind": { "type": "string", "enum": ["superseded", "overlap", "adjacent", "structural", "other"] },
+        "cause": { "type": "string" },
+        "report": { "type": "string" },
+        "from_tip": { "type": "string" },
+        "resolve": { "type": "boolean" },
+        "taken": { "type": "boolean" }
+      },
+      "required": ["blocked_onto", "reason", "at", "resolve", "taken"],
+      "additionalProperties": false
+    },
+    "ledger": {
+      "type": "object",
+      "properties": {
+        "handled": { "type": "array", "items": { "type": "string" } },
+        "fix_attempts": { "type": "integer", "minimum": 0 },
+        "review_only": { "type": "array", "items": { "$ref": "#/$defs/reviewOnlyEntry" } },
+        "answered": { "type": "array", "items": { "$ref": "#/$defs/reviewOnlyEntry" } }
+      },
+      "required": ["handled", "fix_attempts", "review_only", "answered"],
+      "additionalProperties": false
+    },
+    "probe": {
+      "type": "object",
+      "properties": {
+        "proc": { "type": ["string", "null"] },
+        "proc_started_at": { "type": ["string", "null"] },
+        "sig": { "type": ["string", "null"] },
+        "head": { "type": ["string", "null"] },
+        "ci": { "type": ["string", "null"], "enum": [null, "passing", "failing", "pending", "none"] },
+        "checked_at": { "type": ["string", "null"] },
+        "errors": { "type": "integer", "minimum": 0 },
+        "note": { "type": ["string", "null"] }
+      },
+      "required": ["proc", "proc_started_at", "sig", "head", "ci", "checked_at", "errors", "note"],
+      "additionalProperties": false
+    },
+    "reviewOnlyEntry": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "updated_at": { "type": ["string", "null"] }
+      },
+      "required": ["id", "updated_at"],
+      "additionalProperties": false
+    },
+    "completedEntry": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "done_at": { "type": "string" }
+      },
+      "required": ["id", "done_at"],
+      "additionalProperties": false
+    },
+    "candidate": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "priority": { "type": "string" },
+        "updated_at": { "type": "string" },
+        "reason": { "type": "string" }
+      },
+      "required": ["id", "title"],
+      "additionalProperties": false
+    },
+    "relistedEntry": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "seen_at": { "type": "string" }
+      },
+      "required": ["id", "seen_at"],
+      "additionalProperties": false
+    },
+    "withdrawnBranch": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "branch": { "type": "string" },
+        "base": { "type": "string" },
+        "worktree": { "type": "string" },
+        "at": { "type": "string" },
+        "reason": { "type": "string" }
+      },
+      "required": ["id", "branch", "base", "worktree", "at", "reason"],
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {
+    "tracker": { "type": "string" },
+    "source": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "stalled": { "type": ["string", "null"], "enum": [null, "depleted", "max_open"] },
+    "stalled_since": { "type": ["string", "null"] },
+    "queue": { "type": "array", "items": { "$ref": "#/$defs/queueItem" } },
+    "completed": { "type": "array", "items": { "$ref": "#/$defs/completedEntry" } },
+    "candidates": { "type": "array", "items": { "$ref": "#/$defs/candidate" } },
+    "relisted": { "type": "array", "items": { "$ref": "#/$defs/relistedEntry" } },
+    "promoted": { "type": "array", "items": { "type": "string" } },
+    "withdrawn_branches": { "type": "array", "items": { "$ref": "#/$defs/withdrawnBranch" } },
+    "history": { "type": "array", "items": { "type": "string" } },
+    "schema_version": { "type": "integer", "enum": [2] }
+  },
+  "required": ["tracker", "source", "updated_at", "queue", "completed", "candidates", "relisted", "promoted", "history", "schema_version"],
+  "additionalProperties": false
+}
