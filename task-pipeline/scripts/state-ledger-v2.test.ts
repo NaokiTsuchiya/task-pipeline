@@ -311,13 +311,14 @@ Deno.test("L-SESS-1: alive is strict (< max), stale is strict (> cleanup)", () =
 // L-DECL
 // ---------------------------------------------------------------------------
 
-Deno.test("L-DECL-1: LEDGER_VERBS lists exactly the 13 bookkeeping verbs", () => {
+Deno.test("L-DECL-1: LEDGER_VERBS lists exactly the 14 bookkeeping verbs", () => {
   assertEquals([...LEDGER_VERBS].sort(), [
     "candidates-drop",
     "candidates-set",
     "get",
     "history-append",
     "init",
+    "next",
     "promoted-add",
     "promoted-drop",
     "relisted-add",

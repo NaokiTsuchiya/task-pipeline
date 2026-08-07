@@ -2,7 +2,7 @@
 //
 // state CLI の **層 4 — verb 名から実装への表**。受理するフラグの一覧 (ALLOWED_FLAGS) と
 // cmd 実装への割り当て (HANDLERS) の 2 つだけを持ち、**この 2 つのキー集合が
-// ディスパッチ集合そのもの**である (45 verb = VERB_SPEC 32 + LEDGER_VERBS 13)。
+// ディスパッチ集合そのもの**である (46 verb = VERB_SPEC 32 + LEDGER_VERBS 14)。
 //
 // 分けてある理由: verb を 1 つ足す/消すときに触るのがこのファイルだけになり、
 // 「フラグ表には有るのに実装が無い」「実装は有るのに契約文書に無い」というずれが
@@ -16,6 +16,7 @@ import {
   cmdGet,
   cmdHistoryAppend,
   cmdInit,
+  cmdNext,
   cmdPromotedAdd,
   cmdPromotedDrop,
   cmdRelistedAdd,
@@ -86,6 +87,7 @@ export type Verb = VerbName | LedgerVerb;
 // 綴り違い (`--sesion` 等) もコンパイルエラーになる。
 export const FLAG_NAMES = [
   "state-dir",
+  "alive",
   "alive-max-min",
   "at",
   "auto",
@@ -100,6 +102,7 @@ export const FLAG_NAMES = [
   "cleanup-stale-min",
   "clear",
   "commits",
+  "config",
   "drop-withdrawn-branch",
   "errors-inc",
   "errors-reset",
@@ -118,6 +121,7 @@ export const FLAG_NAMES = [
   "lock-max-retries",
   "lock-retry-ms",
   "note",
+  "now",
   "phase",
   "proc",
   "reason",
@@ -162,6 +166,8 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
   ]),
   "get": new Set(["state-dir"]),
   "validate": new Set(["state-dir"]),
+  // 読み取り専用なので lock フラグを持たない (get / validate / sessions-alive と同じ)。
+  "next": new Set(["state-dir", "session", "alive", "now", "config"]),
   "session-touch": new Set(["state-dir", "id", "cleanup-stale-min"]),
   "sessions-alive": new Set(["state-dir", "alive-max-min"]),
   "history-append": new Set([
@@ -282,7 +288,7 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
 // dispatch
 //
 // ディスパッチ表のキー集合は ALLOWED_FLAGS と一致し、その内訳は VERB_SPEC (遷移 32) と
-// LEDGER_VERBS (帳簿 13) で尽きる。どちらにも属さない verb を足すと state.test.ts の
+// LEDGER_VERBS (帳簿 14) で尽きる。どちらにも属さない verb を足すと state.test.ts の
 // 分類ネットが落ちる。
 // ---------------------------------------------------------------------------
 
@@ -296,6 +302,7 @@ export const HANDLERS: Record<Verb, CmdHandler> = {
   "init": cmdInit,
   "get": (stateDir) => cmdGet(stateDir),
   "validate": (stateDir) => cmdValidate(stateDir),
+  "next": cmdNext,
   "session-touch": cmdSessionTouch,
   "sessions-alive": cmdSessionsAlive,
   "history-append": cmdHistoryAppend,

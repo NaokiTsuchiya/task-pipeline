@@ -6,9 +6,12 @@
 //
 // ここに居るのは「どのノードから発火するか」を宣言できない verb だけ:
 //
-//   init / get / validate / session-touch / sessions-alive / history-append /
-//   candidates-set / candidates-drop / promoted-add / promoted-drop /
-//   relisted-add / relisted-drop / stalled-set                        … 13 verb
+//   init / get / validate / next / session-touch / sessions-alive /
+//   history-append / candidates-set / candidates-drop / promoted-add /
+//   promoted-drop / relisted-add / relisted-drop / stalled-set        … 14 verb
+//
+// `next` (設計5節) もここに属する — 何も書かない読み取り専用 verb であり、from/to を
+// 宣言できないためである。導出本体は state-next.ts (Deno API を呼ばない純関数)。
 //
 // 対象がトップレベルの配列 (candidates / promoted / relisted) やファイル
 // (<state dir>/sessions/*) であり、queue エントリの座標を持たないため、
@@ -44,6 +47,7 @@ export const LEDGER_VERBS = [
   "init",
   "get",
   "validate",
+  "next",
   "session-touch",
   "sessions-alive",
   "history-append",
