@@ -20,14 +20,12 @@
 
 import {
   checkReachability,
-  FIX_ASK_AXIS_VALUES,
   type HumanAttentionReason,
   INITIAL_GATE_PHASE_SEQUENCES,
   listRunNodes,
   P_NODE_KEYS,
   type Progress,
   type ReachabilityEdge,
-  REBASE_ASK_AXIS_VALUES,
 } from "./state-model-v2.ts";
 import {
   A_NODE_KEYS,
@@ -35,10 +33,12 @@ import {
   A_NODE_MERGED,
   A_NODE_NONE,
   A_NODE_OPEN_NO_FOLLOW,
+  A_OPEN_FOLLOW,
   A_OPEN_FOLLOW_KEYS,
   A_OPEN_FOLLOW_NODES,
   ADVANCE_EDGES,
   advanceTargetsOf,
+  type ANodeKey,
   aNodeKeyOf,
   applyAdvance,
   applyAnsweredSet,
@@ -76,7 +76,6 @@ import {
   type ArtifactAxisSpec,
   ASKS_SHAPE,
   assertItemInvariantsV2,
-  ATTENTION_AXIS_VALUES,
   CliErrorV2,
   FIX_ASK_SHAPE,
   FOLLOW_SHAPE,
@@ -110,6 +109,7 @@ import {
   type V2RebaseAsk,
   type V2State,
   VERB_SPEC,
+  type VerbName,
   type VerbSpecV2,
 } from "./state-transitions-v2.ts";
 
@@ -341,12 +341,13 @@ function itemOf(state: V2State): V2Item | undefined {
 interface VerbCase {
   // 一意な名前。dynamic 分岐のために 1 verb に複数ケースを置けるようにする。
   name: string;
-  verb: string;
+  // 宣言済み verb 名しか書けない (VERB_SPEC のキーの union)。
+  verb: VerbName;
   overrides?: Partial<V2Item>;
   stateExtra?: Partial<V2State>;
   invoke: (item: V2Item, index: number, state: V2State) => V2State;
   // frame テストの起点 (P ノード, A ノード) と書き換え許可パス。
-  frameNode: readonly [string, string];
+  frameNode: readonly [string, ANodeKey];
   frame: readonly string[];
 }
 
@@ -725,8 +726,7 @@ const VERB_CASES: readonly VerbCase[] = [
 // 全軸を平坦に取り出す小さなヘルパを置く。
 function artifactAxesOf(spec: VerbSpecV2): ArtifactAxisSpec[] {
   const a = spec.a;
-  if ("from" in a && "to" in a) return [a as ArtifactAxisSpec];
-  return Object.values(a as Readonly<Record<string, ArtifactAxisSpec>>);
+  return "byPNode" in a ? Object.values(a.byPNode) : [a];
 }
 
 function keysOf(value: unknown): string[] {
@@ -780,10 +780,10 @@ function isCoherent(pKey: string, aKey: string): boolean {
   }
 }
 
-const COHERENT_PRODUCT_NODES: readonly (readonly [string, string])[] =
+const COHERENT_PRODUCT_NODES: readonly (readonly [string, ANodeKey])[] =
   P_NODE_KEYS.flatMap((p) =>
     A_NODE_KEYS.filter((a) => isCoherent(p, a)).map((a) =>
-      [p, a] as readonly [string, string]
+      [p, a] as readonly [string, ANodeKey]
     )
   );
 
@@ -848,32 +848,33 @@ Deno.test("T-V2T-ALIGN-3: A node keys are the 23 nodes of design 1.5", () => {
   assertEquals(A_NODE_KEYS_EXCEPT_MERGED.length, 22);
 });
 
-// 18 ノードを静的なリテラルとして宣言している以上、軸の語彙 (#34) との一致は
-// 生成では保証されない。表が軸の直積を過不足なく覆うこと、座標→キー→座標が
-// 往復すること、綴りが `open(<attention>,<fix>,<rebase>)` であることをここで固定する。
-Deno.test("T-V2T-ALIGN-3b: the declared open node table is exactly the axis product", () => {
-  const declared = A_OPEN_FOLLOW_NODES.map((n) =>
-    `${n.attention}|${n.fix}|${n.rebase}`
-  );
-  const product: string[] = [];
-  for (const attention of ATTENTION_AXIS_VALUES) {
-    for (const fix of FIX_ASK_AXIS_VALUES) {
-      for (const rebase of REBASE_ASK_AXIS_VALUES) {
-        product.push(`${attention}|${fix}|${rebase}`);
-      }
+// 型が保証する部分 (3 軸の直積を覆っているか・キー文字列が座標と一致しているか) は
+// A_OPEN_FOLLOW の mapped type + template literal type が担うので、ここでは見ない
+// (壊すと deno check が落ちる — pr-fix-3.md に確認手順)。ここに残すのは型が見ない
+// 集合の整合 = 「導出したノードキー集合が Record の値と過不足なく一致するか」だけ。
+Deno.test("T-V2T-ALIGN-3b: derived key sets agree with the declared Record", () => {
+  const declaredOpen: string[] = [];
+  for (const byFix of Object.values(A_OPEN_FOLLOW)) {
+    for (const byRebase of Object.values(byFix)) {
+      for (const key of Object.values(byRebase)) declaredOpen.push(String(key));
     }
   }
-  assertSameSet(declared, product, "declared open nodes == axis product");
-  assertEquals(new Set(declared).size, declared.length, "coords unique");
-  assertEquals(new Set(A_OPEN_FOLLOW_KEYS).size, 18, "keys unique");
-
+  assertEquals(declaredOpen.length, 18, "the Record declares 18 open nodes");
+  assertSameSet(A_OPEN_FOLLOW_KEYS, declaredOpen, "open keys == Record values");
+  assertSameSet(
+    A_NODE_KEYS,
+    [
+      A_NODE_NONE,
+      A_NODE_MERGED,
+      A_WITHDRAWN_UNASKED,
+      A_WITHDRAWN_ASKED,
+      A_NODE_OPEN_NO_FOLLOW,
+      ...declaredOpen,
+    ],
+    "A node keys == singletons + Record values",
+  );
+  // キー → 座標の逆引き (Map) が平坦化ビューと一致すること。
   for (const node of A_OPEN_FOLLOW_NODES) {
-    assertEquals(
-      node.key,
-      `open(${node.attention},${node.fix},${node.rebase})`,
-      "key spelling matches its coordinates",
-    );
-    assertEquals(openNodeKey(node.attention, node.fix, node.rebase), node.key);
     assertEquals(openNodeOf(node.key), node);
   }
   assertEquals(openNodeOf(A_NODE_OPEN_NO_FOLLOW), null);
@@ -1202,7 +1203,7 @@ function assertArtifactEffect(
 Deno.test("T-V2T-MX-1: every verb fires exactly on its declared from-product and lands on its declared to", () => {
   let checked = 0;
   for (const c of VERB_CASES) {
-    const spec = VERB_SPEC[c.verb];
+    const spec: VerbSpecV2 = VERB_SPEC[c.verb];
     for (const [p, a] of COHERENT_PRODUCT_NODES) {
       const item = buildItem(p, a, c.overrides);
       const state = buildState(item, c.stateExtra);
@@ -1607,7 +1608,7 @@ Deno.test("T-V2T-MX-10: no verb outputs an intentionally unreachable product nod
   // 4.2節が行列テストの責務としている逆向きの保証。
   const banned = new Set(INTENTIONALLY_UNREACHABLE);
   for (const c of VERB_CASES) {
-    const spec = VERB_SPEC[c.verb];
+    const spec: VerbSpecV2 = VERB_SPEC[c.verb];
     for (const [p, a] of COHERENT_PRODUCT_NODES) {
       if (!spec.p.from.includes(p)) continue;
       const axis = resolveArtifactAxis(spec.a, p);

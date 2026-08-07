@@ -22,7 +22,6 @@
 // tests/state-transitions-v2.test.sh 経由、または tests/run.sh の glob 自動検出。
 
 import {
-  type ArtifactState,
   type Attention,
   FINALIZE_PHASE,
   FIX_ASK_AXIS_VALUES,
@@ -224,7 +223,18 @@ export interface V2State {
 // していた。v2 の JSON Schema 化は設計3節の範囲 (後続issue) なので、その役割をここの
 // 宣言が担う: テストが「apply の出力キー集合が着地ノードの形と一致する」ことと
 // 「フレームテストの最大フィクスチャが全プロパティを覆う」ことを強制する。
+//
+// 宣言そのものは型で対応する interface に縛る:
+//   - `satisfies ShapeOf<T>` … 存在しないプロパティ名を書いたらコンパイルエラー
+//   - `AssertShapeCovers<T, ...>` … プロパティを書き落としてもコンパイルエラー
+// テストが見るのは「実際の値のキー集合がこの宣言と一致するか」だけになる。
 // ---------------------------------------------------------------------------
+
+type ShapeOf<T> = readonly (keyof T)[];
+// S が T の全プロパティを覆っていなければ `never` になり、代入が型エラーになる。
+type AssertShapeCovers<T, S extends ShapeOf<T>> = [
+  Exclude<keyof T, S[number]>,
+] extends [never] ? true : never;
 
 export const ITEM_SHAPE = [
   "id",
@@ -236,7 +246,7 @@ export const ITEM_SHAPE = [
   "worktree",
   "base",
   "session",
-] as const;
+] as const satisfies ShapeOf<V2Item>;
 
 export const RUN_SHAPE = [
   "kind",
@@ -246,20 +256,35 @@ export const RUN_SHAPE = [
   "executor",
   "executor_last_event_at",
   "takeover_at",
-] as const;
+] as const satisfies ShapeOf<V2Run>;
 
-export const ARTIFACT_SHAPES: Readonly<
-  Record<ArtifactState, readonly string[]>
-> = {
+export const ARTIFACT_SHAPES = {
   none: ["state"],
   open: ["state", "ref", "branch", "tip", "base", "follow"],
   merged: ["state", "ref", "branch", "tip", "base"],
   withdrawn: ["state", "ref", "branch", "tip", "base", "asked", "note"],
+} as const satisfies {
+  readonly none: ShapeOf<V2ArtifactNone>;
+  readonly open: ShapeOf<V2ArtifactOpen>;
+  readonly merged: ShapeOf<V2ArtifactMerged>;
+  readonly withdrawn: ShapeOf<V2ArtifactWithdrawn>;
 };
 
-export const FOLLOW_SHAPE = ["attention", "asks", "ledger", "probe"] as const;
-export const ASKS_SHAPE = ["fix", "rebase"] as const;
-export const FIX_ASK_SHAPE = ["ids", "findings", "taken"] as const;
+export const FOLLOW_SHAPE = [
+  "attention",
+  "asks",
+  "ledger",
+  "probe",
+] as const satisfies ShapeOf<V2Follow>;
+export const ASKS_SHAPE = [
+  "fix",
+  "rebase",
+] as const satisfies ShapeOf<V2Follow["asks"]>;
+export const FIX_ASK_SHAPE = [
+  "ids",
+  "findings",
+  "taken",
+] as const satisfies ShapeOf<V2FixAsk>;
 export const REBASE_ASK_SHAPE = [
   "blocked_onto",
   "reason",
@@ -270,13 +295,13 @@ export const REBASE_ASK_SHAPE = [
   "from_tip",
   "resolve",
   "taken",
-] as const;
+] as const satisfies ShapeOf<V2RebaseAsk>;
 export const LEDGER_SHAPE = [
   "handled",
   "fix_attempts",
   "review_only",
   "answered",
-] as const;
+] as const satisfies ShapeOf<V2Ledger>;
 export const PROBE_SHAPE = [
   "proc",
   "proc_started_at",
@@ -286,88 +311,161 @@ export const PROBE_SHAPE = [
   "checked_at",
   "errors",
   "note",
-] as const;
+] as const satisfies ShapeOf<V2Probe>;
+
+// 書き落としの検出 (値は使わない)。宣言が interface の全プロパティを覆っていなければ
+// そのプロパティの型が never になり、`true` の代入がコンパイルエラーになる。
+// **`as` ではなく代入で書くこと** — `true as never` は許されてしまい検査にならない。
+const _SHAPES_ARE_COMPLETE: {
+  item: AssertShapeCovers<V2Item, typeof ITEM_SHAPE>;
+  run: AssertShapeCovers<V2Run, typeof RUN_SHAPE>;
+  artifactNone: AssertShapeCovers<V2ArtifactNone, typeof ARTIFACT_SHAPES.none>;
+  artifactOpen: AssertShapeCovers<V2ArtifactOpen, typeof ARTIFACT_SHAPES.open>;
+  artifactMerged: AssertShapeCovers<
+    V2ArtifactMerged,
+    typeof ARTIFACT_SHAPES.merged
+  >;
+  artifactWithdrawn: AssertShapeCovers<
+    V2ArtifactWithdrawn,
+    typeof ARTIFACT_SHAPES.withdrawn
+  >;
+  follow: AssertShapeCovers<V2Follow, typeof FOLLOW_SHAPE>;
+  asks: AssertShapeCovers<V2Follow["asks"], typeof ASKS_SHAPE>;
+  fixAsk: AssertShapeCovers<V2FixAsk, typeof FIX_ASK_SHAPE>;
+  rebaseAsk: AssertShapeCovers<V2RebaseAsk, typeof REBASE_ASK_SHAPE>;
+  ledger: AssertShapeCovers<V2Ledger, typeof LEDGER_SHAPE>;
+  probe: AssertShapeCovers<V2Probe, typeof PROBE_SHAPE>;
+} = {
+  item: true,
+  run: true,
+  artifactNone: true,
+  artifactOpen: true,
+  artifactMerged: true,
+  artifactWithdrawn: true,
+  follow: true,
+  asks: true,
+  fixAsk: true,
+  rebaseAsk: true,
+  ledger: true,
+  probe: true,
+};
 
 // ---------------------------------------------------------------------------
 // 領域 A のノードキー — 設計1.5「領域Aの詳細ノード」の 23 ノード。
 // #34 は領域Pの19ノードだけを列挙しているので、A 側はここで新設する。
 //
 // キー文字列は実行時に組み立てない。23 件をリテラルとして書き下したこの節が唯一の定義で、
-// 座標 (attention × fix ask × rebase ask) からの引き当ても、下の静的な表を引くだけである。
-// 軸の語彙 (#34) が増えても表は勝手には広がらないので、両者の一致は T-V2T-ALIGN-3b が
-// 検査する (直積を覆っているか・綴りが座標と合っているか・座標⇄キーが往復するか)。
-// 表に無い座標を引いたら openNodeKey が例外を投げる (黙って未宣言のキーを作らない)。
+// 座標 (attention × fix ask × rebase ask) からの引き当ては、下の Record の添字アクセス。
+//
+// follow 付き open の 18 件は**座標でネストした Record** として宣言する。値の型を
+// `` `open(${A},${F},${R})` `` の template literal type にしてあるので、
+//
+//   - キー文字列が座標と食い違う行 (綴り違い・座標の取り違え) は **型エラー**
+//   - 18 件のどれかが欠けても mapped type が全キーを要求するので **型エラー**
+//
+// になる。「このキー文字列は 3 軸の座標から決まる」という関係が型に載っているので、
+// テストで守る必要が無い (旧 T-V2T-ALIGN-3b の検査項目はこれに置き換わった)。
 // ---------------------------------------------------------------------------
 
 export const ATTENTION_AXIS_VALUES = ["auto", "human"] as const;
 export type AttentionAxis = (typeof ATTENTION_AXIS_VALUES)[number];
 
-export const A_NODE_NONE = "none";
-export const A_NODE_MERGED = "merged";
-export const A_NODE_OPEN_NO_FOLLOW = "open(follow=null)";
-export const A_NODE_WITHDRAWN_UNASKED = "withdrawn(asked=false)";
-export const A_NODE_WITHDRAWN_ASKED = "withdrawn(asked=true)";
+export const A_NODE_NONE = "none" as const;
+export const A_NODE_MERGED = "merged" as const;
+export const A_NODE_OPEN_NO_FOLLOW = "open(follow=null)" as const;
+export const A_NODE_WITHDRAWN_UNASKED = "withdrawn(asked=false)" as const;
+export const A_NODE_WITHDRAWN_ASKED = "withdrawn(asked=true)" as const;
 
-// follow を持つ open の 18 ノード。各行が「サブ軸の座標 ↔ ノードキー」の対応そのもの。
+export const A_OPEN_FOLLOW: {
+  readonly [A in AttentionAxis]: {
+    readonly [F in FixAskAxis]: {
+      readonly [R in RebaseAskAxis]: `open(${A},${F},${R})`;
+    };
+  };
+} = {
+  auto: {
+    null: {
+      quiet: "open(auto,null,quiet)",
+      queued: "open(auto,null,queued)",
+      taken: "open(auto,null,taken)",
+    },
+    pending: {
+      quiet: "open(auto,pending,quiet)",
+      queued: "open(auto,pending,queued)",
+      taken: "open(auto,pending,taken)",
+    },
+    taken: {
+      quiet: "open(auto,taken,quiet)",
+      queued: "open(auto,taken,queued)",
+      taken: "open(auto,taken,taken)",
+    },
+  },
+  human: {
+    null: {
+      quiet: "open(human,null,quiet)",
+      queued: "open(human,null,queued)",
+      taken: "open(human,null,taken)",
+    },
+    pending: {
+      quiet: "open(human,pending,quiet)",
+      queued: "open(human,pending,queued)",
+      taken: "open(human,pending,taken)",
+    },
+    taken: {
+      quiet: "open(human,taken,quiet)",
+      queued: "open(human,taken,queued)",
+      taken: "open(human,taken,taken)",
+    },
+  },
+};
+
+// 領域 A のノードキーのリテラル union。VERB_SPEC の from やノード集合をこの型で受ける
+// ことで、綴り違いのキーがコンパイル時に落ちる。
+export type AOpenFollowKey =
+  (typeof A_OPEN_FOLLOW)[AttentionAxis][FixAskAxis][RebaseAskAxis];
+export type AWithdrawnKey =
+  | typeof A_NODE_WITHDRAWN_UNASKED
+  | typeof A_NODE_WITHDRAWN_ASKED;
+export type ANodeKey =
+  | typeof A_NODE_NONE
+  | typeof A_NODE_MERGED
+  | typeof A_NODE_OPEN_NO_FOLLOW
+  | AWithdrawnKey
+  | AOpenFollowKey;
+
+// 座標付きの平坦化ビュー (Record の値をそのまま集めたもので、文字列は組み立てない)。
 export interface AOpenFollowNode {
   readonly attention: AttentionAxis;
   readonly fix: FixAskAxis;
   readonly rebase: RebaseAskAxis;
-  readonly key: string;
+  readonly key: AOpenFollowKey;
 }
 
-// [attention, fix ask, rebase ask, ノードキー] の 18 行。この表が唯一の定義で、
-// キーは行に書かれたリテラルそのもの (座標から組み立てたものではない)。
-type AOpenFollowRow = readonly [
-  AttentionAxis,
-  FixAskAxis,
-  RebaseAskAxis,
-  string,
-];
-
-const A_OPEN_FOLLOW_ROWS = [
-  ["auto", "null", "quiet", "open(auto,null,quiet)"],
-  ["auto", "null", "queued", "open(auto,null,queued)"],
-  ["auto", "null", "taken", "open(auto,null,taken)"],
-  ["auto", "pending", "quiet", "open(auto,pending,quiet)"],
-  ["auto", "pending", "queued", "open(auto,pending,queued)"],
-  ["auto", "pending", "taken", "open(auto,pending,taken)"],
-  ["auto", "taken", "quiet", "open(auto,taken,quiet)"],
-  ["auto", "taken", "queued", "open(auto,taken,queued)"],
-  ["auto", "taken", "taken", "open(auto,taken,taken)"],
-  ["human", "null", "quiet", "open(human,null,quiet)"],
-  ["human", "null", "queued", "open(human,null,queued)"],
-  ["human", "null", "taken", "open(human,null,taken)"],
-  ["human", "pending", "quiet", "open(human,pending,quiet)"],
-  ["human", "pending", "queued", "open(human,pending,queued)"],
-  ["human", "pending", "taken", "open(human,pending,taken)"],
-  ["human", "taken", "quiet", "open(human,taken,quiet)"],
-  ["human", "taken", "queued", "open(human,taken,queued)"],
-  ["human", "taken", "taken", "open(human,taken,taken)"],
-] as const satisfies readonly AOpenFollowRow[];
-
 export const A_OPEN_FOLLOW_NODES: readonly AOpenFollowNode[] =
-  A_OPEN_FOLLOW_ROWS.map(([attention, fix, rebase, key]) => ({
-    attention,
-    fix,
-    rebase,
-    key,
-  }));
+  ATTENTION_AXIS_VALUES.flatMap((attention) =>
+    FIX_ASK_AXIS_VALUES.flatMap((fix) =>
+      REBASE_ASK_AXIS_VALUES.map((rebase) => ({
+        attention,
+        fix,
+        rebase,
+        key: A_OPEN_FOLLOW[attention][fix][rebase],
+      }))
+    )
+  );
 
 // follow を持つ open の 18 ノード / follow の有無を問わない open の 19 ノード。
-export const A_OPEN_FOLLOW_KEYS: readonly string[] = A_OPEN_FOLLOW_NODES.map((
-  n,
-) => n.key);
-export const A_OPEN_KEYS: readonly string[] = [
+export const A_OPEN_FOLLOW_KEYS: readonly AOpenFollowKey[] = A_OPEN_FOLLOW_NODES
+  .map((n) => n.key);
+export const A_OPEN_KEYS: readonly ANodeKey[] = [
   A_NODE_OPEN_NO_FOLLOW,
   ...A_OPEN_FOLLOW_KEYS,
 ];
-export const A_WITHDRAWN_KEYS: readonly string[] = [
+export const A_WITHDRAWN_KEYS: readonly AWithdrawnKey[] = [
   A_NODE_WITHDRAWN_UNASKED,
   A_NODE_WITHDRAWN_ASKED,
 ];
 
-export const A_NODE_KEYS: readonly string[] = [
+export const A_NODE_KEYS: readonly ANodeKey[] = [
   A_NODE_NONE,
   A_NODE_MERGED,
   ...A_WITHDRAWN_KEYS,
@@ -377,38 +475,26 @@ export const A_NODE_KEYS: readonly string[] = [
 // merged を除いた 22 ノード (restore の from。merged は retire で queue を離脱する終端
 // なので戻れない — 設計2.5)。キー文字列を篩に掛けず、部分集合を組み替えて宣言する。
 // A_NODE_KEYS との整合 (merged だけの差) は T-V2T-ALIGN-3 が固定する。
-export const A_NODE_KEYS_EXCEPT_MERGED: readonly string[] = [
+export const A_NODE_KEYS_EXCEPT_MERGED: readonly ANodeKey[] = [
   A_NODE_NONE,
   ...A_WITHDRAWN_KEYS,
   ...A_OPEN_KEYS,
 ];
 
-export function withdrawnNodeKey(asked: boolean): string {
+export function withdrawnNodeKey(asked: boolean): AWithdrawnKey {
   return asked ? A_NODE_WITHDRAWN_ASKED : A_NODE_WITHDRAWN_UNASKED;
 }
 
-const A_OPEN_FOLLOW_NODE_BY_COORD: ReadonlyMap<string, AOpenFollowNode> =
-  new Map(
-    A_OPEN_FOLLOW_NODES.map((n) => [`${n.attention}|${n.fix}|${n.rebase}`, n]),
-  );
-
+// 座標 → キー。Record が全域なので「表に無い座標」は型として存在せず、例外も要らない。
 export function openNodeKey(
   attention: AttentionAxis,
   fixAsk: FixAskAxis,
   rebaseAsk: RebaseAskAxis,
-): string {
-  const node = A_OPEN_FOLLOW_NODE_BY_COORD.get(
-    `${attention}|${fixAsk}|${rebaseAsk}`,
-  );
-  if (node === undefined) {
-    throw new Error(
-      `BUG: undeclared open node ${attention}/${fixAsk}/${rebaseAsk}`,
-    );
-  }
-  return node.key;
+): AOpenFollowKey {
+  return A_OPEN_FOLLOW[attention][fixAsk][rebaseAsk];
 }
 
-// キー → サブ軸座標 (キー文字列を解析せず、宣言表をそのまま引く)。
+// キー → サブ軸座標 (キー文字列を解析せず、平坦化ビューを引く)。
 const A_OPEN_FOLLOW_NODE_BY_KEY: ReadonlyMap<string, AOpenFollowNode> = new Map(
   A_OPEN_FOLLOW_NODES.map((n) => [n.key, n]),
 );
@@ -424,7 +510,7 @@ export function openNodesWhere(
     fix?: readonly FixAskAxis[];
     rebase?: readonly RebaseAskAxis[];
   },
-): readonly string[] {
+): readonly AOpenFollowKey[] {
   return A_OPEN_FOLLOW_NODES.filter((n) =>
     (filter.attention ?? ATTENTION_AXIS_VALUES).includes(n.attention) &&
     (filter.fix ?? FIX_ASK_AXIS_VALUES).includes(n.fix) &&
@@ -534,7 +620,7 @@ export function followView(follow: V2Follow) {
   });
 }
 
-export function aNodeKeyOf(item: V2Item): string | null {
+export function aNodeKeyOf(item: V2Item): ANodeKey | null {
   const artifact = item.artifact;
   switch (artifact.state) {
     case "none":
@@ -780,6 +866,11 @@ export function advanceTargetsOf(run: V2Run): readonly string[] {
 // VERB_SPEC v2
 // ---------------------------------------------------------------------------
 
+// 注意: 領域 P の着地は「ノードキー (string) か、3 つの標語か」の union だが、#34 の
+// RunNode.key() が string を返すため union は string に潰れ、標語の綴り違いは型では
+// 落ちない (行列テスト T-V2T-MX-1 が実行時に見ている)。タグ付き union に替えるより
+// #34 側でノードキーをリテラル union にするのが筋なので、ここでは現状維持。
+// 詳細は pr-fix-3.md の棚卸し表。
 export type ProgressEffect = string | "unchanged" | "dynamic" | "removed";
 
 export type ArtifactEffect =
@@ -794,13 +885,22 @@ export type ArtifactEffect =
   | "rebase-quiet"
   | "rebase-taken"
   | "merged"
-  | "withdrawn(asked=false)"
-  | "withdrawn(asked=true)"
+  // 着地ノードそのものを指す標語は、ノードキーの定数から型を取る (綴りの二重管理を防ぐ)
+  | typeof A_NODE_WITHDRAWN_UNASKED
+  | typeof A_NODE_WITHDRAWN_ASKED
   | "dynamic";
 
 export interface ArtifactAxisSpec {
-  readonly from: readonly string[];
+  // 宣言済みノードキーの部分集合しか書けない (綴り違いはコンパイル時に落ちる)。
+  readonly from: readonly ANodeKey[];
   readonly to: ArtifactEffect;
+}
+
+// 入口 (P ノード) で A 側の前提が変わる verb (rebase-start) のノード別指定。素の
+// Record を「from/to を持たないほう」として構造で見分けるのではなく、byPNode という
+// タグで判別する (判別可能 union にしたので下の解決関数から as が消える)。
+export interface ArtifactAxisByPNode {
+  readonly byPNode: Readonly<Record<string, ArtifactAxisSpec>>;
 }
 
 export interface VerbSpecV2 {
@@ -808,17 +908,15 @@ export interface VerbSpecV2 {
     readonly from: readonly string[];
     readonly to: ProgressEffect;
   };
-  // 入口 (P ノード) で A 側の前提が変わる verb (rebase-start) のため、v1 の
-  // resolveRebaseAxis と同型のノード別指定を許す。
-  readonly a: ArtifactAxisSpec | Readonly<Record<string, ArtifactAxisSpec>>;
+  readonly a: ArtifactAxisSpec | ArtifactAxisByPNode;
 }
 
 export function resolveArtifactAxis(
   spec: VerbSpecV2["a"],
   pNode: string,
 ): ArtifactAxisSpec {
-  if ("from" in spec && "to" in spec) return spec as ArtifactAxisSpec;
-  const byNode = (spec as Readonly<Record<string, ArtifactAxisSpec>>)[pNode];
+  if (!("byPNode" in spec)) return spec;
+  const byNode = spec.byPNode[pNode];
   if (byNode === undefined) {
     throw new Error(`BUG: no artifact axis for node ${pNode}`);
   }
@@ -830,7 +928,10 @@ const A_UNTOUCHED: ArtifactAxisSpec = {
   to: "untouched",
 };
 
-export const VERB_SPEC: Readonly<Record<string, VerbSpecV2>> = {
+// `satisfies` で制約だけを課し、キーのリテラル型 (= verb 名の集合) は推論に残す。
+// これにより VerbName が宣言そのものから決まり、apply 側の verb 名の綴り違いが
+// コンパイル時に落ちる (VERB_SPEC[verb] の undefined 分岐が不要になる)。
+export const VERB_SPEC = {
   // 新規エントリの追加なので from ノードを持たない (v1 の approve と同じ扱い)。
   "approve": {
     p: { from: [], to: "queued" },
@@ -925,18 +1026,21 @@ export const VERB_SPEC: Readonly<Record<string, VerbSpecV2>> = {
   // 入口2つ: (a) resting からの解決サイクル、(b) finalize からの迂回 (設計2.4)。
   "rebase-start": {
     p: { from: ["resting", ...P_FINALIZE_KEYS], to: "dynamic" },
-    a: Object.fromEntries([
-      [
-        "resting",
-        {
+    a: {
+      byPNode: {
+        "resting": {
           from: openNodesWhere({ attention: ["auto"], rebase: ["queued"] }),
           to: "rebase-taken",
-        } as ArtifactAxisSpec,
-      ],
-      ...P_FINALIZE_KEYS.map((
-        k,
-      ) => [k, { from: A_NODE_KEYS, to: "untouched" } as ArtifactAxisSpec]),
-    ]),
+        },
+        // 迂回入口 (b): finalize の各ノードでは A に触れない。
+        ...Object.fromEntries(
+          P_FINALIZE_KEYS.map((k): [string, ArtifactAxisSpec] => [
+            k,
+            A_UNTOUCHED,
+          ]),
+        ),
+      },
+    },
   },
   "rebase-give-up": {
     p: { from: P_CYCLE_REBASE_KEYS, to: "resting" },
@@ -998,17 +1102,17 @@ export const VERB_SPEC: Readonly<Record<string, VerbSpecV2>> = {
     p: { from: P_RUNNING_KEYS, to: "unchanged" },
     a: A_UNTOUCHED,
   },
-};
+} satisfies Readonly<Record<string, VerbSpecV2>>;
+
+// 宣言済み verb 名の集合。apply 群はこの型で verb を受ける。
+export type VerbName = keyof typeof VERB_SPEC;
 
 // ---------------------------------------------------------------------------
 // 共通ヘルパ
 // ---------------------------------------------------------------------------
 
-function requireVerbAxes(item: V2Item, verb: string): string {
-  const spec = VERB_SPEC[verb];
-  if (spec === undefined) {
-    throw new Error(`BUG: no VERB_SPEC entry for verb: ${verb}`);
-  }
+function requireVerbAxes(item: V2Item, verb: VerbName): string {
+  const spec: VerbSpecV2 = VERB_SPEC[verb];
   const pNode = pNodeKeyOf(item);
   if (pNode === null || !spec.p.from.includes(pNode)) {
     throw new CliErrorV2(
@@ -1598,7 +1702,7 @@ export function applyFixRequest(
 
 function requireFollowFor(
   item: V2Item,
-  verb: string,
+  verb: VerbName,
 ): { open: V2ArtifactOpen; follow: V2Follow } {
   requireVerbAxes(item, verb);
   return requireFollow(item, verb);
