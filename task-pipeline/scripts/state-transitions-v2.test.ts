@@ -31,6 +31,7 @@ import {
 } from "./state-model-v2.ts";
 import {
   A_NODE_KEYS,
+  A_NODE_KEYS_EXCEPT_MERGED,
   A_NODE_MERGED,
   A_NODE_NONE,
   A_NODE_OPEN_NO_FOLLOW,
@@ -837,6 +838,14 @@ Deno.test("T-V2T-ALIGN-3: A node keys are the 23 nodes of design 1.5", () => {
   assert(A_NODE_KEYS.includes(A_WITHDRAWN_UNASKED));
   assert(A_NODE_KEYS.includes(A_WITHDRAWN_ASKED));
   assertEquals(PRODUCT_NODE_KEYS.length, 19 * 23, "product node count");
+  // restore の from は「merged だけを欠いた 22 ノード」であること (別々に宣言した
+  // 2 つの部分集合が食い違わないことの固定)。
+  assertSameSet(
+    A_NODE_KEYS_EXCEPT_MERGED,
+    A_NODE_KEYS.filter((k) => k !== A_NODE_MERGED),
+    "A_NODE_KEYS_EXCEPT_MERGED == A_NODE_KEYS - merged",
+  );
+  assertEquals(A_NODE_KEYS_EXCEPT_MERGED.length, 22);
 });
 
 // 18 ノードを静的なリテラルとして宣言している以上、軸の語彙 (#34) との一致は
@@ -2057,10 +2066,9 @@ const REACHABLE_RUNNING_OPEN_SUBAXES: ReadonlySet<string> = new Set([
 
 // resting で到達できる open 座標 = taken を含まない 8 通り (不変条件5の残差)。
 const RESTING_OPEN_SUBAXES: ReadonlySet<string> = new Set(
-  A_OPEN_FOLLOW_KEYS.filter((k) => {
-    const sub = parseOpenKey(k) as OpenSubAxisTriple;
-    return sub.fix !== "taken" && sub.rebase !== "taken";
-  }),
+  A_OPEN_FOLLOW_NODES
+    .filter((n) => n.fix !== "taken" && n.rebase !== "taken")
+    .map((n) => n.key),
 );
 
 const INTENTIONALLY_UNREACHABLE: readonly string[] = PRODUCT_NODE_KEYS.filter(
@@ -2141,14 +2149,13 @@ Deno.test("T-V2T-REACH-2: the declared list equals the measured unreachable set"
 // kind が 2 つ必要になる。blocked / queued はその run から継承するだけなので同じ。
 //
 // 合わせて 6 つ。設計1.5 の自由直積が実際より広いという指摘であって、実装の欠落ではない。
-const UNREACHABLE_ARTIFACT_NODES: readonly string[] = A_OPEN_FOLLOW_KEYS.filter(
-  (a) => {
-    const sub = parseOpenKey(a) as OpenSubAxisTriple;
-    const anyTaken = sub.fix === "taken" || sub.rebase === "taken";
-    return (sub.attention === "human" && anyTaken) ||
-      (sub.fix === "taken" && sub.rebase === "taken");
-  },
-);
+const UNREACHABLE_ARTIFACT_NODES: readonly string[] = A_OPEN_FOLLOW_NODES
+  .filter((n) => {
+    const anyTaken = n.fix === "taken" || n.rebase === "taken";
+    return (n.attention === "human" && anyTaken) ||
+      (n.fix === "taken" && n.rebase === "taken");
+  })
+  .map((n) => n.key);
 
 Deno.test("T-V2T-REACH-3: every declared node of each domain is reached", () => {
   const reachedP = new Set<string>();
@@ -2178,9 +2185,9 @@ Deno.test("T-V2T-REACH-3: every declared node of each domain is reached", () => 
 
 Deno.test("T-V2T-REACH-4: resting x fix-ask taken is on the declared list", () => {
   // 受け入れ条件4が名指しする例。fix-ask が taken の resting は 6 ノードある。
-  const restingFixTaken = A_OPEN_FOLLOW_KEYS
-    .filter((a) => (parseOpenKey(a) as OpenSubAxisTriple).fix === "taken")
-    .map((a) => productKey(P_RESTING, a));
+  const restingFixTaken = A_OPEN_FOLLOW_NODES
+    .filter((n) => n.fix === "taken")
+    .map((n) => productKey(P_RESTING, n.key));
   assertEquals(restingFixTaken.length, 6);
   for (const key of restingFixTaken) {
     assert(

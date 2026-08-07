@@ -374,6 +374,15 @@ export const A_NODE_KEYS: readonly string[] = [
   ...A_OPEN_KEYS,
 ];
 
+// merged を除いた 22 ノード (restore の from。merged は retire で queue を離脱する終端
+// なので戻れない — 設計2.5)。キー文字列を篩に掛けず、部分集合を組み替えて宣言する。
+// A_NODE_KEYS との整合 (merged だけの差) は T-V2T-ALIGN-3 が固定する。
+export const A_NODE_KEYS_EXCEPT_MERGED: readonly string[] = [
+  A_NODE_NONE,
+  ...A_WITHDRAWN_KEYS,
+  ...A_OPEN_KEYS,
+];
+
 export function withdrawnNodeKey(asked: boolean): string {
   return asked ? A_NODE_WITHDRAWN_ASKED : A_NODE_WITHDRAWN_UNASKED;
 }
@@ -868,10 +877,7 @@ export const VERB_SPEC: Readonly<Record<string, VerbSpecV2>> = {
   // merged は retire で queue を離脱する終端なので from から外れる (設計2.5)。
   "restore": {
     p: { from: ["resting", "blocked"], to: "queued" },
-    a: {
-      from: A_NODE_KEYS.filter((k) => k !== A_NODE_MERGED),
-      to: "unchanged",
-    },
+    a: { from: A_NODE_KEYS_EXCEPT_MERGED, to: "unchanged" },
   },
   "retire": {
     p: { from: ["resting"], to: "removed" },
