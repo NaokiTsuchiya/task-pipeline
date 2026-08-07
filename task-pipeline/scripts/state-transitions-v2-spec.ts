@@ -9,7 +9,10 @@
 // 層 10 から再 export して公開する。
 
 import {
+  type AxisKey,
   FINALIZE_PHASE,
+  type Phase,
+  type PNodeKey,
   REBASE_FIX_DETOUR_PHASE,
   RUN_AXES,
 } from "./state-model-v2.ts";
@@ -33,7 +36,7 @@ import {
   P_FINALIZE_KEYS,
   P_RUNNING_KEYS,
   P_VERIFIED_KEYS,
-  RUN_NODE_KEY_BY_COORD,
+  requireRunNodeKey,
 } from "./state-transitions-v2-nodes.ts";
 
 // ---------------------------------------------------------------------------
@@ -45,12 +48,12 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface AdvanceEdge {
-  readonly axisKey: string;
-  readonly from: string;
-  readonly to: string;
+  readonly axisKey: AxisKey;
+  readonly from: Phase;
+  readonly to: Phase;
 }
 
-function mainSequenceOf(axisKey: string): readonly string[] {
+function mainSequenceOf(axisKey: AxisKey): readonly Phase[] {
   const axis = RUN_AXES.find((a) => a.axisKey() === axisKey);
   if (axis === undefined) throw new Error(`BUG: unknown axis ${axisKey}`);
   const phases = axis.phases();
@@ -81,6 +84,9 @@ function buildAdvanceEdges(): readonly AdvanceEdge[] {
 
 export const ADVANCE_EDGES: readonly AdvanceEdge[] = buildAdvanceEdges();
 
+// 辺の**宣言**は上の AdvanceEdge (AxisKey × Phase) で型が付いているが、この問い合わせは
+// item から来る素の値 (V2Run.phase は string) を受ける口なので string で受ける。
+// 宣言は列挙子・境界の問い合わせは string、という切り分け。
 export function isAdvanceEdge(
   axisKey: string,
   from: string,
@@ -91,7 +97,7 @@ export function isAdvanceEdge(
   );
 }
 
-export function advanceTargetsOf(run: V2Run): readonly string[] {
+export function advanceTargetsOf(run: V2Run): readonly Phase[] {
   const axisKey = axisKeyOfRun(run);
   return ADVANCE_EDGES.filter((e) =>
     e.axisKey === axisKey && e.from === run.phase
@@ -102,12 +108,11 @@ export function advanceTargetsOf(run: V2Run): readonly string[] {
 // 層 9 (遷移仕様) — VERB_SPEC v2
 // ---------------------------------------------------------------------------
 
-// 注意: 領域 P の着地は「ノードキー (string) か、3 つの標語か」の union だが、#34 の
-// RunNode.key() が string を返すため union は string に潰れ、標語の綴り違いは型では
-// 落ちない (行列テスト T-V2T-MX-1 が実行時に見ている)。タグ付き union に替えるより
-// #34 側でノードキーをリテラル union にするのが筋なので、ここでは現状維持。
-// 詳細は pr-fix-3.md の棚卸し表。
-export type ProgressEffect = string | "unchanged" | "dynamic" | "removed";
+// 領域 P の着地は「ノードキーか、3 つの標語か」の union。#34 の RunNode.key() が
+// リテラル union (PNodeKey) を返すようになったので、ノードキーの綴り違いも標語の
+// 綴り違いも、ここでコンパイル時に落ちる (以前は string に潰れ、行列テスト
+// T-V2T-MX-1 が実行時に見るしかなかった)。
+export type ProgressEffect = PNodeKey | "unchanged" | "dynamic" | "removed";
 
 export type ArtifactEffect =
   // artifact オブジェクトが 1 バイトも変わらない (フレームテストも書き換えを禁じる)
@@ -136,12 +141,15 @@ export interface ArtifactAxisSpec {
 // Record を「from/to を持たないほう」として構造で見分けるのではなく、byPNode という
 // タグで判別する (判別可能 union にしたので下の解決関数から as が消える)。
 export interface ArtifactAxisByPNode {
-  readonly byPNode: Readonly<Record<string, ArtifactAxisSpec>>;
+  // 全 P ノードを並べる必要は無い (その verb の入口だけ) ので Partial。宣言済みノード
+  // キー以外を書けない点は from と同じ。
+  readonly byPNode: Readonly<Partial<Record<PNodeKey, ArtifactAxisSpec>>>;
 }
 
 export interface VerbSpecV2 {
   readonly p: {
-    readonly from: readonly string[];
+    // 宣言済みノードキーの部分集合しか書けない (領域 A 側の from と揃えた)。
+    readonly from: readonly PNodeKey[];
     readonly to: ProgressEffect;
   };
   readonly a: ArtifactAxisSpec | ArtifactAxisByPNode;
@@ -149,7 +157,7 @@ export interface VerbSpecV2 {
 
 export function resolveArtifactAxis(
   spec: VerbSpecV2["a"],
-  pNode: string,
+  pNode: PNodeKey,
 ): ArtifactAxisSpec {
   if (!("byPNode" in spec)) return spec;
   const byNode = spec.byPNode[pNode];
@@ -176,22 +184,14 @@ export const VERB_SPEC = {
   "claim": {
     p: {
       from: ["queued"],
-      to: RUN_NODE_KEY_BY_COORD.get(
-        `initial|full|${INITIAL_FULL_FIRST_PHASE}`,
-      ) as string,
+      to: requireRunNodeKey("initial", "full", INITIAL_FULL_FIRST_PHASE),
     },
     a: { from: A_NODE_KEYS, to: "cycle-reset" },
   },
   "set-gate": {
     p: {
-      from: [
-        RUN_NODE_KEY_BY_COORD.get(
-          `initial|full|${INITIAL_FULL_FIRST_PHASE}`,
-        ) as string,
-      ],
-      to: RUN_NODE_KEY_BY_COORD.get(
-        `initial|light|${INITIAL_LIGHT_FIRST_PHASE}`,
-      ) as string,
+      from: [requireRunNodeKey("initial", "full", INITIAL_FULL_FIRST_PHASE)],
+      to: requireRunNodeKey("initial", "light", INITIAL_LIGHT_FIRST_PHASE),
     },
     a: A_UNTOUCHED,
   },
@@ -270,7 +270,7 @@ export const VERB_SPEC = {
         },
         // 迂回入口 (b): finalize の各ノードでは A に触れない。
         ...Object.fromEntries(
-          P_FINALIZE_KEYS.map((k): [string, ArtifactAxisSpec] => [
+          P_FINALIZE_KEYS.map((k): [PNodeKey, ArtifactAxisSpec] => [
             k,
             A_UNTOUCHED,
           ]),

@@ -31,8 +31,11 @@ import {
   INITIAL_GATE_PHASE_SEQUENCES,
   listRunNodes,
   P_NODE_KEYS,
+  type PNodeKey,
   type Progress,
   type ReachabilityEdge,
+  type RunNode,
+  type RunNodeKey,
 } from "./state-model-v2.ts";
 // 層 10 (公開面) — apply 群と、そこから再 export されている公開 API。
 import {
@@ -168,7 +171,7 @@ function runKey(
   kind: string,
   gate: string | null,
   phase: string,
-): string {
+): RunNodeKey {
   const node = listRunNodes().find((n) =>
     n.kind === kind && n.gate === gate && n.phase === phase
   );
@@ -289,7 +292,11 @@ function artifactFixture(aKey: string, leased: boolean): V2Artifact {
   return { state: "open", ...group, follow: followFixture(sub, leased) };
 }
 
-const RUN_NODE_BY_KEY = new Map(listRunNodes().map((n) => [n.key(), n]));
+// 引くのは VERB_SPEC 由来の素の文字列 (宣言外のキーが来たら undefined を返してほしい)
+// なので、キー型は #34 の RunNodeKey ではなく string で持つ。
+const RUN_NODE_BY_KEY: ReadonlyMap<string, RunNode> = new Map(
+  listRunNodes().map((n) => [n.key(), n]),
+);
 
 function buildItem(
   pKey: string,
@@ -359,7 +366,7 @@ interface VerbCase {
   stateExtra?: Partial<V2State>;
   invoke: (item: V2Item, index: number, state: V2State) => V2State;
   // frame テストの起点 (P ノード, A ノード) と書き換え許可パス。
-  frameNode: readonly [string, ANodeKey];
+  frameNode: readonly [PNodeKey, ANodeKey];
   frame: readonly string[];
 }
 
@@ -792,10 +799,10 @@ function isCoherent(pKey: string, aKey: string): boolean {
   }
 }
 
-const COHERENT_PRODUCT_NODES: readonly (readonly [string, ANodeKey])[] =
+const COHERENT_PRODUCT_NODES: readonly (readonly [PNodeKey, ANodeKey])[] =
   P_NODE_KEYS.flatMap((p) =>
     A_NODE_KEYS.filter((a) => isCoherent(p, a)).map((a) =>
-      [p, a] as readonly [string, ANodeKey]
+      [p, a] as readonly [PNodeKey, ANodeKey]
     )
   );
 
@@ -819,14 +826,17 @@ Deno.test("T-V2T-ALIGN-1: VERB_SPEC keys and verb cases agree", () => {
 Deno.test("T-V2T-ALIGN-2: every declared from/to node is a real node key", () => {
   for (const [verb, spec] of Object.entries(VERB_SPEC)) {
     for (const p of spec.p.from) {
-      assert(P_NODE_KEYS.includes(p), `${verb}: unknown P from node ${p}`);
+      assert(
+        (P_NODE_KEYS as readonly string[]).includes(p),
+        `${verb}: unknown P from node ${p}`,
+      );
     }
     if (
       spec.p.to !== "unchanged" && spec.p.to !== "dynamic" &&
       spec.p.to !== "removed"
     ) {
       assert(
-        P_NODE_KEYS.includes(spec.p.to),
+        (P_NODE_KEYS as readonly string[]).includes(spec.p.to),
         `${verb}: unknown P to node ${spec.p.to}`,
       );
     }
@@ -1123,8 +1133,13 @@ Deno.test("T-V2T-ALIGN-9: no export or verb name resembles a retired v1 verb", (
 Deno.test("T-V2T-ALIGN-10: no run node named initial/light/research exists", () => {
   // v1 の gate 死に組 (4620c1f) の構造的封じ。gate が座標に入ったので、light の列に
   // research は存在しない。
+  // #34 の PNodeKey がリテラルユニオンになったので、この組は**型としても**存在しない
+  // (下の includes は string へ広げないとコンパイルが通らない)。実行時の検査は、
+  // 型の外から来るキー文字列にも同じことが言えることの確認として残す。
   assertFalse(
-    P_NODE_KEYS.includes("running(initial,light,research)"),
+    (P_NODE_KEYS as readonly string[]).includes(
+      "running(initial,light,research)",
+    ),
     "initial x light x research must not be a declared node",
   );
   assertEquals(INITIAL_GATE_PHASE_SEQUENCES.light[0], "research+plan");
@@ -2162,7 +2177,7 @@ Deno.test("T-V2T-REACH-2: the declared list equals the measured unreachable set"
 // kind が 2 つ必要になる。blocked / queued はその run から継承するだけなので同じ。
 //
 // 合わせて 6 つ。設計1.5 の自由直積が実際より広いという指摘であって、実装の欠落ではない。
-const UNREACHABLE_ARTIFACT_NODES: readonly string[] = A_OPEN_FOLLOW_NODES
+const UNREACHABLE_ARTIFACT_NODES: readonly ANodeKey[] = A_OPEN_FOLLOW_NODES
   .filter((n) => {
     const anyTaken = n.fix === "taken" || n.rebase === "taken";
     return (n.attention === "human" && anyTaken) ||

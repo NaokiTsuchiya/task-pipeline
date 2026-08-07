@@ -27,9 +27,10 @@
 //   範囲外。前者は後続 issue、後者は queue エントリの領域座標を持たず「領域ごとの
 //   from/to を宣言する VERB_SPEC」の対象にならない (v1 でも VERB_SPEC の外)。
 //
-// #34 のレコード (makeFixAsk/makeRebaseAsk/makeProbe/makeFollow) はメソッドが生成時の
-// 値を閉じ込めるため、apply の内部状態には**使わない**。item は素データとして持ち、
-// 座標導出と不変条件検査の入口でだけ make* を通して導出ビューを組む (層 6〜7)。
+// #34 のレコード (makeFixAsk/makeRebaseAsk/makeProbe/makeFollow) は座標と不変条件の
+// 問い合わせ口 (導出ビュー) であって item の表現ではないので、apply の内部状態には
+// **使わない**。item は素データ (V2Item) として持ち、座標導出と不変条件検査の入口でだけ
+// make* を通して導出ビューを組む (層 6〜7)。
 //
 // テスト: state-transitions-v2.test.ts (直接importで検査)。実行は
 // tests/state-transitions-v2.test.sh 経由、または tests/run.sh の glob 自動検出。
@@ -37,6 +38,7 @@
 import {
   FINALIZE_PHASE,
   type HumanAttentionReason,
+  type PNodeKey,
   REBASE_FIX_DETOUR_PHASE,
 } from "./state-model-v2.ts";
 import {
@@ -145,7 +147,7 @@ export {
 // 層 10 (apply 群) — 共通ヘルパ (このファイル内だけで使う)
 // ---------------------------------------------------------------------------
 
-function requireVerbAxes(item: V2Item, verb: VerbName): string {
+function requireVerbAxes(item: V2Item, verb: VerbName): PNodeKey {
   const spec: VerbSpecV2 = VERB_SPEC[verb];
   const pNode = pNodeKeyOf(item);
   if (pNode === null || !spec.p.from.includes(pNode)) {
