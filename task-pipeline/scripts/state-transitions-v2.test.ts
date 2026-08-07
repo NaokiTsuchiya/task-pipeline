@@ -33,6 +33,7 @@ import {
   P_NODE_KEYS,
   type Progress,
   type ReachabilityEdge,
+  type RunNode,
 } from "./state-model-v2.ts";
 // 層 10 (公開面) — apply 群と、そこから再 export されている公開 API。
 import {
@@ -289,7 +290,11 @@ function artifactFixture(aKey: string, leased: boolean): V2Artifact {
   return { state: "open", ...group, follow: followFixture(sub, leased) };
 }
 
-const RUN_NODE_BY_KEY = new Map(listRunNodes().map((n) => [n.key(), n]));
+// 引くのは VERB_SPEC 由来の素の文字列 (宣言外のキーが来たら undefined を返してほしい)
+// なので、キー型は #34 の RunNodeKey ではなく string で持つ。
+const RUN_NODE_BY_KEY: ReadonlyMap<string, RunNode> = new Map(
+  listRunNodes().map((n) => [n.key(), n]),
+);
 
 function buildItem(
   pKey: string,
@@ -819,14 +824,17 @@ Deno.test("T-V2T-ALIGN-1: VERB_SPEC keys and verb cases agree", () => {
 Deno.test("T-V2T-ALIGN-2: every declared from/to node is a real node key", () => {
   for (const [verb, spec] of Object.entries(VERB_SPEC)) {
     for (const p of spec.p.from) {
-      assert(P_NODE_KEYS.includes(p), `${verb}: unknown P from node ${p}`);
+      assert(
+        (P_NODE_KEYS as readonly string[]).includes(p),
+        `${verb}: unknown P from node ${p}`,
+      );
     }
     if (
       spec.p.to !== "unchanged" && spec.p.to !== "dynamic" &&
       spec.p.to !== "removed"
     ) {
       assert(
-        P_NODE_KEYS.includes(spec.p.to),
+        (P_NODE_KEYS as readonly string[]).includes(spec.p.to),
         `${verb}: unknown P to node ${spec.p.to}`,
       );
     }
@@ -1123,8 +1131,13 @@ Deno.test("T-V2T-ALIGN-9: no export or verb name resembles a retired v1 verb", (
 Deno.test("T-V2T-ALIGN-10: no run node named initial/light/research exists", () => {
   // v1 の gate 死に組 (4620c1f) の構造的封じ。gate が座標に入ったので、light の列に
   // research は存在しない。
+  // #34 の PNodeKey がリテラルユニオンになったので、この組は**型としても**存在しない
+  // (下の includes は string へ広げないとコンパイルが通らない)。実行時の検査は、
+  // 型の外から来るキー文字列にも同じことが言えることの確認として残す。
   assertFalse(
-    P_NODE_KEYS.includes("running(initial,light,research)"),
+    (P_NODE_KEYS as readonly string[]).includes(
+      "running(initial,light,research)",
+    ),
     "initial x light x research must not be a declared node",
   );
   assertEquals(INITIAL_GATE_PHASE_SEQUENCES.light[0], "research+plan");

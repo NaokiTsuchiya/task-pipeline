@@ -7,6 +7,8 @@
 // 公開面ではない (層 10 の state-transitions-v2.ts が必要な分だけ再 export する)。
 
 import {
+  ATTENTION_AXIS_VALUES,
+  type AttentionAxis,
   FINALIZE_PHASE,
   FIX_ASK_AXIS_VALUES,
   type FixAskAxis,
@@ -58,8 +60,10 @@ import {
 // テストで守る必要が無い (旧 T-V2T-ALIGN-3b の検査項目はこれに置き換わった)。
 // ---------------------------------------------------------------------------
 
-export const ATTENTION_AXIS_VALUES = ["auto", "human"] as const;
-export type AttentionAxis = (typeof ATTENTION_AXIS_VALUES)[number];
+// attention の2値サブ軸は #34 の語彙 (follow.subAxes() が返す型と同一のものを使う —
+// ここで別に宣言すると A_OPEN_FOLLOW の添字と導出ビューの戻り値がずれうる)。
+export { ATTENTION_AXIS_VALUES };
+export type { AttentionAxis };
 
 export const A_NODE_NONE = "none" as const;
 export const A_NODE_MERGED = "merged" as const;
