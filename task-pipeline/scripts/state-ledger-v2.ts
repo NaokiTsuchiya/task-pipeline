@@ -141,8 +141,6 @@ export function applyInitV2(
 // get / validate
 // ---------------------------------------------------------------------------
 
-// get: 状態オブジェクトをそのまま返すだけ。前提チェックも書き換えもスキーマ検証も
-// 行わない (読み取り専用 verb — docs/state-cli-contract.md 「get」節)。
 export function getV2(state: unknown): unknown {
   return state;
 }

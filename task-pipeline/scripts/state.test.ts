@@ -49,6 +49,7 @@ const CONTRACT_DOC = new URL(
   "task-pipeline/docs/state-cli-contract.md",
   REPO_ROOT,
 );
+const SKILL_MD = new URL("task-pipeline/SKILL.md", REPO_ROOT);
 
 // ---------------------------------------------------------------------------
 // サブプロセス起動
@@ -3630,6 +3631,20 @@ Deno.test("T-D5: the phase sequence table matches the declared advance edges", a
     assert(
       doc.includes(phases.join(" → ")),
       `doc must spell out the ${gate} phase sequence: ${phases.join(" → ")}`,
+    );
+  }
+});
+
+Deno.test("T-D7: SKILL.md spells out each gate's phase sequence", async () => {
+  // v1 の T-D5 相当。オーケストレータの手順書 (SKILL.md) が実装の宣言と別の列を書いて
+  // いたら、executor へ渡すフェーズ名がずれる。照合相手は宣言そのもの
+  // (INITIAL_GATE_PHASE_SEQUENCES) で、SKILL.md 側の文言ではない。
+  const skill = await Deno.readTextFile(SKILL_MD);
+  for (const [gate, phases] of Object.entries(INITIAL_GATE_PHASE_SEQUENCES)) {
+    const sequence = phases.join(" → ");
+    assert(
+      skill.includes(sequence),
+      `SKILL.md must spell out the ${gate} phase sequence: ${sequence}`,
     );
   }
 });
