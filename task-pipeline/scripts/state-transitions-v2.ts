@@ -38,6 +38,7 @@
 import {
   FINALIZE_PHASE,
   type HumanAttentionReason,
+  type PNodeKey,
   REBASE_FIX_DETOUR_PHASE,
 } from "./state-model-v2.ts";
 import {
@@ -146,7 +147,7 @@ export {
 // 層 10 (apply 群) — 共通ヘルパ (このファイル内だけで使う)
 // ---------------------------------------------------------------------------
 
-function requireVerbAxes(item: V2Item, verb: VerbName): string {
+function requireVerbAxes(item: V2Item, verb: VerbName): PNodeKey {
   const spec: VerbSpecV2 = VERB_SPEC[verb];
   const pNode = pNodeKeyOf(item);
   if (pNode === null || !spec.p.from.includes(pNode)) {

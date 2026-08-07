@@ -9,9 +9,11 @@
 import {
   ATTENTION_AXIS_VALUES,
   type AttentionAxis,
+  type AxisKey,
   FINALIZE_PHASE,
   FIX_ASK_AXIS_VALUES,
   type FixAskAxis,
+  type Gate,
   INITIAL_GATE_PHASE_SEQUENCES,
   invariantGateNonNullIffKindInitial,
   invariantMergedImpliesResting,
@@ -27,10 +29,13 @@ import {
   makeRebaseAsk,
   NON_RUNNING_P_NODE_KEYS,
   P_NODE_KEYS,
+  type PNodeKey,
   REBASE_ASK_AXIS_VALUES,
   REBASE_FIX_DETOUR_PHASE,
   type RebaseAskAxis,
   RUN_AXES,
+  type RunKind,
+  type RunNodeKey,
 } from "./state-model-v2.ts";
 import {
   CliErrorV2,
@@ -223,34 +228,55 @@ const RUN_NODES = listRunNodes();
 
 // (kind, gate, phase) → ノードキー。#34 の makeRunNode と同じ綴りを保証するために
 // 自前で文字列を組まず、listRunNodes() の key() を引く。
-export const RUN_NODE_KEY_BY_COORD: ReadonlyMap<string, string> = new Map(
+// 引き口の座標は外から来る素の値なのでキー型は string、値は宣言由来の RunNodeKey。
+const RUN_NODE_KEY_BY_COORD: ReadonlyMap<string, RunNodeKey> = new Map(
   RUN_NODES.map((n) => [`${n.kind}|${n.gate ?? "-"}|${n.phase}`, n.key()]),
 );
 
-export const P_RUNNING_KEYS: readonly string[] = RUN_NODES.map((n) => n.key());
-export const P_VERIFIED_KEYS: readonly string[] = RUN_NODES.filter((n) =>
+// 宣言表から特定ノードのキーを引く (VERB_SPEC が着地ノードを名指しするときの入口)。
+// 宣言の外の座標は BUG — undefined を `as string` で潰さずここで落とす。
+export function requireRunNodeKey(
+  kind: RunKind,
+  gate: Gate | null,
+  phase: string,
+): RunNodeKey {
+  const key = RUN_NODE_KEY_BY_COORD.get(`${kind}|${gate ?? "-"}|${phase}`);
+  if (key === undefined) {
+    throw new Error(
+      `BUG: undeclared run node: kind=${kind} gate=${String(gate)} ${phase}`,
+    );
+  }
+  return key;
+}
+
+export const P_RUNNING_KEYS: readonly RunNodeKey[] = RUN_NODES.map((n) =>
+  n.key()
+);
+export const P_VERIFIED_KEYS: readonly RunNodeKey[] = RUN_NODES.filter((n) =>
   n.phase !== FINALIZE_PHASE
 ).map((n) => n.key());
-export const P_FINALIZE_KEYS: readonly string[] = RUN_NODES.filter((n) =>
+export const P_FINALIZE_KEYS: readonly RunNodeKey[] = RUN_NODES.filter((n) =>
   n.phase === FINALIZE_PHASE
 ).map((n) => n.key());
 // 迂回フェーズ (kind を変えない寄り道)。kind==rebase_fix は解決サイクル専用なので除く。
-export const P_DETOUR_KEYS: readonly string[] = RUN_NODES.filter((n) =>
+export const P_DETOUR_KEYS: readonly RunNodeKey[] = RUN_NODES.filter((n) =>
   n.phase === REBASE_FIX_DETOUR_PHASE && n.kind !== "rebase_fix"
 ).map((n) => n.key());
 // 解決サイクルの run (kind==rebase_fix の主フェーズ)。
-export const P_CYCLE_REBASE_KEYS: readonly string[] = RUN_NODES.filter((n) =>
-  n.kind === "rebase_fix" && n.phase === REBASE_FIX_DETOUR_PHASE
-).map((n) => n.key());
+export const P_CYCLE_REBASE_KEYS: readonly RunNodeKey[] = RUN_NODES.filter((
+  n,
+) => n.kind === "rebase_fix" && n.phase === REBASE_FIX_DETOUR_PHASE).map((n) =>
+  n.key()
+);
 
 export const INITIAL_FULL_FIRST_PHASE = INITIAL_GATE_PHASE_SEQUENCES.full[0];
 export const INITIAL_LIGHT_FIRST_PHASE = INITIAL_GATE_PHASE_SEQUENCES.light[0];
 
-const AXIS_KEY_BY_COORD: ReadonlyMap<string, string> = new Map(
+const AXIS_KEY_BY_COORD: ReadonlyMap<string, AxisKey> = new Map(
   RUN_AXES.map((a) => [`${a.kind}|${a.gate ?? "-"}`, a.axisKey()]),
 );
 
-export function axisKeyOfRun(run: V2Run): string {
+export function axisKeyOfRun(run: V2Run): AxisKey {
   const key = AXIS_KEY_BY_COORD.get(`${run.kind}|${run.gate ?? "-"}`);
   if (key === undefined) {
     throw new CliErrorV2(
@@ -265,7 +291,7 @@ export function axisKeyOfRun(run: V2Run): string {
 // 層 6 (item → 座標) — item から領域 P / A のノードキーを導く
 // ---------------------------------------------------------------------------
 
-export function pNodeKeyOf(item: V2Item): string | null {
+export function pNodeKeyOf(item: V2Item): PNodeKey | null {
   if (!invariantRunProgressConsistent(item.progress, item.run)) return null;
   if (item.progress === "running") {
     const run = item.run as V2Run;
@@ -344,7 +370,7 @@ export function productKeyOf(item: V2Item): string | null {
   return productKey(p, a);
 }
 
-export function productKey(pNode: string, aNode: string): string {
+export function productKey(pNode: PNodeKey, aNode: ANodeKey): string {
   return `${pNode} × ${aNode}`;
 }
 

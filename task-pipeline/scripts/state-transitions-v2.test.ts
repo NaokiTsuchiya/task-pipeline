@@ -31,9 +31,11 @@ import {
   INITIAL_GATE_PHASE_SEQUENCES,
   listRunNodes,
   P_NODE_KEYS,
+  type PNodeKey,
   type Progress,
   type ReachabilityEdge,
   type RunNode,
+  type RunNodeKey,
 } from "./state-model-v2.ts";
 // 層 10 (公開面) — apply 群と、そこから再 export されている公開 API。
 import {
@@ -169,7 +171,7 @@ function runKey(
   kind: string,
   gate: string | null,
   phase: string,
-): string {
+): RunNodeKey {
   const node = listRunNodes().find((n) =>
     n.kind === kind && n.gate === gate && n.phase === phase
   );
@@ -364,7 +366,7 @@ interface VerbCase {
   stateExtra?: Partial<V2State>;
   invoke: (item: V2Item, index: number, state: V2State) => V2State;
   // frame テストの起点 (P ノード, A ノード) と書き換え許可パス。
-  frameNode: readonly [string, ANodeKey];
+  frameNode: readonly [PNodeKey, ANodeKey];
   frame: readonly string[];
 }
 
@@ -797,10 +799,10 @@ function isCoherent(pKey: string, aKey: string): boolean {
   }
 }
 
-const COHERENT_PRODUCT_NODES: readonly (readonly [string, ANodeKey])[] =
+const COHERENT_PRODUCT_NODES: readonly (readonly [PNodeKey, ANodeKey])[] =
   P_NODE_KEYS.flatMap((p) =>
     A_NODE_KEYS.filter((a) => isCoherent(p, a)).map((a) =>
-      [p, a] as readonly [string, ANodeKey]
+      [p, a] as readonly [PNodeKey, ANodeKey]
     )
   );
 
@@ -2175,7 +2177,7 @@ Deno.test("T-V2T-REACH-2: the declared list equals the measured unreachable set"
 // kind が 2 つ必要になる。blocked / queued はその run から継承するだけなので同じ。
 //
 // 合わせて 6 つ。設計1.5 の自由直積が実際より広いという指摘であって、実装の欠落ではない。
-const UNREACHABLE_ARTIFACT_NODES: readonly string[] = A_OPEN_FOLLOW_NODES
+const UNREACHABLE_ARTIFACT_NODES: readonly ANodeKey[] = A_OPEN_FOLLOW_NODES
   .filter((n) => {
     const anyTaken = n.fix === "taken" || n.rebase === "taken";
     return (n.attention === "human" && anyTaken) ||
