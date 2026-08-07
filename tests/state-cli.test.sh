@@ -16,6 +16,14 @@ tests_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 repo_dir=$(CDPATH='' cd -- "$tests_dir/.." && pwd -P) || exit 1
 state_ts=$repo_dir/task-pipeline/scripts/state.ts
 state_test_ts=$repo_dir/task-pipeline/scripts/state.test.ts
+# state.ts は責務ごとに 6 ファイルへ分かれている (層の一覧は state-io.ts の冒頭)。
+# エントリポイントだけを検査対象にすると、分割先の fmt/lint が誰にも見られなくなる。
+state_layer_ts="$repo_dir/task-pipeline/scripts/state-io.ts \
+$repo_dir/task-pipeline/scripts/state-flags.ts \
+$repo_dir/task-pipeline/scripts/state-store.ts \
+$repo_dir/task-pipeline/scripts/state-verbs-ledger.ts \
+$repo_dir/task-pipeline/scripts/state-verbs-queue.ts \
+$repo_dir/task-pipeline/scripts/state-dispatch.ts"
 # 所有権判定 (classifySessionOwnership/isTouchable) は Deno API を呼ばない純関数として
 # 別ファイルに切り出してあるので、こちらも fmt/lint/check/test の対象に含める。
 state_ownership_ts=$repo_dir/task-pipeline/scripts/state-ownership.ts
@@ -27,6 +35,9 @@ if ! command -v deno >/dev/null 2>&1; then
 fi
 
 [ -f "$state_ts" ] || { printf 'state.ts not found: %s\n' "$state_ts" >&2; exit 1; }
+for f in $state_layer_ts; do
+    [ -f "$f" ] || { printf 'layer file not found: %s\n' "$f" >&2; exit 1; }
+done
 [ -f "$state_test_ts" ] || { printf 'state.test.ts not found: %s\n' "$state_test_ts" >&2; exit 1; }
 [ -f "$state_ownership_ts" ] || { printf 'state-ownership.ts not found: %s\n' "$state_ownership_ts" >&2; exit 1; }
 [ -f "$state_ownership_test_ts" ] || { printf 'state-ownership.test.ts not found: %s\n' "$state_ownership_test_ts" >&2; exit 1; }
@@ -45,9 +56,9 @@ run_step() {
     fi
 }
 
-run_step "deno fmt --check" deno fmt --check "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
-run_step "deno lint" deno lint "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
-run_step "deno check" deno check "$state_ts" "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
+run_step "deno fmt --check" deno fmt --check "$state_ts" $state_layer_ts "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
+run_step "deno lint" deno lint "$state_ts" $state_layer_ts "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
+run_step "deno check" deno check "$state_ts" $state_layer_ts "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
 run_step "deno test" deno test --allow-read --allow-write --allow-env --allow-run "$state_test_ts" "$state_ownership_test_ts"
 
 printf '\n%s\n' "----------------------------------------"
