@@ -25,6 +25,7 @@ import {
   type ArtifactState,
   type Attention,
   FINALIZE_PHASE,
+  FIX_ASK_AXIS_VALUES,
   type FixAskAxis,
   type Gate,
   type HumanAttentionReason,
@@ -44,6 +45,7 @@ import {
   NON_RUNNING_P_NODE_KEYS,
   P_NODE_KEYS,
   type Progress,
+  REBASE_ASK_AXIS_VALUES,
   REBASE_FIX_DETOUR_PHASE,
   type RebaseAskAxis,
   RUN_AXES,
@@ -287,8 +289,14 @@ export const PROBE_SHAPE = [
 ] as const;
 
 // ---------------------------------------------------------------------------
-// 領域 A のノードキー — 設計1.5「領域Aの詳細ノード」の展開 (23)。
+// 領域 A のノードキー — 設計1.5「領域Aの詳細ノード」の 23 ノード。
 // #34 は領域Pの19ノードだけを列挙しているので、A 側はここで新設する。
+//
+// キー文字列は実行時に組み立てない。23 件をリテラルとして書き下したこの節が唯一の定義で、
+// 座標 (attention × fix ask × rebase ask) からの引き当ても、下の静的な表を引くだけである。
+// 軸の語彙 (#34) が増えても表は勝手には広がらないので、両者の一致は T-V2T-ALIGN-3b が
+// 検査する (直積を覆っているか・綴りが座標と合っているか・座標⇄キーが往復するか)。
+// 表に無い座標を引いたら openNodeKey が例外を投げる (黙って未宣言のキーを作らない)。
 // ---------------------------------------------------------------------------
 
 export const ATTENTION_AXIS_VALUES = ["auto", "human"] as const;
@@ -297,53 +305,108 @@ export type AttentionAxis = (typeof ATTENTION_AXIS_VALUES)[number];
 export const A_NODE_NONE = "none";
 export const A_NODE_MERGED = "merged";
 export const A_NODE_OPEN_NO_FOLLOW = "open(follow=null)";
+export const A_NODE_WITHDRAWN_UNASKED = "withdrawn(asked=false)";
+export const A_NODE_WITHDRAWN_ASKED = "withdrawn(asked=true)";
+
+// follow を持つ open の 18 ノード。各行が「サブ軸の座標 ↔ ノードキー」の対応そのもの。
+export interface AOpenFollowNode {
+  readonly attention: AttentionAxis;
+  readonly fix: FixAskAxis;
+  readonly rebase: RebaseAskAxis;
+  readonly key: string;
+}
+
+// [attention, fix ask, rebase ask, ノードキー] の 18 行。この表が唯一の定義で、
+// キーは行に書かれたリテラルそのもの (座標から組み立てたものではない)。
+type AOpenFollowRow = readonly [
+  AttentionAxis,
+  FixAskAxis,
+  RebaseAskAxis,
+  string,
+];
+
+const A_OPEN_FOLLOW_ROWS = [
+  ["auto", "null", "quiet", "open(auto,null,quiet)"],
+  ["auto", "null", "queued", "open(auto,null,queued)"],
+  ["auto", "null", "taken", "open(auto,null,taken)"],
+  ["auto", "pending", "quiet", "open(auto,pending,quiet)"],
+  ["auto", "pending", "queued", "open(auto,pending,queued)"],
+  ["auto", "pending", "taken", "open(auto,pending,taken)"],
+  ["auto", "taken", "quiet", "open(auto,taken,quiet)"],
+  ["auto", "taken", "queued", "open(auto,taken,queued)"],
+  ["auto", "taken", "taken", "open(auto,taken,taken)"],
+  ["human", "null", "quiet", "open(human,null,quiet)"],
+  ["human", "null", "queued", "open(human,null,queued)"],
+  ["human", "null", "taken", "open(human,null,taken)"],
+  ["human", "pending", "quiet", "open(human,pending,quiet)"],
+  ["human", "pending", "queued", "open(human,pending,queued)"],
+  ["human", "pending", "taken", "open(human,pending,taken)"],
+  ["human", "taken", "quiet", "open(human,taken,quiet)"],
+  ["human", "taken", "queued", "open(human,taken,queued)"],
+  ["human", "taken", "taken", "open(human,taken,taken)"],
+] as const satisfies readonly AOpenFollowRow[];
+
+export const A_OPEN_FOLLOW_NODES: readonly AOpenFollowNode[] =
+  A_OPEN_FOLLOW_ROWS.map(([attention, fix, rebase, key]) => ({
+    attention,
+    fix,
+    rebase,
+    key,
+  }));
+
+// follow を持つ open の 18 ノード / follow の有無を問わない open の 19 ノード。
+export const A_OPEN_FOLLOW_KEYS: readonly string[] = A_OPEN_FOLLOW_NODES.map((
+  n,
+) => n.key);
+export const A_OPEN_KEYS: readonly string[] = [
+  A_NODE_OPEN_NO_FOLLOW,
+  ...A_OPEN_FOLLOW_KEYS,
+];
+export const A_WITHDRAWN_KEYS: readonly string[] = [
+  A_NODE_WITHDRAWN_UNASKED,
+  A_NODE_WITHDRAWN_ASKED,
+];
+
+export const A_NODE_KEYS: readonly string[] = [
+  A_NODE_NONE,
+  A_NODE_MERGED,
+  ...A_WITHDRAWN_KEYS,
+  ...A_OPEN_KEYS,
+];
 
 export function withdrawnNodeKey(asked: boolean): string {
-  return `withdrawn(asked=${asked})`;
+  return asked ? A_NODE_WITHDRAWN_ASKED : A_NODE_WITHDRAWN_UNASKED;
 }
+
+const A_OPEN_FOLLOW_NODE_BY_COORD: ReadonlyMap<string, AOpenFollowNode> =
+  new Map(
+    A_OPEN_FOLLOW_NODES.map((n) => [`${n.attention}|${n.fix}|${n.rebase}`, n]),
+  );
 
 export function openNodeKey(
   attention: AttentionAxis,
   fixAsk: FixAskAxis,
   rebaseAsk: RebaseAskAxis,
 ): string {
-  return `open(${attention},${fixAsk},${rebaseAsk})`;
-}
-
-const FIX_AXES: readonly FixAskAxis[] = ["null", "pending", "taken"];
-const REBASE_AXES: readonly RebaseAskAxis[] = ["quiet", "queued", "taken"];
-
-function buildANodeKeys(): readonly string[] {
-  const keys: string[] = [
-    A_NODE_NONE,
-    A_NODE_MERGED,
-    withdrawnNodeKey(false),
-    withdrawnNodeKey(true),
-    A_NODE_OPEN_NO_FOLLOW,
-  ];
-  for (const attention of ATTENTION_AXIS_VALUES) {
-    for (const fix of FIX_AXES) {
-      for (const rebase of REBASE_AXES) {
-        keys.push(openNodeKey(attention, fix, rebase));
-      }
-    }
+  const node = A_OPEN_FOLLOW_NODE_BY_COORD.get(
+    `${attention}|${fixAsk}|${rebaseAsk}`,
+  );
+  if (node === undefined) {
+    throw new Error(
+      `BUG: undeclared open node ${attention}/${fixAsk}/${rebaseAsk}`,
+    );
   }
-  return keys;
+  return node.key;
 }
 
-export const A_NODE_KEYS: readonly string[] = buildANodeKeys();
+// キー → サブ軸座標 (キー文字列を解析せず、宣言表をそのまま引く)。
+const A_OPEN_FOLLOW_NODE_BY_KEY: ReadonlyMap<string, AOpenFollowNode> = new Map(
+  A_OPEN_FOLLOW_NODES.map((n) => [n.key, n]),
+);
 
-// follow を持つ open の 18 ノード / follow の有無を問わない open の 19 ノード。
-export const A_OPEN_FOLLOW_KEYS: readonly string[] = A_NODE_KEYS.filter((k) =>
-  k.startsWith("open(") && k !== A_NODE_OPEN_NO_FOLLOW
-);
-export const A_OPEN_KEYS: readonly string[] = A_NODE_KEYS.filter((k) =>
-  k.startsWith("open(")
-);
-export const A_WITHDRAWN_KEYS: readonly string[] = [
-  withdrawnNodeKey(false),
-  withdrawnNodeKey(true),
-];
+export function openNodeOf(aKey: string): AOpenFollowNode | null {
+  return A_OPEN_FOLLOW_NODE_BY_KEY.get(aKey) ?? null;
+}
 
 // follow 付き open ノードのサブ軸での絞り込み (VERB_SPEC の from 宣言に使う)。
 export function openNodesWhere(
@@ -353,15 +416,11 @@ export function openNodesWhere(
     rebase?: readonly RebaseAskAxis[];
   },
 ): readonly string[] {
-  const keys: string[] = [];
-  for (const attention of filter.attention ?? ATTENTION_AXIS_VALUES) {
-    for (const fix of filter.fix ?? FIX_AXES) {
-      for (const rebase of filter.rebase ?? REBASE_AXES) {
-        keys.push(openNodeKey(attention, fix, rebase));
-      }
-    }
-  }
-  return keys;
+  return A_OPEN_FOLLOW_NODES.filter((n) =>
+    (filter.attention ?? ATTENTION_AXIS_VALUES).includes(n.attention) &&
+    (filter.fix ?? FIX_ASK_AXIS_VALUES).includes(n.fix) &&
+    (filter.rebase ?? REBASE_ASK_AXIS_VALUES).includes(n.rebase)
+  ).map((n) => n.key);
 }
 
 // ---------------------------------------------------------------------------

@@ -20,12 +20,14 @@
 
 import {
   checkReachability,
+  FIX_ASK_AXIS_VALUES,
   type HumanAttentionReason,
   INITIAL_GATE_PHASE_SEQUENCES,
   listRunNodes,
   P_NODE_KEYS,
   type Progress,
   type ReachabilityEdge,
+  REBASE_ASK_AXIS_VALUES,
 } from "./state-model-v2.ts";
 import {
   A_NODE_KEYS,
@@ -33,6 +35,7 @@ import {
   A_NODE_NONE,
   A_NODE_OPEN_NO_FOLLOW,
   A_OPEN_FOLLOW_KEYS,
+  A_OPEN_FOLLOW_NODES,
   ADVANCE_EDGES,
   advanceTargetsOf,
   aNodeKeyOf,
@@ -72,6 +75,7 @@ import {
   type ArtifactAxisSpec,
   ASKS_SHAPE,
   assertItemInvariantsV2,
+  ATTENTION_AXIS_VALUES,
   CliErrorV2,
   FIX_ASK_SHAPE,
   FOLLOW_SHAPE,
@@ -82,6 +86,7 @@ import {
   LEDGER_SHAPE,
   type LedgerEntry,
   openNodeKey,
+  openNodeOf,
   P_CYCLE_REBASE_KEYS,
   P_DETOUR_KEYS,
   P_FINALIZE_KEYS,
@@ -176,6 +181,7 @@ const A_OPEN_FIX_PENDING = openNodeKey("auto", "pending", "quiet");
 const A_OPEN_FIX_TAKEN = openNodeKey("auto", "taken", "quiet");
 const A_OPEN_REBASE_QUEUED = openNodeKey("auto", "null", "queued");
 const A_OPEN_REBASE_TAKEN = openNodeKey("auto", "null", "taken");
+// 綴りは実装から取らずテスト側にも独立して書く (キーの取り違えを検出するため)。
 const A_WITHDRAWN_UNASKED = "withdrawn(asked=false)";
 const A_WITHDRAWN_ASKED = "withdrawn(asked=true)";
 
@@ -224,18 +230,15 @@ function rebaseAskFixture(axis: string): V2RebaseAsk | null {
   return { ...base, resolve: false, taken: true };
 }
 
-const OPEN_KEY_PATTERN = /^open\(([a-z]+),([a-z]+),([a-z]+)\)$/;
-
 export interface OpenSubAxisTriple {
   attention: string;
   fix: string;
   rebase: string;
 }
 
+// キー文字列を解析せず、実装が静的に宣言している open ノード表をそのまま引く。
 function parseOpenKey(aKey: string): OpenSubAxisTriple | null {
-  const m = OPEN_KEY_PATTERN.exec(aKey);
-  if (m === null) return null;
-  return { attention: m[1], fix: m[2], rebase: m[3] };
+  return openNodeOf(aKey);
 }
 
 function followFixture(sub: OpenSubAxisTriple, leased: boolean): V2Follow {
@@ -834,6 +837,38 @@ Deno.test("T-V2T-ALIGN-3: A node keys are the 23 nodes of design 1.5", () => {
   assert(A_NODE_KEYS.includes(A_WITHDRAWN_UNASKED));
   assert(A_NODE_KEYS.includes(A_WITHDRAWN_ASKED));
   assertEquals(PRODUCT_NODE_KEYS.length, 19 * 23, "product node count");
+});
+
+// 18 ノードを静的なリテラルとして宣言している以上、軸の語彙 (#34) との一致は
+// 生成では保証されない。表が軸の直積を過不足なく覆うこと、座標→キー→座標が
+// 往復すること、綴りが `open(<attention>,<fix>,<rebase>)` であることをここで固定する。
+Deno.test("T-V2T-ALIGN-3b: the declared open node table is exactly the axis product", () => {
+  const declared = A_OPEN_FOLLOW_NODES.map((n) =>
+    `${n.attention}|${n.fix}|${n.rebase}`
+  );
+  const product: string[] = [];
+  for (const attention of ATTENTION_AXIS_VALUES) {
+    for (const fix of FIX_ASK_AXIS_VALUES) {
+      for (const rebase of REBASE_ASK_AXIS_VALUES) {
+        product.push(`${attention}|${fix}|${rebase}`);
+      }
+    }
+  }
+  assertSameSet(declared, product, "declared open nodes == axis product");
+  assertEquals(new Set(declared).size, declared.length, "coords unique");
+  assertEquals(new Set(A_OPEN_FOLLOW_KEYS).size, 18, "keys unique");
+
+  for (const node of A_OPEN_FOLLOW_NODES) {
+    assertEquals(
+      node.key,
+      `open(${node.attention},${node.fix},${node.rebase})`,
+      "key spelling matches its coordinates",
+    );
+    assertEquals(openNodeKey(node.attention, node.fix, node.rebase), node.key);
+    assertEquals(openNodeOf(node.key), node);
+  }
+  assertEquals(openNodeOf(A_NODE_OPEN_NO_FOLLOW), null);
+  assertEquals(openNodeOf(A_NODE_NONE), null);
 });
 
 Deno.test("T-V2T-ALIGN-4: advance edges are exactly the main sequences plus the detour return", () => {
