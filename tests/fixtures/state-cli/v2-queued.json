@@ -1,0 +1,27 @@
+{
+  "tracker": "markdown",
+  "source": "./TASKS.md",
+  "updated_at": "2026-08-07T09:00:00Z",
+  "stalled": null,
+  "stalled_since": null,
+  "schema_version": 2,
+  "queue": [
+    {
+      "id": "t-1a2b3c4d",
+      "title": "サンプルタスク (queued × none)",
+      "progress": "queued",
+      "run": null,
+      "blocked_reason": null,
+      "artifact": { "state": "none" },
+      "worktree": null,
+      "base": null,
+      "session": null
+    }
+  ],
+  "completed": [],
+  "candidates": [],
+  "relisted": [],
+  "promoted": [],
+  "withdrawn_branches": [],
+  "history": []
+}

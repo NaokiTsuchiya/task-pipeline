@@ -5,21 +5,22 @@
 // state.json の書き込み手順 (task-pipeline/SKILL.md の「state.json の書き込み手順 (排他)」
 // 「セッションの所有権」節) を自分で守らなくてよい。
 //
+// **この CLI は状態モデル v2 (task-pipeline/docs/state-model-v2-2026-08.md) だけを話す。**
+// v1 の語彙 (status / phase / gate をタスク直下に持つ形、review.watch / review.rebase) は
+// 受け付けない。schema_version 1 の state.json は `init` が一度だけ移行する (設計3.2節)。
+//
 // 実行形:
 //   deno run --no-prompt \
 //     --allow-read=<state dir>[,<git common dir>/info] \
 //     --allow-write=<state dir>[,<git common dir>/info] \
 //     task-pipeline/scripts/state.ts <verb> --state-dir <dir> [verb固有フラグ...]
 //
-// verb 一覧 (foundation): init / get / validate / session-touch / sessions-alive /
-//   history-append
-// verb 一覧 (state-cli-verbs、SKILL.md の遷移を覆う): タスク進行 (approve/claim/set-gate/
-//   set-worktree/set-executor/touch-executor/set-takeover/phase-pass/phase-fail/block/
-//   dequeue/finalize-start/in-review)、追従 (watch-init/watch-set/fix-pending/fix-start/
-//   fix-done/review-only)、載せ直し (rebase-record/rebase-resolve-pending/rebase-start/
-//   rebase-done/rebase-give-up)、回収と候補 (recover-done/withdraw/withdraw-remove/
-//   withdraw-asked/candidates-set/candidates-drop/promoted-add/promoted-drop/
-//   relisted-add/relisted-drop/restore)、全体 (stalled-set)。
+// verb は 45 個で、出所は 2 つある (どちらにも属さない verb は存在しない):
+//   - 遷移 32 verb … state-transitions-v2-spec.ts の VERB_SPEC のキー。queue エントリの
+//     領域 P × 領域 A の座標を持ち、from/to が宣言されている。
+//   - 帳簿 13 verb … state-ledger-v2.ts の LEDGER_VERBS。座標を持たない
+//     (init/get/validate/session-touch/sessions-alive/history-append/candidates-*/
+//     promoted-*/relisted-*/stalled-set)。
 // 契約 (終了コード・JSON出力・verb別引数・前提・不変条件) の詳細は
 // task-pipeline/docs/state-cli-contract.md (ALLOWED_FLAGS のキー一覧と見出しの対応を
 // state.test.ts の T-D2 が突き合わせている)。
@@ -28,75 +29,89 @@
 //   直接実行する場合: deno test --allow-read --allow-write --allow-env --allow-run
 //     task-pipeline/scripts/state.test.ts
 //
-// 実行時の外部依存はゼロ (npm:/jsr: 参照なし)。state-schema.ts の checkState と、
-// state-transitions.ts (全 43 verb の事前条件チェック・状態オブジェクトの書き換えを持つ
-// 純粋関数群 — Deno 由来の API を一切呼ばない) だけを import する。lock・原子的書き込み・
-// heartbeat・権限・CLI dispatch・終了コードへの変換はこのファイルに残る。
-// status / phase / gate などの語彙 (enum) も state-transitions.ts が単一ソースで、
-// このファイルはフラグ検証にそれを import するだけ (独自の列挙を持たない)。
+// 実行時の外部依存はゼロ (npm:/jsr: 参照なし)。import するのは v2 のモジュール群
+// (state-transitions-v2.ts の apply 群と VERB_SPEC、state-ledger-v2.ts の帳簿系、
+// state-model-v2.ts の語彙、state-schema-v2.ts の checkStateV2) だけで、いずれも
+// Deno 由来の API を呼ばない純粋関数である。lock・原子的書き込み・heartbeat・権限・
+// CLI dispatch・終了コードへの変換はこのファイルに残る。
 
-import { checkState } from "./state-schema.ts";
+import { checkStateV2 } from "./state-schema-v2.ts";
 import {
+  CI_VALUES,
+  HUMAN_ATTENTION_REASON_VALUES,
+  PHASE_VALUES,
+  REBASE_KIND_VALUES,
+  REBASE_REASON_VALUES,
+  STALLED_VALUES,
+  VERIFIED_PHASE_VALUES,
+} from "./state-model-v2.ts";
+import {
+  applyCandidatesDropV2,
+  applyCandidatesSetV2,
+  applyHistoryAppendV2,
+  applyInitV2,
+  applyPromotedAddV2,
+  applyPromotedDropV2,
+  applyRelistedAddV2,
+  applyRelistedDropV2,
+  applyStalledSetV2,
+  finalizeStateV2,
+  getV2,
+  isRecord,
+  isSessionAlive,
+  isSessionStale,
+  LEDGER_VERBS,
+  normalizeStateV2,
+  type StalledArg,
+  validateV2,
+} from "./state-ledger-v2.ts";
+import {
+  applyAdvance,
   applyAnsweredSet,
   applyApprove,
+  applyAttentionSet,
   applyBlock,
-  applyCandidatesDrop,
-  applyCandidatesSet,
   applyClaim,
   applyDequeue,
-  applyFinalizeStart,
-  applyFixDone,
-  applyFixPending,
+  applyFixRequest,
   applyFixStart,
-  applyHistoryAppend,
-  applyInit,
-  applyInReview,
+  applyMerged,
+  applyObserve,
   applyPhaseFail,
-  applyPhasePass,
-  applyPromotedAdd,
-  applyPromotedDrop,
-  applyRebaseDone,
+  applyProbeExit,
+  applyProbeRun,
+  applyRebaseApplied,
+  applyRebaseForgo,
   applyRebaseGiveUp,
-  applyRebaseRecord,
-  applyRebaseResolvePending,
+  applyRebaseRequest,
   applyRebaseStart,
-  applyRecoverDone,
-  applyRelistedAdd,
-  applyRelistedDrop,
+  applyRelease,
   applyRestore,
+  applyRetire,
   applyReviewOnly,
   applySetExecutor,
   applySetGate,
   applySetTakeover,
   applySetWorktree,
-  applyStalledSet,
+  applyShip,
   applyTouchExecutor,
-  applyWatchInit,
-  applyWatchSet,
   applyWithdraw,
   applyWithdrawAsked,
   applyWithdrawRemove,
-  assertItemInvariants,
-  CI_VALUES,
-  CliError,
+  assertItemInvariantsV2,
+  CliErrorV2,
   type ExitCodeName,
-  FINALIZE_FROM_PHASES,
-  finalizeState,
-  get as transitionsGet,
-  isRecord,
-  isSessionAlive,
-  isSessionStale,
-  PHASE_VALUES,
-  REBASE_KIND_VALUES,
-  REBASE_REASON_VALUES,
+  type LedgerEntry,
+  type ObserveFields,
+  type ProbeExitFields,
+  type ProbeRunFields,
+  type RebaseRequestArgs,
   requireQueueItem,
-  type ReviewOnlyEntry,
-  STALLED_VALUES,
-  validate as transitionsValidate,
-  VERIFIED_PHASES,
-  WATCH_STATE_VALUES,
-  type WatchSetFields,
-} from "./state-transitions.ts";
+  type V2Item,
+  type V2Run,
+  type V2State,
+  VERB_SPEC,
+} from "./state-transitions-v2.ts";
 
 // ---------------------------------------------------------------------------
 // 終了コード契約 (docs/state-cli-contract.md と state.test.ts の T-D1 で突き合わせる
@@ -109,10 +124,10 @@ export const EXIT_CODES: Record<ExitCodeName, number> = {
   schema: 12,
   missing: 13,
   permission: 14,
-  // state-cli-verbs で追加: 対象 (queue/candidates/promoted/relisted のエントリ) 自体は
-  // 存在するが、その verb が要求する現在の state (status/phase/session/review.* 等) の前提を
-  // 満たさない。「対象が無い」(missing) や「フラグの形状が変」(usage) とは別のビジネスルール
-  // 違反で、要求3「前提違反は state を変えずに失敗する」の主対象。
+  // 対象 (queue/candidates/promoted/relisted のエントリ) 自体は存在するが、その verb が
+  // 要求する現在のノード (領域 P × 領域 A の座標) やフィールドの前提を満たさない。
+  // 「対象が無い」(missing) や「フラグの形状が変」(usage) とは別のビジネスルール違反で、
+  // 「前提違反は state を変えずに失敗する」の主対象。
   conflict: 15,
 };
 
@@ -129,19 +144,9 @@ const STALE_LOCK_MS = 10 * 60 * 1000;
 // ---------------------------------------------------------------------------
 // テスト専用フック (--allow-env が無い本番実行では常に no-op)
 //
-// STATE_CLI_TEST_NOW_MS: 現在時刻(epoch ms)を固定する。lock の stale 判定・heartbeat の
-//   年齢判定・updated_at の境界値テストを、実時間のブレ無く決定的に書くために使う。
-// STATE_CLI_TEST_PAUSE_BEFORE_RENAME_MS: 原子的書き込みの rename 直前に指定 ms だけ待つ。
-//   部分書き込みが起きないことのテストで、rename 前にプロセスを kill するための猶予を作る。
-// STATE_CLI_TEST_PAUSE_BEFORE_SESSION_STAT_MS: session-touch の掃除ループ / sessions-alive の
-//   両方で、要素ごとの stat 直前に指定 ms だけ待つ。stat 対象が「列挙後・stat 前」に外部から
-//   消えるレースを、決定的に踏むための猶予を作る。
-// STATE_CLI_TEST_PAUSE_BEFORE_SESSION_REMOVE_MS: session-touch の掃除ループで、stale と判定した
-//   要素の remove 直前に指定 ms だけ待つ。remove 対象が「stat 後・remove 前」に外部から消える
-//   レースを、決定的に踏むための猶予を作る。
-// STATE_CLI_TEST_PAUSE_BEFORE_LOCK_RELEASE_MS: releaseLock の remove 直前に指定 ms だけ待つ。
-//   lock 解放が state dir の権限エラーで失敗するケースを、書き込み成功後の解放段階だけに
-//   絞って決定的に作るための猶予。
+// Deno.env.get は --allow-env が無いと NotCapable を投げるので、必ず try で包んで
+// undefined に落とす。本番の起動形 (--no-prompt かつ --allow-env 無し) では
+// これらのフックは存在しないのと同じ扱いになる。
 // ---------------------------------------------------------------------------
 
 function tryReadEnv(name: string): string | undefined {
@@ -153,7 +158,7 @@ function tryReadEnv(name: string): string | undefined {
 }
 
 function nowMs(): number {
-  const override = tryReadEnv("STATE_CLI_TEST_NOW_MS");
+  const override = tryReadEnv("STATE_TEST_NOW_MS");
   if (override !== undefined) {
     const n = Number(override);
     if (Number.isFinite(n)) return n;
@@ -166,28 +171,28 @@ function nowIso(): string {
 }
 
 function readTestPauseMs(): number {
-  const raw = tryReadEnv("STATE_CLI_TEST_PAUSE_BEFORE_RENAME_MS");
+  const raw = tryReadEnv("STATE_TEST_PAUSE_MS");
   if (raw === undefined) return 0;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 function readSessionStatPauseMs(): number {
-  const raw = tryReadEnv("STATE_CLI_TEST_PAUSE_BEFORE_SESSION_STAT_MS");
+  const raw = tryReadEnv("STATE_TEST_SESSION_STAT_PAUSE_MS");
   if (raw === undefined) return 0;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 function readSessionRemovePauseMs(): number {
-  const raw = tryReadEnv("STATE_CLI_TEST_PAUSE_BEFORE_SESSION_REMOVE_MS");
+  const raw = tryReadEnv("STATE_TEST_SESSION_REMOVE_PAUSE_MS");
   if (raw === undefined) return 0;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
 function readLockReleasePauseMs(): number {
-  const raw = tryReadEnv("STATE_CLI_TEST_PAUSE_BEFORE_LOCK_RELEASE_MS");
+  const raw = tryReadEnv("STATE_TEST_LOCK_RELEASE_PAUSE_MS");
   if (raw === undefined) return 0;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -245,14 +250,14 @@ async function readState(stateDir: string): Promise<unknown> {
     raw = await Deno.readTextFile(statePath);
   } catch (e) {
     if (e instanceof Deno.errors.NotFound) {
-      throw new CliError("missing", `state.json not found: ${statePath}`);
+      throw new CliErrorV2("missing", `state.json not found: ${statePath}`);
     }
     throw e;
   }
   try {
     return JSON.parse(raw);
   } catch (e) {
-    throw new CliError(
+    throw new CliErrorV2(
       "schema",
       `invalid JSON in state.json: ${(e as Error).message}`,
     );
@@ -309,7 +314,7 @@ async function acquireLock(
     await Deno.stat(stateDir);
   } catch (e) {
     if (e instanceof Deno.errors.NotFound) {
-      throw new CliError("missing", `state dir not found: ${stateDir}`);
+      throw new CliErrorV2("missing", `state dir not found: ${stateDir}`);
     }
     throw e;
   }
@@ -324,7 +329,7 @@ async function acquireLock(
       await sleep(opts.retryMs);
     }
   }
-  throw new CliError(
+  throw new CliErrorV2(
     "lock",
     `failed to acquire lock after ${opts.maxRetries} attempt(s): ${lockPath}`,
   );
@@ -345,9 +350,13 @@ async function releaseLock(stateDir: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// 書き込み系 verb (init / history-append) が共有する適用ロジック。
+// 書き込み系 verb が共有する適用ロジック。
 // lock は呼び出し側 (withStateLock、または init の手書きの try/finally) が既に持っている
 // 前提で、読み直し・スキーマ検証・fn 適用・(必要なら) 原子的書き込みだけを行う。
+//
+// preCheck: 読み込んだ現在値に checkStateV2 を掛けるか。**init の移行経路だけが false** —
+// 移行の入力は v1 の state.json であり、定義から v2 スキーマを満たさないためである
+// (移行結果に対する事後検証は下の postCheck が行うので、検査が抜けるわけではない)。
 // ---------------------------------------------------------------------------
 
 interface LockedApplyResult {
@@ -361,18 +370,23 @@ async function applyStateChange(
   fn: (
     current: Record<string, unknown> | undefined,
   ) => Record<string, unknown> | undefined,
+  preCheck = true,
 ): Promise<LockedApplyResult> {
   let current: Record<string, unknown> | undefined;
   let wasMissing = false;
   try {
     const parsed = await readState(stateDir);
-    const check = checkState(parsed);
-    if (!check.ok) {
-      throw new CliError("schema", `${check.path}: ${check.message}`);
+    if (preCheck) {
+      const check = checkStateV2(parsed);
+      if (!check.ok) {
+        throw new CliErrorV2("schema", `${check.path}: ${check.message}`);
+      }
+    } else if (!isRecord(parsed)) {
+      throw new CliErrorV2("schema", "state.json must be a JSON object");
     }
     current = parsed as Record<string, unknown>;
   } catch (e) {
-    if (e instanceof CliError && e.code === "missing") {
+    if (e instanceof CliErrorV2 && e.code === "missing") {
       current = undefined;
       wasMissing = true;
     } else {
@@ -388,13 +402,11 @@ async function applyStateChange(
       value: current as Record<string, unknown>,
     };
   }
-  // state-cli-verbs で追加: 書き込み前に next 自体もスキーマ検証する。既存 (init/
-  // history-append) の fn は常に schema-valid な値を返す設計なので挙動は変わらないが、
-  // 33個超の新規 verb が増える中で、実装ミスでスキーマ違反な next を書いてしまう経路を
-  // 塞ぐ安全網として追加する (壊れた state.json を書く前に検出して schema エラーにする)。
-  const postCheck = checkState(next);
+  // 書き込み前に next 自体もスキーマ検証する。実装ミスでスキーマ違反な next を書いて
+  // しまう経路を塞ぐ安全網 (壊れた state.json を書く前に検出して schema エラーにする)。
+  const postCheck = checkStateV2(next);
   if (!postCheck.ok) {
-    throw new CliError(
+    throw new CliErrorV2(
       "schema",
       `refusing to write invalid state: ${postCheck.path}: ${postCheck.message}`,
     );
@@ -423,57 +435,59 @@ async function withStateLock(
 }
 
 // ---------------------------------------------------------------------------
-// state-cli-verbs: queue エントリを対象にする verb (withQueueLock) と、それ以外の
-// トップレベル配列・新規エントリ追加を対象にする verb (withExistingStateLock) が共有する
-// ロック・書き込みの glue。前提チェックと状態オブジェクトの書き換え本体は
-// state-transitions.ts の対応関数に委譲する (要求3の本体: 前提違反は必ず CliError で
-// 表され、withStateLock/applyStateChange は書き込みを一切行わずに re-throw する)。
+// queue エントリを対象にする verb (withQueueLock) と、それ以外のトップレベル配列・
+// 新規エントリ追加を対象にする verb (withExistingStateLock) が共有するロック・書き込みの
+// glue。前提チェックと状態オブジェクトの書き換え本体は state-transitions-v2.ts /
+// state-ledger-v2.ts の対応関数に委譲する (前提違反は必ず CliErrorV2 で表され、
+// withStateLock/applyStateChange は書き込みを一切行わずに re-throw する)。
 // ---------------------------------------------------------------------------
 
 async function withQueueLock(
   stateDir: string,
   id: string,
   opts: { retryMs: number; maxRetries: number },
-  mutate: (
-    item: Record<string, unknown>,
-    index: number,
-    state: Record<string, unknown>,
-  ) => Record<string, unknown>,
-): Promise<Record<string, unknown>> {
+  mutate: (item: V2Item, index: number, state: V2State) => V2State,
+): Promise<V2State> {
   const result = await withStateLock(stateDir, opts, (current) => {
     if (current === undefined) {
-      throw new CliError("missing", `state.json not found in ${stateDir}`);
+      throw new CliErrorV2("missing", `state.json not found in ${stateDir}`);
     }
-    const { index, item } = requireQueueItem(current, id);
-    const nextState = mutate(item, index, current);
+    const state = normalizeStateV2(current);
+    const { index, item } = requireQueueItem(state, id);
+    const nextState = mutate(item, index, state);
     // 書き込み前の不変条件検査: 対象エントリが (残っていれば) 到達可能なノードで
     // あることを保証する。verb 実装のバグが壊れた組を書く前に schema エラーで止める
     // (applyStateChange の事後スキーマ検証と同じ安全網の、状態機械版)。
-    const nextQueue = Array.isArray(nextState.queue)
-      ? (nextState.queue as Record<string, unknown>[])
-      : [];
-    const nextItem = nextQueue.find((it) => it.id === id);
-    if (nextItem !== undefined) assertItemInvariants(nextItem);
-    return finalizeState(nextState, nowIso());
+    const nextItem = nextState.queue.find((it) => it.id === id);
+    if (nextItem !== undefined) assertItemInvariantsV2(nextItem);
+    return finalizeStateV2(nextState, nowIso()) as unknown as Record<
+      string,
+      unknown
+    >;
   });
-  return result.value;
+  return result.value as unknown as V2State;
 }
 
 // withQueueLock と対になる、トップレベル (queue 以外) の配列・新規 queue エントリ追加を
 // 対象にする verb 用のラッパ (approve/history-append/candidates-*/promoted-*/relisted-*/
-// stalled-set が使う)。「state.json が無ければ missing」の共通チェックと finalizeState の
-// 適用をここに集約する — 元は9箇所が同一メッセージを手書きで繰り返していた。
+// stalled-set が使う)。「state.json が無ければ missing」の共通チェックと finalizeStateV2 の
+// 適用をここに集約する。
 async function withExistingStateLock(
   stateDir: string,
   opts: { retryMs: number; maxRetries: number },
-  mutate: (current: Record<string, unknown>) => Record<string, unknown>,
-): Promise<LockedApplyResult> {
-  return await withStateLock(stateDir, opts, (current) => {
+  mutate: (current: V2State) => V2State,
+): Promise<V2State> {
+  const result = await withStateLock(stateDir, opts, (current) => {
     if (current === undefined) {
-      throw new CliError("missing", `state.json not found in ${stateDir}`);
+      throw new CliErrorV2("missing", `state.json not found in ${stateDir}`);
     }
-    return finalizeState(mutate(current), nowIso());
+    const next = mutate(normalizeStateV2(current));
+    return finalizeStateV2(next, nowIso()) as unknown as Record<
+      string,
+      unknown
+    >;
   });
+  return result.value as unknown as V2State;
 }
 
 function parseCsv(raw: string): string[] {
@@ -487,7 +501,7 @@ function requireEnumFlag(
 ): string {
   const value = requireFlag(flags, name);
   if (!allowed.includes(value)) {
-    throw new CliError(
+    throw new CliErrorV2(
       "usage",
       `invalid --${name}: ${value} (expected one of ${allowed.join(", ")})`,
     );
@@ -495,13 +509,27 @@ function requireEnumFlag(
   return value;
 }
 
-function requireIntFlag(flags: Map<string, string>, name: string): number {
-  const raw = requireFlag(flags, name);
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
-    throw new CliError("usage", `invalid --${name}: ${raw}`);
+function optionalEnumFlag(
+  flags: Map<string, string>,
+  name: string,
+  allowed: readonly string[],
+): string | undefined {
+  if (!flags.has(name)) return undefined;
+  return requireEnumFlag(flags, name, allowed);
+}
+
+// 非負整数フラグの唯一の解釈。`Number("")` と `Number(" ")` が 0 になる JS の規則に
+// 引きずられないよう、**十進数字だけの文字列**を要求する (空文字・空白・符号付き・
+// 指数表記・16 進はすべて usage)。空の値は書き手のバグであって 0 の意図ではない。
+function parseIntFlag(name: string, raw: string): number {
+  if (!/^\d+$/.test(raw)) {
+    throw new CliErrorV2("usage", `invalid --${name}: ${JSON.stringify(raw)}`);
   }
-  return n;
+  return Number(raw);
+}
+
+function requireIntFlag(flags: Map<string, string>, name: string): number {
+  return parseIntFlag(name, requireFlag(flags, name));
 }
 
 // 値なしの真偽フラグ。parseFlags は全フラグに値を要求するので、真偽フラグは規約として
@@ -509,7 +537,7 @@ function requireIntFlag(flags: Map<string, string>, name: string): number {
 function boolFlag(flags: Map<string, string>, name: string): boolean {
   if (!flags.has(name)) return false;
   if (flags.get(name) !== "true") {
-    throw new CliError(
+    throw new CliErrorV2(
       "usage",
       `invalid --${name}: expected "true" or omit the flag`,
     );
@@ -560,16 +588,16 @@ async function ensureExcludeLine(
 // 引数パース
 // ---------------------------------------------------------------------------
 
-// state-cli-verbs で追加した verb はすべて --lock-retry-ms/--lock-max-retries を受け付ける
-// (書き込み系 verb の既存の慣習に揃える)。個々のエントリでは省略せず明記する — この一覧が
-// state-cli-contract.md との突き合わせテスト (T-D2) の一方の入力になるため、実際に受理する
-// フラグと過不足なく一致している必要がある。
+// 書き込み系 verb はすべて --lock-retry-ms/--lock-max-retries を受け付ける。個々の
+// エントリでは省略せず明記する — この一覧が state-cli-contract.md との突き合わせテスト
+// (T-D2) の一方の入力になるため、実際に受理するフラグと過不足なく一致している必要がある。
 const LOCK_FLAGS = ["lock-retry-ms", "lock-max-retries"];
 
 // export するのは state.test.ts のドキュメント突き合わせテスト (state-cli-contract.md の
-// verb 見出し一覧との差集合チェック) のためだけ。verb 名の一覧が要るだけなので
-// `Object.keys(ALLOWED_FLAGS)` を使う想定。
+// verb 見出し一覧との差集合チェック) と、分類ネット (どの verb も VERB_SPEC か
+// LEDGER_VERBS のどちらかに属する) のため。
 export const ALLOWED_FLAGS: Record<string, ReadonlySet<string>> = {
+  // --- 帳簿系 (LEDGER_VERBS) ---
   "init": new Set([
     "state-dir",
     "tracker",
@@ -588,10 +616,95 @@ export const ALLOWED_FLAGS: Record<string, ReadonlySet<string>> = {
     "lock-retry-ms",
     "lock-max-retries",
   ]),
-  // --- タスク進行 ---
+  "candidates-set": new Set(["state-dir", "candidates-json", ...LOCK_FLAGS]),
+  "candidates-drop": new Set(["state-dir", "id", ...LOCK_FLAGS]),
+  "promoted-add": new Set(["state-dir", "ids", ...LOCK_FLAGS]),
+  "promoted-drop": new Set(["state-dir", "id", ...LOCK_FLAGS]),
+  "relisted-add": new Set(["state-dir", "id", "seen-at", ...LOCK_FLAGS]),
+  "relisted-drop": new Set(["state-dir", "id", ...LOCK_FLAGS]),
+  "stalled-set": new Set(["state-dir", "value", "bump", ...LOCK_FLAGS]),
+  // --- 進行系 (設計2.1) ---
   "approve": new Set(["state-dir", "id", "title", ...LOCK_FLAGS]),
   "claim": new Set(["state-dir", "id", "session", ...LOCK_FLAGS]),
   "set-gate": new Set(["state-dir", "id", ...LOCK_FLAGS]),
+  "advance": new Set(["state-dir", "id", "from", "to", ...LOCK_FLAGS]),
+  "phase-fail": new Set(["state-dir", "id", "phase", ...LOCK_FLAGS]),
+  "block": new Set(["state-dir", "id", "reason", ...LOCK_FLAGS]),
+  "dequeue": new Set(["state-dir", "id", ...LOCK_FLAGS]),
+  "restore": new Set(["state-dir", "id", ...LOCK_FLAGS]),
+  "retire": new Set(["state-dir", "id", ...LOCK_FLAGS]),
+  // --- 完了系 (設計2.2) ---
+  "ship": new Set([
+    "state-dir",
+    "id",
+    "commits",
+    "ref",
+    "branch",
+    "tip",
+    "base",
+    ...LOCK_FLAGS,
+  ]),
+  "merged": new Set(["state-dir", "id", ...LOCK_FLAGS]),
+  "withdraw": new Set(["state-dir", "id", "note", ...LOCK_FLAGS]),
+  "withdraw-asked": new Set(["state-dir", "id", ...LOCK_FLAGS]),
+  "withdraw-remove": new Set(["state-dir", "id", "reason", ...LOCK_FLAGS]),
+  // --- 要求系 (設計2.1) ---
+  "fix-request": new Set(["state-dir", "id", "ids", "findings", ...LOCK_FLAGS]),
+  "rebase-request": new Set([
+    "state-dir",
+    "id",
+    "blocked-onto",
+    "reason",
+    "kind",
+    "cause",
+    "report",
+    "resolve",
+    "from-tip",
+    ...LOCK_FLAGS,
+  ]),
+  "rebase-applied": new Set(["state-dir", "id", "tip", ...LOCK_FLAGS]),
+  // --- 仕上げ開始系 (設計2.1・2.4) ---
+  "fix-start": new Set([
+    "state-dir",
+    "id",
+    "session",
+    "reset-attempts",
+    ...LOCK_FLAGS,
+  ]),
+  "rebase-start": new Set(["state-dir", "id", "session", ...LOCK_FLAGS]),
+  "rebase-give-up": new Set([
+    "state-dir",
+    "id",
+    "blocked-onto",
+    ...LOCK_FLAGS,
+  ]),
+  "rebase-forgo": new Set(["state-dir", "id", "blocked-onto", ...LOCK_FLAGS]),
+  // --- 追従系 (設計2.1) ---
+  "probe-run": new Set(["state-dir", "id", "proc", "session", ...LOCK_FLAGS]),
+  "probe-exit": new Set(["state-dir", "id", "sig", ...LOCK_FLAGS]),
+  "release": new Set(["state-dir", "id", ...LOCK_FLAGS]),
+  "observe": new Set([
+    "state-dir",
+    "id",
+    "head",
+    "ci",
+    "checked-at",
+    "errors-inc",
+    "errors-reset",
+    "note",
+    "sig-clear",
+    ...LOCK_FLAGS,
+  ]),
+  "attention-set": new Set([
+    "state-dir",
+    "id",
+    "auto",
+    "human",
+    ...LOCK_FLAGS,
+  ]),
+  "review-only": new Set(["state-dir", "id", "items-json", ...LOCK_FLAGS]),
+  "answered-set": new Set(["state-dir", "id", "items-json", ...LOCK_FLAGS]),
+  // --- 実行帳簿 (対象が run の中のフィールドになるだけで起動形は v1 と同じ) ---
   "set-worktree": new Set([
     "state-dir",
     "id",
@@ -609,105 +722,6 @@ export const ALLOWED_FLAGS: Record<string, ReadonlySet<string>> = {
   ]),
   "touch-executor": new Set(["state-dir", "id", "session", ...LOCK_FLAGS]),
   "set-takeover": new Set(["state-dir", "id", "at", "clear", ...LOCK_FLAGS]),
-  "phase-pass": new Set(["state-dir", "id", "from", "to", ...LOCK_FLAGS]),
-  "phase-fail": new Set(["state-dir", "id", "phase", ...LOCK_FLAGS]),
-  "block": new Set(["state-dir", "id", "reason", ...LOCK_FLAGS]),
-  "dequeue": new Set(["state-dir", "id", ...LOCK_FLAGS]),
-  "finalize-start": new Set(["state-dir", "id", "from", ...LOCK_FLAGS]),
-  "in-review": new Set([
-    "state-dir",
-    "id",
-    "commits",
-    "ref",
-    "branch",
-    "tip",
-    "base",
-    "clear-session",
-    ...LOCK_FLAGS,
-  ]),
-  // --- 追従 ---
-  "watch-init": new Set([
-    "state-dir",
-    "id",
-    "session",
-    "preserve-handled",
-    ...LOCK_FLAGS,
-  ]),
-  "watch-set": new Set([
-    "state-dir",
-    "id",
-    "proc",
-    "sig",
-    "head",
-    "ci",
-    "checked-at",
-    "errors-inc",
-    "errors-reset",
-    "note",
-    "state",
-    "session",
-    ...LOCK_FLAGS,
-  ]),
-  "fix-pending": new Set([
-    "state-dir",
-    "id",
-    "pending-ids",
-    "findings",
-    ...LOCK_FLAGS,
-  ]),
-  "fix-start": new Set([
-    "state-dir",
-    "id",
-    "session",
-    "reset-attempts",
-    ...LOCK_FLAGS,
-  ]),
-  "fix-done": new Set(["state-dir", "id", ...LOCK_FLAGS]),
-  "review-only": new Set(["state-dir", "id", "items-json", ...LOCK_FLAGS]),
-  "answered-set": new Set(["state-dir", "id", "items-json", ...LOCK_FLAGS]),
-  // --- 載せ直し ---
-  "rebase-record": new Set([
-    "state-dir",
-    "id",
-    "blocked-onto",
-    "reason",
-    "kind",
-    "cause",
-    "report",
-    ...LOCK_FLAGS,
-  ]),
-  "rebase-resolve-pending": new Set([
-    "state-dir",
-    "id",
-    "from-tip",
-    ...LOCK_FLAGS,
-  ]),
-  "rebase-start": new Set(["state-dir", "id", "session", ...LOCK_FLAGS]),
-  "rebase-done": new Set(["state-dir", "id", "tip", ...LOCK_FLAGS]),
-  "rebase-give-up": new Set([
-    "state-dir",
-    "id",
-    "blocked-onto",
-    ...LOCK_FLAGS,
-  ]),
-  // --- 回収と候補 ---
-  "recover-done": new Set(["state-dir", "id", ...LOCK_FLAGS]),
-  "withdraw": new Set(["state-dir", "id", ...LOCK_FLAGS]),
-  "withdraw-remove": new Set(["state-dir", "id", "reason", ...LOCK_FLAGS]),
-  "withdraw-asked": new Set(["state-dir", "id", ...LOCK_FLAGS]),
-  "candidates-set": new Set([
-    "state-dir",
-    "candidates-json",
-    ...LOCK_FLAGS,
-  ]),
-  "candidates-drop": new Set(["state-dir", "id", ...LOCK_FLAGS]),
-  "promoted-add": new Set(["state-dir", "ids", ...LOCK_FLAGS]),
-  "promoted-drop": new Set(["state-dir", "id", ...LOCK_FLAGS]),
-  "relisted-add": new Set(["state-dir", "id", "seen-at", ...LOCK_FLAGS]),
-  "relisted-drop": new Set(["state-dir", "id", ...LOCK_FLAGS]),
-  "restore": new Set(["state-dir", "id", ...LOCK_FLAGS]),
-  // --- 全体 ---
-  "stalled-set": new Set(["state-dir", "value", "bump", ...LOCK_FLAGS]),
 };
 
 function parseFlags(rest: string[]): Map<string, string> {
@@ -715,12 +729,12 @@ function parseFlags(rest: string[]): Map<string, string> {
   for (let i = 0; i < rest.length; i++) {
     const tok = rest[i];
     if (!tok.startsWith("--")) {
-      throw new CliError("usage", `unexpected argument: ${tok}`);
+      throw new CliErrorV2("usage", `unexpected argument: ${tok}`);
     }
     const name = tok.slice(2);
     const value = rest[i + 1];
     if (value === undefined) {
-      throw new CliError("usage", `flag --${name} requires a value`);
+      throw new CliErrorV2("usage", `flag --${name} requires a value`);
     }
     flags.set(name, value);
     i++;
@@ -731,7 +745,7 @@ function parseFlags(rest: string[]): Map<string, string> {
 function requireFlag(flags: Map<string, string>, name: string): string {
   const value = flags.get(name);
   if (value === undefined) {
-    throw new CliError("usage", `missing required flag: --${name}`);
+    throw new CliErrorV2("usage", `missing required flag: --${name}`);
   }
   return value;
 }
@@ -742,26 +756,21 @@ function intFlag(
   defaultValue: number,
 ): number {
   if (!flags.has(name)) return defaultValue;
-  const raw = flags.get(name)!;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
-    throw new CliError("usage", `invalid --${name}: ${raw}`);
-  }
-  return n;
+  return parseIntFlag(name, flags.get(name)!);
 }
 
 function validateSessionId(id: string): void {
   if (id === "" || id === "." || id === ".." || id.includes("/")) {
-    throw new CliError("usage", `invalid --id: ${JSON.stringify(id)}`);
+    throw new CliErrorV2("usage", `invalid --id: ${JSON.stringify(id)}`);
   }
 }
 
 // ---------------------------------------------------------------------------
 // verb 実装
 //
-// 各 cmdXxx は「flag 抽出・usage 検証 → lock 越しに state-transitions.ts の対応関数へ
-// 委譲 → 成功 JSON 組み立て」の薄い形。事前条件チェックと状態オブジェクトの書き換え本体は
-// state-transitions.ts 側にある。
+// 各 cmdXxx は「flag 抽出・usage 検証 → lock 越しに apply 関数へ委譲 → 成功 JSON 組み立て」
+// の薄い形。事前条件チェックと状態オブジェクトの書き換え本体は state-transitions-v2.ts /
+// state-ledger-v2.ts 側にある。
 // ---------------------------------------------------------------------------
 
 async function cmdInit(
@@ -786,9 +795,12 @@ async function cmdInit(
     // 一切触られない。単一の lock がこの2ステップ全体を覆うので、init の並行呼び出しでも
     // exclude と state.json の適用がインターリーブしない)。
     await ensureExcludeLine(stateDir, gitCommonDir);
+    // preCheck=false: 移行の入力 (schema_version 1 の state.json) は v2 スキーマを
+    // 満たさない。移行後の値は applyStateChange の事後検証が必ず見る。
     result = await applyStateChange(
       stateDir,
-      (current) => applyInit(current, tracker, source, nowIso()),
+      (current) => applyInitV2(current, tracker, source, nowIso()),
+      false,
     );
   } finally {
     await releaseLock(stateDir);
@@ -797,19 +809,20 @@ async function cmdInit(
   return {
     ok: true,
     created: result.wasMissing,
+    // 既存の state.json を v2 へ移行したか (2 回目以降の init は false)。
+    migrated: !result.wasMissing && result.wrote,
     state_dir: await Deno.realPath(stateDir),
   };
 }
 
 async function cmdGet(stateDir: string): Promise<unknown> {
-  return transitionsGet(await readState(stateDir));
+  return getV2(await readState(stateDir));
 }
 
 async function cmdValidate(
   stateDir: string,
 ): Promise<Record<string, unknown>> {
-  const parsed = await readState(stateDir);
-  return transitionsValidate(parsed);
+  return validateV2(await readState(stateDir));
 }
 
 async function cmdSessionTouch(
@@ -921,28 +934,19 @@ async function cmdHistoryAppend(
   flags: Map<string, string>,
 ): Promise<Record<string, unknown>> {
   if (!flags.has("line")) {
-    throw new CliError("usage", "missing required flag: --line");
+    throw new CliErrorV2("usage", "missing required flag: --line");
   }
   const line = flags.get("line")!;
-  const retryMs = intFlag(flags, "lock-retry-ms", DEFAULT_LOCK_RETRY_MS);
-  const maxRetries = intFlag(
-    flags,
-    "lock-max-retries",
-    DEFAULT_LOCK_MAX_RETRIES,
-  );
-
-  const result = await withExistingStateLock(
+  const next = await withExistingStateLock(
     stateDir,
-    { retryMs, maxRetries },
-    (current) => applyHistoryAppend(current, line),
+    lockOpts(flags),
+    (current) => applyHistoryAppendV2(current, line),
   );
-
-  const history = result.value.history as unknown[];
-  return { ok: true, history_length: history.length };
+  return { ok: true, history_length: next.history.length };
 }
 
 // ---------------------------------------------------------------------------
-// state-cli-verbs: 遷移 verb 群
+// 遷移 verb 群
 //
 // lock 系フラグの取り出しは共通なので、各 cmd 関数の先頭でこのヘルパを呼ぶ。
 // ---------------------------------------------------------------------------
@@ -956,7 +960,22 @@ function lockOpts(
   };
 }
 
-// --- タスク進行 ---------------------------------------------------------
+// 成功ペイロードに載せる run の値は、書き込んだ state から読み戻す (リテラルの複製を
+// 持たない — 初期フェーズや統合フェーズ名を変えたとき、ここが古いまま残る経路を消す)。
+function runOf(state: V2State, id: string): V2Run | null {
+  return state.queue.find((it) => it.id === id)?.run ?? null;
+}
+
+function runFields(state: V2State, id: string): Record<string, unknown> {
+  const run = runOf(state, id);
+  return {
+    kind: run?.kind ?? null,
+    gate: run?.gate ?? null,
+    phase: run?.phase ?? null,
+  };
+}
+
+// --- 進行系 ---------------------------------------------------------------
 
 async function cmdApprove(
   stateDir: string,
@@ -972,23 +991,6 @@ async function cmdApprove(
   return { ok: true, id };
 }
 
-// claim / set-gate の成功ペイロードの status/phase/gate は、書き込んだ state から読み戻す
-// (リテラルの複製を持たない — 初期フェーズや統合フェーズ名を変えたとき、ここが古いまま
-// 残る経路を消す)。
-function payloadFields(
-  state: Record<string, unknown>,
-  id: string,
-  keys: readonly string[],
-): Record<string, unknown> {
-  const queue = Array.isArray(state.queue)
-    ? (state.queue as Record<string, unknown>[])
-    : [];
-  const item = queue.find((it) => it.id === id) ?? {};
-  const out: Record<string, unknown> = {};
-  for (const k of keys) out[k] = item[k];
-  return out;
-}
-
 async function cmdClaim(
   stateDir: string,
   flags: Map<string, string>,
@@ -1001,12 +1003,7 @@ async function cmdClaim(
     lockOpts(flags),
     (item, index, state) => applyClaim(item, index, state, session),
   );
-  return {
-    ok: true,
-    id,
-    ...payloadFields(next, id, ["status", "phase"]),
-    session,
-  };
+  return { ok: true, id, ...runFields(next, id), session };
 }
 
 async function cmdSetGate(
@@ -1020,8 +1017,542 @@ async function cmdSetGate(
     lockOpts(flags),
     (item, index, state) => applySetGate(item, index, state),
   );
-  return { ok: true, id, ...payloadFields(next, id, ["gate", "phase"]) };
+  return { ok: true, id, ...runFields(next, id) };
 }
+
+async function cmdAdvance(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const from = requireEnumFlag(flags, "from", PHASE_VALUES);
+  const to = requireEnumFlag(flags, "to", PHASE_VALUES);
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyAdvance(item, index, state, from, to),
+  );
+  return { ok: true, id, phase: to };
+}
+
+async function cmdPhaseFail(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  // 検証ゲートを持つフェーズだけを受ける (finalize は検証対象外なので usage)。
+  const phase = requireEnumFlag(flags, "phase", VERIFIED_PHASE_VALUES);
+  let attempts = 0;
+  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
+    const result = applyPhaseFail(item, index, state, phase);
+    attempts = result.attempts;
+    return result.state;
+  });
+  return { ok: true, id, attempts };
+}
+
+async function cmdBlock(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const reason = requireFlag(flags, "reason");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyBlock(item, index, state, reason),
+  );
+  return { ok: true, id, progress: "blocked" };
+}
+
+async function cmdDequeue(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyDequeue(item, index, state),
+  );
+  return { ok: true, id };
+}
+
+async function cmdRestore(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyRestore(item, index, state),
+  );
+  return { ok: true, id, progress: "queued" };
+}
+
+async function cmdRetire(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const next = await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyRetire(item, index, state, nowIso()),
+  );
+  return { ok: true, id, completed: next.completed.length };
+}
+
+// --- 完了系 (設計2.2) -------------------------------------------------------
+
+async function cmdShip(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const commits = requireIntFlag(flags, "commits");
+  const group = ["ref", "branch", "tip", "base"] as const;
+  const given = group.filter((name) => flags.has(name));
+  if (commits >= 1 && given.length !== group.length) {
+    throw new CliErrorV2(
+      "usage",
+      "--ref/--branch/--tip/--base are all required when --commits >= 1",
+    );
+  }
+  if (commits === 0 && given.length !== 0) {
+    throw new CliErrorV2(
+      "usage",
+      "--ref/--branch/--tip/--base must all be omitted when --commits is 0",
+    );
+  }
+  const args = {
+    commits,
+    ref: flags.get("ref"),
+    branch: flags.get("branch"),
+    tip: flags.get("tip"),
+    base: flags.get("base"),
+  };
+
+  let notify = "none";
+  let mark = false;
+  let fixCount = 0;
+  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
+    const result = applyShip(item, index, state, args);
+    notify = result.notify;
+    mark = result.mark;
+    fixCount = result.fix_count;
+    return result.state;
+  });
+  // 遷移から導出できる後続指示 (設計2.2)。呼び出し側はこれを見て通知テンプレートと
+  // トラッカー更新の要否を決める — 経路の記憶を持たなくてよい。
+  return { ok: true, id, notify, mark, fix_count: fixCount };
+}
+
+async function cmdMerged(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyMerged(item, index, state),
+  );
+  return { ok: true, id, artifact: "merged" };
+}
+
+async function cmdWithdraw(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const note = flags.get("note");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyWithdraw(item, index, state, note),
+  );
+  return { ok: true, id, artifact: "withdrawn" };
+}
+
+async function cmdWithdrawAsked(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyWithdrawAsked(item, index, state),
+  );
+  return { ok: true, id };
+}
+
+async function cmdWithdrawRemove(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const reason = requireFlag(flags, "reason");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyWithdrawRemove(item, index, state, reason, nowIso()),
+  );
+  return { ok: true, id };
+}
+
+// --- 要求系 (設計2.1) -------------------------------------------------------
+
+async function cmdFixRequest(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const ids = parseCsv(requireFlag(flags, "ids"));
+  const findings = requireFlag(flags, "findings");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyFixRequest(item, index, state, ids, findings),
+  );
+  return { ok: true, id, ids };
+}
+
+async function cmdRebaseRequest(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const args: RebaseRequestArgs = {
+    blockedOnto: requireFlag(flags, "blocked-onto"),
+    reason: requireEnumFlag(flags, "reason", REBASE_REASON_VALUES),
+    kind: optionalEnumFlag(flags, "kind", REBASE_KIND_VALUES),
+    cause: flags.get("cause"),
+    report: flags.get("report"),
+    fromTip: flags.get("from-tip"),
+    // 省略時は既存の resolve を保つ (apply 側が undefined を「触れない」と読む)。
+    resolve: flags.has("resolve") ? boolFlag(flags, "resolve") : undefined,
+  };
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyRebaseRequest(item, index, state, args, nowIso()),
+  );
+  return { ok: true, id, resolve: args.resolve ?? null };
+}
+
+async function cmdRebaseApplied(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const tip = requireFlag(flags, "tip");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyRebaseApplied(item, index, state, tip),
+  );
+  return { ok: true, id, tip };
+}
+
+// --- 仕上げ開始系 (設計2.1・2.4) -------------------------------------------
+
+async function cmdFixStart(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const session = requireFlag(flags, "session");
+  const reset = boolFlag(flags, "reset-attempts");
+  let started = false;
+  let fixAttempts = 0;
+  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
+    const result = applyFixStart(item, index, state, session, reset);
+    started = result.started;
+    fixAttempts = result.fixAttempts;
+    return result.state;
+  });
+  return { ok: true, id, started, fix_attempts: fixAttempts };
+}
+
+async function cmdRebaseStart(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const session = requireFlag(flags, "session");
+  const next = await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyRebaseStart(item, index, state, session),
+  );
+  // 入口 (a) 解決サイクル (kind=rebase_fix) と入口 (b) 迂回 (kind 不変) のどちらだったかは
+  // 書き込んだ run から読み戻す (設計2.4 — 事後に判別できることが v2 の主張)。
+  return { ok: true, id, ...runFields(next, id) };
+}
+
+async function cmdRebaseGiveUp(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const blockedOnto = requireFlag(flags, "blocked-onto");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyRebaseGiveUp(item, index, state, blockedOnto, nowIso()),
+  );
+  return { ok: true, id, progress: "resting" };
+}
+
+async function cmdRebaseForgo(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const blockedOnto = requireFlag(flags, "blocked-onto");
+  const next = await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyRebaseForgo(item, index, state, blockedOnto, nowIso()),
+  );
+  return { ok: true, id, ...runFields(next, id) };
+}
+
+// --- 追従系 (設計2.1) -------------------------------------------------------
+
+async function cmdProbeRun(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const fields: ProbeRunFields = flags.has("session")
+    ? { proc: requireFlag(flags, "proc"), session: flags.get("session")! }
+    : { proc: requireFlag(flags, "proc") };
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyProbeRun(item, index, state, fields, nowIso()),
+  );
+  return { ok: true, id, proc: fields.proc };
+}
+
+async function cmdProbeExit(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const fields: ProbeExitFields = flags.has("sig")
+    ? { sig: nullableFlag(flags.get("sig")!) }
+    : {};
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyProbeExit(item, index, state, fields),
+  );
+  return { ok: true, id };
+}
+
+async function cmdRelease(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) => applyRelease(item, index, state),
+  );
+  return { ok: true, id };
+}
+
+async function cmdObserve(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const fields: Record<string, unknown> = {};
+  if (flags.has("head")) fields.head = nullableFlag(flags.get("head")!);
+  if (flags.has("ci")) {
+    const raw = flags.get("ci")!;
+    if (raw !== "null" && !(CI_VALUES as readonly string[]).includes(raw)) {
+      throw new CliErrorV2("usage", `invalid --ci: ${raw}`);
+    }
+    fields.ci = raw === "null" ? null : raw;
+  }
+  if (flags.has("checked-at")) {
+    fields.checked_at = nullableFlag(flags.get("checked-at")!);
+  }
+  if (flags.has("note")) fields.note = nullableFlag(flags.get("note")!);
+  const errorsInc = boolFlag(flags, "errors-inc");
+  const errorsReset = boolFlag(flags, "errors-reset");
+  if (errorsInc && errorsReset) {
+    throw new CliErrorV2(
+      "usage",
+      "--errors-inc and --errors-reset are mutually exclusive",
+    );
+  }
+  if (errorsInc) fields.errorsInc = true;
+  if (errorsReset) fields.errorsReset = true;
+  if (boolFlag(flags, "sig-clear")) fields.sigClear = true;
+  if (Object.keys(fields).length === 0) {
+    throw new CliErrorV2("usage", "observe requires at least one field flag");
+  }
+
+  let errors = 0;
+  let latched = false;
+  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
+    const result = applyObserve(item, index, state, fields as ObserveFields);
+    errors = result.errors;
+    latched = result.latched;
+    return result.state;
+  });
+  // latched は「errors が上限に達して attention→human(errors) に落ちた」ことの通知。
+  // 呼び出し側はこれを見て追従を畳む (設計2.1)。
+  return { ok: true, id, errors, latched };
+}
+
+async function cmdAttentionSet(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const auto = boolFlag(flags, "auto");
+  const hasHuman = flags.has("human");
+  if (auto === hasHuman) {
+    throw new CliErrorV2(
+      "usage",
+      "exactly one of --auto or --human <reason> is required",
+    );
+  }
+  const target = auto ? "auto" : requireEnumFlag(
+    flags,
+    "human",
+    HUMAN_ATTENTION_REASON_VALUES,
+  );
+  await withQueueLock(
+    stateDir,
+    id,
+    lockOpts(flags),
+    (item, index, state) =>
+      applyAttentionSet(
+        item,
+        index,
+        state,
+        target as Parameters<typeof applyAttentionSet>[3],
+      ),
+  );
+  return { ok: true, id, attention: target };
+}
+
+// ledger.review_only は「人の判断が要ると回した」ことを表す語彙で、ledger.handled
+// (pr_fix で実際にコードを直した) とも ledger.answered (質問に回答・投稿済み) とも
+// 意味が違う。同じ版 (updated_at) のまま繰り返し観測された id を毎回報告し直させない
+// ため、この verb は「今回新規に見えた、または前回記録した updated_at から版が進んだ
+// id」を new_or_changed として返す — 呼び出し側 (SKILL.md) はこれだけを報告する。
+// updated_at が null (版を取得できなかった) の id は比較のしようが無いので、安全側に
+// 倒して観測されるたびに毎回 new_or_changed に含める。
+function parseLedgerItems(raw: string): LedgerEntry[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new CliErrorV2(
+      "usage",
+      `invalid --items-json: ${(e as Error).message}`,
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    throw new CliErrorV2("usage", "--items-json must be a JSON array");
+  }
+  const items: LedgerEntry[] = [];
+  for (const it of parsed) {
+    if (!isRecord(it) || typeof it.id !== "string") {
+      throw new CliErrorV2("usage", "each item needs a string id");
+    }
+    if (
+      !("updated_at" in it) ||
+      (typeof it.updated_at !== "string" && it.updated_at !== null)
+    ) {
+      throw new CliErrorV2(
+        "usage",
+        "each item needs updated_at (string or null)",
+      );
+    }
+    items.push({ id: it.id, updated_at: it.updated_at as string | null });
+  }
+  return items;
+}
+
+async function cmdReviewOnly(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const items = parseLedgerItems(requireFlag(flags, "items-json"));
+  let newOrChanged: string[] = [];
+  let total = 0;
+  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
+    const result = applyReviewOnly(item, index, state, items);
+    newOrChanged = result.newOrChanged;
+    total = result.total;
+    return result.state;
+  });
+  return {
+    ok: true,
+    id,
+    new_or_changed: newOrChanged,
+    review_only_total: total,
+  };
+}
+
+async function cmdAnsweredSet(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const items = parseLedgerItems(requireFlag(flags, "items-json"));
+  let newOrChanged: string[] = [];
+  let total = 0;
+  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
+    const result = applyAnsweredSet(item, index, state, items);
+    newOrChanged = result.newOrChanged;
+    total = result.total;
+    return result.state;
+  });
+  return {
+    ok: true,
+    id,
+    new_or_changed: newOrChanged,
+    answered_total: total,
+  };
+}
+
+// --- 実行帳簿 ---------------------------------------------------------------
 
 async function cmdSetWorktree(
   stateDir: string,
@@ -1082,7 +1613,10 @@ async function cmdSetTakeover(
   const hasAt = flags.has("at");
   const clear = boolFlag(flags, "clear");
   if (hasAt === clear) {
-    throw new CliError("usage", "exactly one of --at or --clear is required");
+    throw new CliErrorV2(
+      "usage",
+      "exactly one of --at or --clear is required",
+    );
   }
   const atValue = hasAt ? flags.get("at")! : null;
   await withQueueLock(
@@ -1094,529 +1628,7 @@ async function cmdSetTakeover(
   return { ok: true, id, takeover_at: atValue };
 }
 
-async function cmdPhasePass(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const from = requireEnumFlag(flags, "from", PHASE_VALUES);
-  const to = requireEnumFlag(flags, "to", PHASE_VALUES);
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyPhasePass(item, index, state, from, to),
-  );
-  return { ok: true, id, phase: to };
-}
-
-async function cmdPhaseFail(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  // 検証ゲートを持つフェーズだけを受ける (finalize は検証対象外なので usage)。
-  const phase = requireEnumFlag(flags, "phase", VERIFIED_PHASES);
-  let attempts = 0;
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const result = applyPhaseFail(item, index, state, phase);
-    attempts = result.attempts;
-    return result.state;
-  });
-  return { ok: true, id, attempts };
-}
-
-async function cmdBlock(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const reason = requireFlag(flags, "reason");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyBlock(item, index, state, reason),
-  );
-  return { ok: true, id, status: "blocked" };
-}
-
-async function cmdDequeue(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyDequeue(item, index, state),
-  );
-  return { ok: true, id };
-}
-
-async function cmdFinalizeStart(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  // 受理値は導出 (各フェーズ列の最終フェーズ + 仕上げフェーズ)。フェーズ列を変えると
-  // ここも自動で追従する。
-  const from = requireEnumFlag(flags, "from", FINALIZE_FROM_PHASES);
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyFinalizeStart(item, index, state, from),
-  );
-  return { ok: true, id, phase: "finalize" };
-}
-
-async function cmdInReview(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const hasRef = flags.has("ref");
-  const hasBranch = flags.has("branch");
-  const hasBase = flags.has("base");
-  const hasCommits = flags.has("commits");
-  const hasTip = flags.has("tip");
-  const freshGroup = hasRef || hasBranch || hasBase || hasCommits;
-  if (freshGroup && !(hasRef && hasBranch && hasBase && hasCommits)) {
-    throw new CliError(
-      "usage",
-      "--ref/--branch/--base/--commits must all be given together (or all omitted)",
-    );
-  }
-  if (!freshGroup && hasTip) {
-    throw new CliError(
-      "usage",
-      "--tip requires --ref/--branch/--base/--commits",
-    );
-  }
-  let commits = 0;
-  if (hasCommits) {
-    commits = requireIntFlag(flags, "commits");
-    if (commits === 0 && hasTip) {
-      throw new CliError(
-        "usage",
-        "--tip must not be given when --commits is 0",
-      );
-    }
-    if (commits >= 1 && !hasTip) {
-      throw new CliError("usage", "--tip is required when --commits >= 1");
-    }
-  }
-  const ref = flags.get("ref");
-  const branch = flags.get("branch");
-  const base = flags.get("base");
-  const tip = flags.get("tip");
-  const clearSession = boolFlag(flags, "clear-session");
-
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) =>
-      applyInReview(item, index, state, {
-        freshGroup,
-        ref,
-        branch,
-        tip,
-        base,
-        commits,
-        clearSession,
-      }),
-  );
-  return { ok: true, id, status: "in_review" };
-}
-
-// --- 追従 -----------------------------------------------------------------
-
-async function cmdWatchInit(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const session = requireFlag(flags, "session");
-  const preserve = boolFlag(flags, "preserve-handled");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) =>
-      applyWatchInit(item, index, state, session, preserve),
-  );
-  return { ok: true, id };
-}
-
-async function cmdWatchSet(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const fields: WatchSetFields = { errorsInc: false, errorsReset: false };
-  const hasProc = flags.has("proc");
-  if (hasProc) fields.proc = nullableFlag(flags.get("proc")!);
-  const hasSig = flags.has("sig");
-  if (hasSig) fields.sig = nullableFlag(flags.get("sig")!);
-  const hasHead = flags.has("head");
-  if (hasHead) fields.head = nullableFlag(flags.get("head")!);
-  const hasCi = flags.has("ci");
-  if (hasCi) {
-    const raw = flags.get("ci")!;
-    if (raw !== "null" && !(CI_VALUES as readonly string[]).includes(raw)) {
-      throw new CliError("usage", `invalid --ci: ${raw}`);
-    }
-    fields.ci = raw === "null" ? null : raw;
-  }
-  const hasCheckedAt = flags.has("checked-at");
-  if (hasCheckedAt) fields.checkedAt = nullableFlag(flags.get("checked-at")!);
-  const errorsInc = boolFlag(flags, "errors-inc");
-  const errorsReset = boolFlag(flags, "errors-reset");
-  if (errorsInc && errorsReset) {
-    throw new CliError(
-      "usage",
-      "--errors-inc and --errors-reset are mutually exclusive",
-    );
-  }
-  fields.errorsInc = errorsInc;
-  fields.errorsReset = errorsReset;
-  const hasNote = flags.has("note");
-  if (hasNote) fields.note = nullableFlag(flags.get("note")!);
-  const hasState = flags.has("state");
-  if (hasState) {
-    const stateVal = flags.get("state")!;
-    if (!(WATCH_STATE_VALUES as readonly string[]).includes(stateVal)) {
-      throw new CliError("usage", `invalid --state: ${stateVal}`);
-    }
-    fields.state = stateVal as "watching" | "stopped";
-  }
-  const hasSession = flags.has("session");
-  if (hasSession) fields.session = nullableFlag(flags.get("session")!);
-  if (
-    hasSession && fields.session !== null && hasState &&
-    fields.state === "stopped"
-  ) {
-    throw new CliError(
-      "usage",
-      "--session <non-null> cannot be combined with --state stopped (which already nulls session)",
-    );
-  }
-  const anyGiven = hasProc || hasSig || hasHead || hasCi || hasCheckedAt ||
-    errorsInc || errorsReset || hasNote || hasState || hasSession;
-  if (!anyGiven) {
-    throw new CliError("usage", "watch-set requires at least one field flag");
-  }
-
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyWatchSet(item, index, state, fields, nowIso()),
-  );
-  return { ok: true, id };
-}
-
-async function cmdFixPending(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const pendingIds = parseCsv(requireFlag(flags, "pending-ids"));
-  const findings = requireFlag(flags, "findings");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) =>
-      applyFixPending(item, index, state, pendingIds, findings),
-  );
-  return { ok: true, id };
-}
-
-async function cmdFixStart(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const session = requireFlag(flags, "session");
-  const reset = boolFlag(flags, "reset-attempts");
-  let started = false;
-  let fixAttempts = 0;
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const result = applyFixStart(item, index, state, session, reset);
-    started = result.started;
-    fixAttempts = result.fixAttempts;
-    return result.state;
-  });
-  return { ok: true, id, started, fix_attempts: fixAttempts };
-}
-
-async function cmdFixDone(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyFixDone(item, index, state),
-  );
-  return { ok: true, id };
-}
-
-// review_only の指摘は、ここでは watch.handled に一切触れず watch.review_only に
-// id ごと upsert するだけにする。watch.handled は fix-done を経由して実際に
-// 修正したものだけを表す。同じ版 (updated_at) のまま繰り返し観測された id を毎回
-// 報告し直させないため、この verb は「今回新規に見えた、または前回記録した
-// updated_at から版が進んだ id」を new_or_changed として返す — 呼び出し側 (SKILL.md)
-// はこれだけを報告する。updated_at が null (版を取得できなかった) の id は比較の
-// しようが無いので、安全側に倒して観測されるたびに毎回 new_or_changed に含める。
-function parseReviewOnlyItems(raw: string): ReviewOnlyEntry[] {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (e) {
-    throw new CliError(
-      "usage",
-      `invalid --items-json: ${(e as Error).message}`,
-    );
-  }
-  if (!Array.isArray(parsed)) {
-    throw new CliError("usage", "--items-json must be a JSON array");
-  }
-  const items: ReviewOnlyEntry[] = [];
-  for (const it of parsed) {
-    if (!isRecord(it) || typeof it.id !== "string") {
-      throw new CliError("usage", "each item needs a string id");
-    }
-    if (
-      !("updated_at" in it) ||
-      (typeof it.updated_at !== "string" && it.updated_at !== null)
-    ) {
-      throw new CliError(
-        "usage",
-        "each item needs updated_at (string or null)",
-      );
-    }
-    items.push({ id: it.id, updated_at: it.updated_at as string | null });
-  }
-  return items;
-}
-
-async function cmdReviewOnly(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const items = parseReviewOnlyItems(requireFlag(flags, "items-json"));
-  let newOrChanged: string[] = [];
-  let total = 0;
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const result = applyReviewOnly(item, index, state, items);
-    newOrChanged = result.newOrChanged;
-    total = result.total;
-    return result.state;
-  });
-  return {
-    ok: true,
-    id,
-    new_or_changed: newOrChanged,
-    review_only_total: total,
-  };
-}
-
-// watch.answered は review_only と同じ入出力契約 (id/updated_at の upsert・dedup) を持つが、
-// 別フィールド・別語彙にする (gh-6)。watch.handled は「pr_fix で実際にコードを直した」ことを
-// 表す語彙、watch.review_only は「人の判断が要ると回した」ことを表す語彙で、どちらとも意味が
-// 違う「質問に回答・投稿済み」をこの2つに混ぜると、次に読む executor/verifier が誤読する。
-// items-json のパースは review-only と全く同じ形 ({id, updated_at} の配列) なので
-// parseReviewOnlyItems をそのまま再利用する。前提チェックと状態書き換えは applyReviewOnly と
-// 同じく state-transitions.ts の applyAnsweredSet に持たせる (state-transitions.ts への関数
-// 移設 [main] に合わせる)。
-async function cmdAnsweredSet(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const items = parseReviewOnlyItems(requireFlag(flags, "items-json"));
-  let newOrChanged: string[] = [];
-  let total = 0;
-  await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const result = applyAnsweredSet(item, index, state, items);
-    newOrChanged = result.newOrChanged;
-    total = result.total;
-    return result.state;
-  });
-  return {
-    ok: true,
-    id,
-    new_or_changed: newOrChanged,
-    answered_total: total,
-  };
-}
-
-// --- 載せ直し ---------------------------------------------------------------
-
-async function cmdRebaseRecord(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const blockedOnto = requireFlag(flags, "blocked-onto");
-  const reason = requireEnumFlag(flags, "reason", REBASE_REASON_VALUES);
-  const kind = flags.get("kind");
-  if (
-    kind !== undefined &&
-    !(REBASE_KIND_VALUES as readonly string[]).includes(kind)
-  ) {
-    throw new CliError("usage", `invalid --kind: ${kind}`);
-  }
-  const cause = flags.get("cause");
-  const report = flags.get("report");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) =>
-      applyRebaseRecord(
-        item,
-        index,
-        state,
-        blockedOnto,
-        reason,
-        kind,
-        cause,
-        report,
-        nowIso(),
-      ),
-  );
-  return { ok: true, id };
-}
-
-async function cmdRebaseResolvePending(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const fromTip = requireFlag(flags, "from-tip");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) =>
-      applyRebaseResolvePending(item, index, state, fromTip),
-  );
-  return { ok: true, id };
-}
-
-async function cmdRebaseStart(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const session = requireFlag(flags, "session");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyRebaseStart(item, index, state, session),
-  );
-  return { ok: true, id, status: "in_progress", phase: "rebase_fix" };
-}
-
-async function cmdRebaseDone(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const tip = requireFlag(flags, "tip");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyRebaseDone(item, index, state, tip),
-  );
-  return { ok: true, id, tip };
-}
-
-async function cmdRebaseGiveUp(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const blockedOnto = requireFlag(flags, "blocked-onto");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyRebaseGiveUp(item, index, state, blockedOnto),
-  );
-  return { ok: true, id, status: "in_review" };
-}
-
-// --- 回収と候補 -------------------------------------------------------------
-
-async function cmdRecoverDone(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyRecoverDone(item, index, state),
-  );
-  return { ok: true, id, status: "done" };
-}
-
-async function cmdWithdraw(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyWithdraw(item, index, state),
-  );
-  return { ok: true, id };
-}
-
-async function cmdWithdrawRemove(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  const reason = requireFlag(flags, "reason");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) =>
-      applyWithdrawRemove(item, index, state, reason, nowIso()),
-  );
-  return { ok: true, id };
-}
-
-async function cmdWithdrawAsked(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyWithdrawAsked(item, index, state),
-  );
-  return { ok: true, id };
-}
+// --- 候補・帳簿 -------------------------------------------------------------
 
 async function cmdCandidatesSet(
   stateDir: string,
@@ -1627,19 +1639,19 @@ async function cmdCandidatesSet(
   try {
     parsed = JSON.parse(raw);
   } catch (e) {
-    throw new CliError(
+    throw new CliErrorV2(
       "usage",
       `invalid --candidates-json: ${(e as Error).message}`,
     );
   }
   if (!Array.isArray(parsed)) {
-    throw new CliError("usage", "--candidates-json must be a JSON array");
+    throw new CliErrorV2("usage", "--candidates-json must be a JSON array");
   }
   for (const c of parsed) {
     if (
       !isRecord(c) || typeof c.id !== "string" || typeof c.title !== "string"
     ) {
-      throw new CliError(
+      throw new CliErrorV2(
         "usage",
         "each candidate needs at least string id and title",
       );
@@ -1648,7 +1660,7 @@ async function cmdCandidatesSet(
   await withExistingStateLock(
     stateDir,
     lockOpts(flags),
-    (current) => applyCandidatesSet(current, parsed as unknown[]),
+    (current) => applyCandidatesSetV2(current, parsed as unknown[]),
   );
   return { ok: true, count: (parsed as unknown[]).length };
 }
@@ -1661,7 +1673,7 @@ async function cmdCandidatesDrop(
   await withExistingStateLock(
     stateDir,
     lockOpts(flags),
-    (current) => applyCandidatesDrop(current, id),
+    (current) => applyCandidatesDropV2(current, id),
   );
   return { ok: true, id };
 }
@@ -1674,7 +1686,7 @@ async function cmdPromotedAdd(
   await withExistingStateLock(
     stateDir,
     lockOpts(flags),
-    (current) => applyPromotedAdd(current, ids),
+    (current) => applyPromotedAddV2(current, ids),
   );
   return { ok: true, ids };
 }
@@ -1687,7 +1699,7 @@ async function cmdPromotedDrop(
   await withExistingStateLock(
     stateDir,
     lockOpts(flags),
-    (current) => applyPromotedDrop(current, id),
+    (current) => applyPromotedDropV2(current, id),
   );
   return { ok: true, id };
 }
@@ -1701,7 +1713,7 @@ async function cmdRelistedAdd(
   await withExistingStateLock(
     stateDir,
     lockOpts(flags),
-    (current) => applyRelistedAdd(current, id, seenAt),
+    (current) => applyRelistedAddV2(current, id, seenAt),
   );
   return { ok: true, id };
 }
@@ -1714,26 +1726,10 @@ async function cmdRelistedDrop(
   await withExistingStateLock(
     stateDir,
     lockOpts(flags),
-    (current) => applyRelistedDrop(current, id),
+    (current) => applyRelistedDropV2(current, id),
   );
   return { ok: true, id };
 }
-
-async function cmdRestore(
-  stateDir: string,
-  flags: Map<string, string>,
-): Promise<Record<string, unknown>> {
-  const id = requireFlag(flags, "id");
-  await withQueueLock(
-    stateDir,
-    id,
-    lockOpts(flags),
-    (item, index, state) => applyRestore(item, index, state),
-  );
-  return { ok: true, id, status: "approved" };
-}
-
-// --- 全体 -------------------------------------------------------------------
 
 async function cmdStalledSet(
   stateDir: string,
@@ -1745,12 +1741,7 @@ async function cmdStalledSet(
     stateDir,
     lockOpts(flags),
     (current) =>
-      applyStalledSet(
-        current,
-        value as "depleted" | "max_open" | "null",
-        bump,
-        nowIso(),
-      ),
+      applyStalledSetV2(current, value as StalledArg, bump, nowIso()),
   );
   return { ok: true, value: value === "null" ? null : value };
 }
@@ -1762,7 +1753,7 @@ async function cmdStalledSet(
 function classifyError(
   e: unknown,
 ): { code: ExitCodeName; message: string } | null {
-  if (e instanceof CliError) return { code: e.code, message: e.message };
+  if (e instanceof CliErrorV2) return { code: e.code, message: e.message };
   if (e instanceof Deno.errors.NotCapable) {
     return { code: "permission", message: e.message };
   }
@@ -1777,160 +1768,92 @@ function classifyError(
 
 // ---------------------------------------------------------------------------
 // dispatch
+//
+// ディスパッチ表のキー集合は ALLOWED_FLAGS と一致し、その内訳は VERB_SPEC (遷移 32) と
+// LEDGER_VERBS (帳簿 13) で尽きる。どちらにも属さない verb を足すと state.test.ts の
+// 分類ネットが落ちる。
 // ---------------------------------------------------------------------------
+
+type CmdHandler = (
+  stateDir: string,
+  flags: Map<string, string>,
+) => Promise<unknown>;
+
+const HANDLERS: Record<string, CmdHandler> = {
+  // 帳簿系
+  "init": cmdInit,
+  "get": (stateDir) => cmdGet(stateDir),
+  "validate": (stateDir) => cmdValidate(stateDir),
+  "session-touch": cmdSessionTouch,
+  "sessions-alive": cmdSessionsAlive,
+  "history-append": cmdHistoryAppend,
+  "candidates-set": cmdCandidatesSet,
+  "candidates-drop": cmdCandidatesDrop,
+  "promoted-add": cmdPromotedAdd,
+  "promoted-drop": cmdPromotedDrop,
+  "relisted-add": cmdRelistedAdd,
+  "relisted-drop": cmdRelistedDrop,
+  "stalled-set": cmdStalledSet,
+  // 進行系
+  "approve": cmdApprove,
+  "claim": cmdClaim,
+  "set-gate": cmdSetGate,
+  "advance": cmdAdvance,
+  "phase-fail": cmdPhaseFail,
+  "block": cmdBlock,
+  "dequeue": cmdDequeue,
+  "restore": cmdRestore,
+  "retire": cmdRetire,
+  // 完了系
+  "ship": cmdShip,
+  "merged": cmdMerged,
+  "withdraw": cmdWithdraw,
+  "withdraw-asked": cmdWithdrawAsked,
+  "withdraw-remove": cmdWithdrawRemove,
+  // 要求系
+  "fix-request": cmdFixRequest,
+  "rebase-request": cmdRebaseRequest,
+  "rebase-applied": cmdRebaseApplied,
+  // 仕上げ開始系
+  "fix-start": cmdFixStart,
+  "rebase-start": cmdRebaseStart,
+  "rebase-give-up": cmdRebaseGiveUp,
+  "rebase-forgo": cmdRebaseForgo,
+  // 追従系
+  "probe-run": cmdProbeRun,
+  "probe-exit": cmdProbeExit,
+  "release": cmdRelease,
+  "observe": cmdObserve,
+  "attention-set": cmdAttentionSet,
+  "review-only": cmdReviewOnly,
+  "answered-set": cmdAnsweredSet,
+  // 実行帳簿
+  "set-worktree": cmdSetWorktree,
+  "set-executor": cmdSetExecutor,
+  "touch-executor": cmdTouchExecutor,
+  "set-takeover": cmdSetTakeover,
+};
 
 export async function main(argv: string[]): Promise<number> {
   try {
     const [verb, ...rest] = argv;
     if (!verb) {
-      throw new CliError("usage", "verb is required");
+      throw new CliErrorV2("usage", "verb is required");
     }
     const allowed = ALLOWED_FLAGS[verb];
-    if (!allowed) {
-      throw new CliError("usage", `unknown verb: ${verb}`);
+    const handler = HANDLERS[verb];
+    if (!allowed || !handler) {
+      throw new CliErrorV2("usage", `unknown verb: ${verb}`);
     }
     const flags = parseFlags(rest);
     for (const key of flags.keys()) {
       if (!allowed.has(key)) {
-        throw new CliError("usage", `unknown flag for ${verb}: --${key}`);
+        throw new CliErrorV2("usage", `unknown flag for ${verb}: --${key}`);
       }
     }
     const stateDir = requireFlag(flags, "state-dir");
 
-    let result: unknown;
-    switch (verb) {
-      case "init":
-        result = await cmdInit(stateDir, flags);
-        break;
-      case "get":
-        result = await cmdGet(stateDir);
-        break;
-      case "validate":
-        result = await cmdValidate(stateDir);
-        break;
-      case "session-touch":
-        result = await cmdSessionTouch(stateDir, flags);
-        break;
-      case "sessions-alive":
-        result = await cmdSessionsAlive(stateDir, flags);
-        break;
-      case "history-append":
-        result = await cmdHistoryAppend(stateDir, flags);
-        break;
-      case "approve":
-        result = await cmdApprove(stateDir, flags);
-        break;
-      case "claim":
-        result = await cmdClaim(stateDir, flags);
-        break;
-      case "set-gate":
-        result = await cmdSetGate(stateDir, flags);
-        break;
-      case "set-worktree":
-        result = await cmdSetWorktree(stateDir, flags);
-        break;
-      case "set-executor":
-        result = await cmdSetExecutor(stateDir, flags);
-        break;
-      case "touch-executor":
-        result = await cmdTouchExecutor(stateDir, flags);
-        break;
-      case "set-takeover":
-        result = await cmdSetTakeover(stateDir, flags);
-        break;
-      case "phase-pass":
-        result = await cmdPhasePass(stateDir, flags);
-        break;
-      case "phase-fail":
-        result = await cmdPhaseFail(stateDir, flags);
-        break;
-      case "block":
-        result = await cmdBlock(stateDir, flags);
-        break;
-      case "dequeue":
-        result = await cmdDequeue(stateDir, flags);
-        break;
-      case "finalize-start":
-        result = await cmdFinalizeStart(stateDir, flags);
-        break;
-      case "in-review":
-        result = await cmdInReview(stateDir, flags);
-        break;
-      case "watch-init":
-        result = await cmdWatchInit(stateDir, flags);
-        break;
-      case "watch-set":
-        result = await cmdWatchSet(stateDir, flags);
-        break;
-      case "fix-pending":
-        result = await cmdFixPending(stateDir, flags);
-        break;
-      case "fix-start":
-        result = await cmdFixStart(stateDir, flags);
-        break;
-      case "fix-done":
-        result = await cmdFixDone(stateDir, flags);
-        break;
-      case "review-only":
-        result = await cmdReviewOnly(stateDir, flags);
-        break;
-      case "answered-set":
-        result = await cmdAnsweredSet(stateDir, flags);
-        break;
-      case "rebase-record":
-        result = await cmdRebaseRecord(stateDir, flags);
-        break;
-      case "rebase-resolve-pending":
-        result = await cmdRebaseResolvePending(stateDir, flags);
-        break;
-      case "rebase-start":
-        result = await cmdRebaseStart(stateDir, flags);
-        break;
-      case "rebase-done":
-        result = await cmdRebaseDone(stateDir, flags);
-        break;
-      case "rebase-give-up":
-        result = await cmdRebaseGiveUp(stateDir, flags);
-        break;
-      case "recover-done":
-        result = await cmdRecoverDone(stateDir, flags);
-        break;
-      case "withdraw":
-        result = await cmdWithdraw(stateDir, flags);
-        break;
-      case "withdraw-remove":
-        result = await cmdWithdrawRemove(stateDir, flags);
-        break;
-      case "withdraw-asked":
-        result = await cmdWithdrawAsked(stateDir, flags);
-        break;
-      case "candidates-set":
-        result = await cmdCandidatesSet(stateDir, flags);
-        break;
-      case "candidates-drop":
-        result = await cmdCandidatesDrop(stateDir, flags);
-        break;
-      case "promoted-add":
-        result = await cmdPromotedAdd(stateDir, flags);
-        break;
-      case "promoted-drop":
-        result = await cmdPromotedDrop(stateDir, flags);
-        break;
-      case "relisted-add":
-        result = await cmdRelistedAdd(stateDir, flags);
-        break;
-      case "relisted-drop":
-        result = await cmdRelistedDrop(stateDir, flags);
-        break;
-      case "restore":
-        result = await cmdRestore(stateDir, flags);
-        break;
-      case "stalled-set":
-        result = await cmdStalledSet(stateDir, flags);
-        break;
-      default:
-        throw new CliError("usage", `unknown verb: ${verb}`);
-    }
+    const result = await handler(stateDir, flags);
     console.log(JSON.stringify(result));
     return 0;
   } catch (e) {
@@ -1942,6 +1865,12 @@ export async function main(argv: string[]): Promise<number> {
     return EXIT_CODES[classified.code];
   }
 }
+
+// ディスパッチ集合が VERB_SPEC ∪ LEDGER_VERBS で尽きることを、型の上でも表明する
+// (実行時の検査は state.test.ts の分類ネット)。
+export const DISPATCH_VERBS: readonly string[] = Object.keys(ALLOWED_FLAGS);
+export const TRANSITION_VERBS: readonly string[] = Object.keys(VERB_SPEC);
+export { LEDGER_VERBS };
 
 if (import.meta.main) {
   const code = await main(Deno.args);

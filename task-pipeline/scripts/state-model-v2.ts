@@ -3,12 +3,12 @@
 // 状態モデル v2 (task-pipeline/docs/state-model-v2-2026-08.md 1.1〜1.5節・4.2節) の
 // 語彙・ノード導出・不変条件・到達可能性テストの枠を純関数として新設するファイル。
 //
-// - v1 (state-transitions.ts / state.ts / state.schema.json) には一切依存しない。
-//   v1 の語彙 (STATUS_VALUES 等) は再利用せず、ここで自己完結して定義する。
+// - v1 の語彙 (status/phase/gate をタスク直下に持つ形) は再利用せず、ここで自己完結して
+//   定義する。v1 の遷移コアとスキーマは #37 で削除済みで、参照は残っていない。
 // - 遷移 (verb) の実装・queueItem 全体のJSON Schema化 (設計3.1b節) は今回のスコープ外
 //   (後続issue)。ここにあるのは領域P/Aの語彙・ノード導出・不変条件検査・到達可能性
 //   テストの枠のみ — apply系のverb関数は1つも無い。
-// - Deno API を呼ばない純粋関数群 (state-schema.ts / state-ownership.ts と同型)。
+// - Deno API を呼ばない純粋関数群 (state-ownership.ts と同型)。
 // - 「宣言と実装がずれたら型エラーになる」ことを優先する。軸キー・フェーズ名・ノード
 //   キーは string ではなく宣言から導いたリテラルユニオンで持ち、宣言の取りこぼし
 //   (kind/gate/phase を足したのに表を更新し忘れる) は実行時例外ではなくコンパイル
@@ -294,6 +294,20 @@ export type LegalRunCoord = {
   [K in AxisKey]: CoordOf<K> & { readonly phase: PhaseOf<K> };
 }[AxisKey];
 
+// 全 axis のフェーズ名の和集合 (宣言順、重複除去)。CLI が `advance --from/--to` の
+// フラグ値を usage 検証するための語彙で、手書きの列挙は持たない — フェーズ列を変えると
+// ここも自動で追従する。要素の型を `Phase` に締めてあるので、宣言に無いフェーズ名が
+// 紛れ込めばコンパイルエラーになる (このファイルの型付けの方針に合わせた)。
+export const PHASE_VALUES: readonly Phase[] = [
+  ...new Set(RUN_AXES.flatMap((axis) => axis.phases())),
+];
+
+// 検証ゲートを持つフェーズ (= finalize 以外)。CLI の `phase-fail --phase` はこちらで
+// 検証する — finalize は検証対象外なので usage で弾く (v1 の VERIFIED_PHASES と同じ規律)。
+export const VERIFIED_PHASE_VALUES: readonly Phase[] = PHASE_VALUES.filter(
+  (phase) => phase !== FINALIZE_PHASE,
+);
+
 // 任意の (kind, gate, phase) 組が RUN_AXES × axis.phases() の宣言に含まれるかを判定。
 // 真のときは呼び出し側で LegalRunCoord に絞り込める (型述語)。
 export function isLegalRunNode(
@@ -381,6 +395,26 @@ export function fixAskAxisOf(fixAsk: FixAsk): FixAskAxis {
 export const REBASE_ASK_AXIS_VALUES = ["taken", "queued", "quiet"] as const;
 export type RebaseAskAxis = (typeof REBASE_ASK_AXIS_VALUES)[number];
 
+// rebase-ask のデータ語彙 (座標には効かないが、CLI のフラグ検証に要る)。綴りは
+// state.schema.json の $defs.rebaseAsk の enum と一対一で、整合は state.test.ts の
+// 文書・スキーマ照合が固定する。
+export const REBASE_REASON_VALUES = [
+  "dirty",
+  "diverged",
+  "conflict",
+  "push",
+] as const;
+export type RebaseReason = (typeof REBASE_REASON_VALUES)[number];
+
+export const REBASE_KIND_VALUES = [
+  "superseded",
+  "overlap",
+  "adjacent",
+  "structural",
+  "other",
+] as const;
+export type RebaseKind = (typeof REBASE_KIND_VALUES)[number];
+
 export interface RebaseAskFields {
   readonly blocked_onto: string;
   readonly reason: string;
@@ -432,6 +466,16 @@ export type RebaseAsk = RebaseAskRecord | null;
 export function rebaseAskAxisOf(rebaseAsk: RebaseAsk): RebaseAskAxis {
   return rebaseAsk === null ? "quiet" : rebaseAsk.axis();
 }
+
+// probe.ci の語彙 (座標には効かない観測キャッシュの値)。CLI の `observe --ci` の
+// フラグ検証がこれを使う。
+export const CI_VALUES = ["passing", "failing", "pending", "none"] as const;
+export type CiValue = (typeof CI_VALUES)[number];
+
+// トップレベル state の stalled の語彙 (queue エントリの座標ではない)。CLI の
+// `stalled-set --value` と移行 (state-migrate-v2.ts) が同じ綴りを使う。
+export const STALLED_VALUES = ["depleted", "max_open"] as const;
+export type Stalled = (typeof STALLED_VALUES)[number];
 
 // probe レコードのうち不変条件4の検査に要る最小形 (proc の有無だけ。他フィールド
 // (proc_started_at/sig/head/ci/checked_at/errors/note) はこのタスクでは扱わない)。

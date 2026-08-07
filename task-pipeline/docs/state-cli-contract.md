@@ -1,9 +1,11 @@
-# state.ts CLI 契約
+# state.ts CLI 契約 (状態モデル v2)
 
-`task-pipeline/scripts/state.ts` (Deno/TypeScript) の起動形・終了コード・JSON 出力の契約。
-`task-pipeline/scripts/state.test.ts` の T-D1 が、この文書の終了コード表を
-`task-pipeline/scripts/state.ts` の `EXIT_CODES` と突き合わせて一致を固定している
-(この文書と実装が乖離すればテストが落ちる)。
+`task-pipeline/scripts/state.ts` の呼び出し契約。**この CLI は状態モデル v2
+(`task-pipeline/docs/state-model-v2-2026-08.md`) だけを話す。** v1 の語彙 (タスク直下の
+`status`/`phase`/`gate`、`review.watch`/`review.rebase`) は受け付けない。
+
+この文書は実装の転写であり、`state.test.ts` の T-D1〜T-D6 が機械照合している
+(どちらかだけ直すとテストが落ちる)。
 
 ## 起動形
 
@@ -14,10 +16,7 @@ deno run --no-prompt \
   task-pipeline/scripts/state.ts <verb> --state-dir <dir> [verb固有フラグ...]
 ```
 
-- `--no-prompt` を必ず付ける (許可外アクセス時に TTY プロンプトで止まらないようにする)。
-- state ディレクトリの外を一切読み書きしない設計なので、`--allow-read`/`--allow-write` は
-  state dir (`init` はこれに加えて `<git common dir>/info`) だけに絞ってよい。
-  `--allow-all` で動かす前提の書き方はしない。
+`--state-dir` は全 verb 必須。許可の外に触れると `permission` で落ち、**副作用は残らない**。
 
 ## 出力契約
 
@@ -25,191 +24,194 @@ stdout に必ず **1 行の JSON**。
 
 - 成功時: exit 0、verb ごとの成功ペイロード (下記)。
 - 失敗時: exit は下表のコード、`{"error": "<code>", "message": "<text>"}`。
-- **エラー時は state.json を一切書き換えない。**
+- **エラー時は state.json を一切書き換えない** (バイト単位で不変。`updated_at` も動かない)。
 
 ## 終了コード
 
 | 名前 | コード | 意味 |
 |---|---|---|
 | (success) | 0 | 成功 |
-| `usage` | 10 | verb 不明・省略・必須フラグ欠落・未知フラグ・不正な値 (`--id` の形状違反含む) |
+| `usage` | 10 | verb 不明・省略・必須フラグ欠落・未知フラグ・不正な値 (`--id` の形状違反、廃止 verb を含む) |
 | `lock` | 11 | lock を既定回数再試行しても取得できなかった |
-| `schema` | 12 | state.json が構文的に不正な JSON、または `checkState` が invalid と判定した |
+| `schema` | 12 | state.json が構文的に不正な JSON、または `checkStateV2` が invalid と判定した (読めない `schema_version` を含む) |
 | `missing` | 13 | 対象 verb が要求する state.json (または state dir 自体)、あるいは `--id` が指す queue/candidates/promoted/relisted のエントリが存在しない |
 | `permission` | 14 | Deno の許可境界外へのアクセス (`Deno.errors.NotCapable`/`PermissionDenied`) |
-| `conflict` | 15 | 対象のエントリは存在するが、その verb が要求する現在の state (`status`/`phase`/`session`/`review.*` 等) の前提を満たさない (例: `claim` を `approved` でないタスクに実行) |
+| `conflict` | 15 | 対象のエントリは存在するが、その verb が要求する現在のノード (領域 P × 領域 A の座標) やフィールドの前提を満たさない (例: `claim` を `queued` でないタスクに実行) |
 
 ## verb 固有フラグの共通規約
 
 - **`--id`**: 対象 `queue[i]` の id (一部 verb は `candidates`/`promoted`/`relisted` の id)。
-- **nullable なフラグ**: `--proc`/`--sig`/`--head`/`--ci`/`--checked-at`/`--note` など、対象
-  フィールドが `null` を許容する verb では、フラグの値に文字列 `"null"` を渡すと JSON の
-  `null` として書き込む (実際の proc id / sha / URL がリテラル文字列 `"null"` になることは
-  運用上想定していない)。フラグ自体を省略すると、そのフィールドは書き換えない。
-- **真偽フラグ**: `--bump`/`--clear`/`--drop-withdrawn-branch`/`--preserve-handled`/
-  `--reset-attempts`/`--errors-inc`/`--errors-reset`/`--clear-session` は、フラグを渡すときは
-  必ず値 `true` を伴う (`--bump true`)。それ以外の値は `usage` (`T-V-in-review-10`/
-  `T-V-in-review-11` が `--clear-session false`/`--clear-session 1` を `usage`・state.json
-  不変で固定している)。フラグを渡さなければ偽として扱う。
-- **`--lock-retry-ms <n>`/`--lock-max-retries <n>`**: 全ての書き込み系 verb (下記すべて) が
-  共通で受け付ける (既定はそれぞれ 10000/3、`init`/`history-append` と同じ)。
-- 前提違反は `conflict` (対象は存在する) か `missing` (`--id` の指す対象が存在しない) のいずれか
-  で失敗し、**state.json は一切書き換わらない** (エラー時共通の契約がそのまま適用される)。
+- **nullable なフラグ**: `--sig`/`--head`/`--ci`/`--checked-at`/`--note` など、対象フィールドが
+  `null` を許容する verb では、値に文字列 `"null"` を渡すと JSON の `null` として書き込む
+  (実際の proc id / sha / URL がリテラル文字列 `"null"` になることは運用上想定していない)。
+  フラグ自体を省略すると、そのフィールドは書き換えない。
+- **真偽フラグ**: `--bump`/`--clear`/`--drop-withdrawn-branch`/`--reset-attempts`/
+  `--errors-inc`/`--errors-reset`/`--sig-clear`/`--resolve`/`--auto` は、渡すときは必ず値
+  `true` を伴う (`--bump true`)。それ以外の値は `usage`。省略すれば偽。
+- **`--lock-retry-ms <n>`/`--lock-max-retries <n>`**: 全ての書き込み系 verb が共通で受け付ける
+  (既定はそれぞれ 10000/3)。
+- 前提違反は `conflict` (対象は存在する) か `missing` (`--id` の指す対象が存在しない) のいずれかで
+  失敗し、**state.json は一切書き換わらない**。
 
-## 遷移表 (機械 A × B × B')
+## ノードと遷移
 
-状態は 3 つの機械の直積で持つ: **機械 A** はタスクのライフサイクル (`status`/`phase`)、
-**機械 B** は PR 追従 (`review.watch`)、**機械 B'** は載せ直し (`review.rebase`)。
-verb ごとの遷移は 3 軸それぞれの from→to として宣言され (`state-transitions.ts` の
-`VERB_SPEC`)、前提チェックは 3 軸すべてに掛かる — 「A のノードを動かさない verb」の
-多くは B / B' の軸を動かす辺である。この節は実装の転写であり、`state.test.ts` の
-T-D7 / T-D4 / T-D3 / T-D8 / T-D9 が一致を検査する (どちらかだけ直すとテストが落ちる)。
+状態は **領域 P (進行)** と **領域 A (成果物)** の 2 領域で持つ。verb ごとの遷移は
+2 領域それぞれの from→to として `state-transitions-v2-spec.ts` の `VERB_SPEC` に宣言され、
+前提チェックは両領域に掛かる。
 
-### 機械 A (status/phase)
+### 領域 P のノード
 
-機械 A のノードは `(status, phase)` の合法な組だけで、**`phase` が非 null なのは
-`status` が `in_progress` のとき、かつそのときに限る**。`in_progress` のノードは
-`in_progress/<phase>` と表記する。
-
-ノードの全一覧 (現在 4 + 8 = 12。意味の列は散文で、照合されるのはノード名だけ):
+`progress` と (running のときだけ存在する) `run` の座標 (kind, gate, phase) の合法な組。
+`gate` は `kind == initial` のとき、かつそのときに限り非 null (`-` は gate 無しを表す)。
 
 | ノード | 意味 |
 |---|---|
-| `approved` | 承認済み・着手待ち。queue 追加直後と `restore` 後の形 |
-| `in_progress/research` | 調査フェーズを実行中 (gate `full` の先頭) |
-| `in_progress/plan` | 計画フェーズを実行中 |
-| `in_progress/implement` | 実装フェーズを実行中 |
-| `in_progress/report` | 報告フェーズを実行中 (両 gate の最終検証フェーズ) |
-| `in_progress/research+plan` | 調査と計画の統合フェーズを実行中 (gate `light` の先頭) |
-| `in_progress/finalize` | 後処理 (コミット・PR 作成・押し直し) 中。検証ゲート無し |
-| `in_progress/pr_fix` | レビュー指摘への修正を実行中 (仕上げ) |
-| `in_progress/rebase_fix` | 載せ直し衝突の解消を実行中 (仕上げ) |
-| `in_review` | レビュー待ち。`finish=pr` なら `review.watch` (機械 B) が PR を追従 |
-| `done` | マージを証明して回収済み (終端) |
-| `blocked` | パイプラインが自力で進めない。人が `restore` で戻すまで停止 |
+| `queued` | 承認済みで着手待ち。`run` は無い |
+| `resting` | 実行中の run が無く、成果物の状態だけが動く (レビュー待ち・取り下げ済み・マージ済み) |
+| `blocked` | 人の入力待ちで停止。`blocked_reason` を持つ |
+| `running(initial,full,research)` | 初回 engagement (full gate) の research |
+| `running(initial,full,plan)` | 同 plan |
+| `running(initial,full,implement)` | 同 implement |
+| `running(initial,full,report)` | 同 report |
+| `running(initial,full,finalize)` | 同 finalize (検証ゲート無し) |
+| `running(initial,full,rebase_fix)` | 同 finalize からの迂回 (衝突解消) |
+| `running(initial,light,research+plan)` | 初回 engagement (light gate) の統合フェーズ |
+| `running(initial,light,implement)` | 同 implement |
+| `running(initial,light,report)` | 同 report |
+| `running(initial,light,finalize)` | 同 finalize |
+| `running(initial,light,rebase_fix)` | 同 迂回 |
+| `running(pr_fix,-,pr_fix)` | PR フィードバック対応の本体 |
+| `running(pr_fix,-,finalize)` | 同 finalize |
+| `running(pr_fix,-,rebase_fix)` | 同 迂回 |
+| `running(rebase_fix,-,rebase_fix)` | 解決サイクル (背景の載せ直しが衝突した要求を消費した run) |
+| `running(rebase_fix,-,finalize)` | 解決サイクルの finalize |
 
-フェーズ列は gate ごとに 1 本で、`phase-pass` が通せるのは**この列の隣接ペアだけ**
-(飛び越し・逆行・自己辺・gate 違いの辺・`finalize`/`pr_fix`/`rebase_fix` への出入りは
-`conflict`。それらへの遷移は `finalize-start` / `fix-start` / `rebase-start` が担う):
+### 領域 A のノードとサブ軸
 
-| gate | フェーズ列 |
+`artifact.state` が主ノードで、`open` のときだけ `follow` (追従の子オブジェクト) を持つ。
+follow はさらに 3 つのサブ軸を持ち、追従対象かどうかはこの座標から導出される
+(`attention == auto` ∧ `fix:null` ∧ `rebase:quiet` のときだけ追従する)。
+
+| 座標 | 意味 |
 |---|---|
-| `full` | `research → plan → implement → report` |
-| `light` | `research+plan → implement → report` |
+| `none` | 共有された成果物がまだ無い |
+| `open` | PR / ブランチが開いている。`follow` を持ちうる |
+| `merged` | マージ済み。`follow` は持たない。出口は `retire` だけ |
+| `withdrawn` | PR が未マージで閉じられた。`asked` / `note` を持つ |
+| `auto` | 機械に委ねている (attention 軸) |
+| `human(fix_limit)` | 押し直しの上限に達して人待ち |
+| `human(errors)` | 観測エラーが上限に達して人待ち |
+| `human(manual)` | 人が明示的に止めた |
+| `fix:null` | 修正要求が無い |
+| `fix:pending` | 修正要求が未消費 |
+| `fix:taken` | 修正要求を run が消費済み |
+| `rebase:quiet` | 載せ直しガードの控えだけ (記録なしも同じ座標) |
+| `rebase:queued` | 解決サイクル行きが宣言され、未消費 |
+| `rebase:taken` | 解決サイクル run が消費済み |
 
-queue エントリを対象にする verb の (from ノード → to ノード)。`in_progress/*` は
-in_progress の全フェーズノードを指す。to の「変更なし」はノードを動かさない verb、
-「分岐」は引数・状態で行き先が分かれる verb、「削除」は queue からエントリが消える verb:
+### 領域 P の from グループ
 
-| verb | from | to |
-|---|---|---|
-| `approve` | (新規追加) | `approved` |
-| `claim` | `approved` | `in_progress/research` |
-| `set-gate` | `in_progress/research` | `in_progress/research+plan` |
-| `set-worktree` | `in_progress/*` | (変更なし) |
-| `set-executor` | `in_progress/*` | (変更なし) |
-| `touch-executor` | `in_progress/*` | (変更なし) |
-| `set-takeover` | `in_progress/*` | (変更なし) |
-| `phase-pass` | `in_progress/research`, `in_progress/plan`, `in_progress/implement`, `in_progress/research+plan` | (分岐) |
-| `phase-fail` | `in_progress/research`, `in_progress/plan`, `in_progress/implement`, `in_progress/report`, `in_progress/research+plan`, `in_progress/pr_fix`, `in_progress/rebase_fix` | (変更なし) |
-| `block` | `in_progress/*` | `blocked` |
-| `dequeue` | `in_progress/*` | (削除) |
-| `finalize-start` | `in_progress/report`, `in_progress/pr_fix`, `in_progress/rebase_fix` | `in_progress/finalize` |
-| `in-review` | `in_progress/finalize` | `in_review` |
-| `watch-init` | `in_review` | (変更なし) |
-| `watch-set` | `in_review` | (変更なし) |
-| `fix-pending` | `in_review` | (変更なし) |
-| `fix-start` | `in_review` | (分岐) |
-| `fix-done` | `in_progress/finalize` | (変更なし) |
-| `review-only` | `in_review` | (変更なし) |
-| `answered-set` | `in_review` | (変更なし) |
-| `rebase-record` | `in_review` | (変更なし) |
-| `rebase-resolve-pending` | `in_review` | (変更なし) |
-| `rebase-start` | `in_review`, `in_progress/finalize` | `in_progress/rebase_fix` |
-| `rebase-done` | `in_review` | (変更なし) |
-| `rebase-give-up` | `in_progress/rebase_fix` | `in_review` |
-| `recover-done` | `in_review` | `done` |
-| `withdraw` | `in_review` | (変更なし) |
-| `withdraw-remove` | `in_review` | (削除) |
-| `withdraw-asked` | `in_review` | (変更なし) |
-| `restore` | `in_review`, `done`, `blocked` | `approved` |
+遷移表の from 列で使う略号。構成ノードはここが唯一の定義である。
 
-この表の from に無いノードから呼ぶと `conflict` になる。from にあっても、他の軸
-(下記 B / B') や verb 固有の補助前提 (`fix_pending` など。下記 verb 一覧) を満たさなければ
-同じく `conflict`。書き込み後には全 verb 共通で「到達不能ノードを書かない」「`review.watch`
-は `review.ref` なしに存在しない」の不変条件が検査され、違反は `schema` で拒否される。
-
-### 機械 B (review.watch)
-
-watch の軸のノードは 3 つ:
-
-| ノード | 意味 |
+| グループ | 構成ノード |
 |---|---|
-| `absent` | `review.watch` が無い (追従対象になったことがない、または新周回前) |
-| `watching` | 追従中 (watch プロセスと観測がこのタスクを見る) |
-| `stopped` | 停止 (追従上限・エラー 3 連続・取り下げ・回収・静止。人が戻すまで再開しない) |
+| `P_RUNNING` | `running(initial,full,research)` `running(initial,full,plan)` `running(initial,full,implement)` `running(initial,full,report)` `running(initial,full,finalize)` `running(initial,full,rebase_fix)` `running(initial,light,research+plan)` `running(initial,light,implement)` `running(initial,light,report)` `running(initial,light,finalize)` `running(initial,light,rebase_fix)` `running(pr_fix,-,pr_fix)` `running(pr_fix,-,finalize)` `running(pr_fix,-,rebase_fix)` `running(rebase_fix,-,rebase_fix)` `running(rebase_fix,-,finalize)` |
+| `P_VERIFIED` | `running(initial,full,research)` `running(initial,full,plan)` `running(initial,full,implement)` `running(initial,full,report)` `running(initial,full,rebase_fix)` `running(initial,light,research+plan)` `running(initial,light,implement)` `running(initial,light,report)` `running(initial,light,rebase_fix)` `running(pr_fix,-,pr_fix)` `running(pr_fix,-,rebase_fix)` `running(rebase_fix,-,rebase_fix)` |
+| `P_FINALIZE` | `running(initial,full,finalize)` `running(initial,light,finalize)` `running(pr_fix,-,finalize)` `running(rebase_fix,-,finalize)` |
+| `P_DETOUR` | `running(initial,full,rebase_fix)` `running(initial,light,rebase_fix)` `running(pr_fix,-,rebase_fix)` |
+| `P_CYCLE_REBASE` | `running(rebase_fix,-,rebase_fix)` |
 
-verb ごとの watch の from→to。**この表に無い verb は watch に一切触れない**
-(untouched — 書き換えはフレームテストが禁じ、前提としては任意のノードを受ける)。
-to の「変えない」は内部フィールドは書くが軸は動かさない、「静止」は present なら
-`stopped`・`absent` なら `absent`、「分岐」はフラグ・状態で行き先が分かれる:
+### 遷移表
 
-| verb | watch from | watch to |
+`P.to` / `A.to` の標語の意味: `unchanged` = 座標は動かないがフィールドは書きうる /
+`untouched` = そのオブジェクトを 1 バイトも変えない / `dynamic` = 引数と現在値から分岐 /
+`removed` = queue から外れる。領域 A の from (どのサブ軸から発火できるか) は各 verb 節の
+「前提」に書く — サブ軸の積は 23 組あり表に展開すると読めなくなるため、ここでは to だけを
+機械照合する (from の網羅は `state-transitions-v2.test.ts` の行列テストが持つ)。
+
+| verb | P.from | P.to | A.to |
+|---|---|---|---|
+| `approve` | — | `queued` | `untouched` |
+| `claim` | `queued` | `running(initial,full,research)` | `cycle-reset` |
+| `set-gate` | `running(initial,full,research)` | `running(initial,light,research+plan)` | `untouched` |
+| `advance` | `P_VERIFIED` | `dynamic` | `untouched` |
+| `phase-fail` | `P_VERIFIED` | `unchanged` | `untouched` |
+| `block` | `P_RUNNING` | `blocked` | `untouched` |
+| `dequeue` | `P_RUNNING` | `removed` | `untouched` |
+| `restore` | `resting` `blocked` | `queued` | `unchanged` |
+| `retire` | `resting` | `removed` | `untouched` |
+| `ship` | `P_FINALIZE` | `resting` | `dynamic` |
+| `merged` | `resting` | `unchanged` | `merged` |
+| `withdraw` | `resting` | `unchanged` | `withdrawn(asked=false)` |
+| `withdraw-asked` | `resting` | `unchanged` | `withdrawn(asked=true)` |
+| `withdraw-remove` | `resting` | `removed` | `untouched` |
+| `fix-request` | `resting` | `unchanged` | `fix-pending` |
+| `rebase-request` | `resting` | `unchanged` | `dynamic` |
+| `rebase-applied` | `resting` | `unchanged` | `rebase-quiet` |
+| `fix-start` | `resting` | `dynamic` | `dynamic` |
+| `rebase-start` | `P_FINALIZE` `resting` | `dynamic` | `rebase-taken` / `untouched` |
+| `rebase-give-up` | `P_CYCLE_REBASE` | `resting` | `rebase-quiet` |
+| `rebase-forgo` | `P_DETOUR` | `dynamic` | `rebase-quiet` |
+| `probe-run` | `resting` | `unchanged` | `unchanged` |
+| `probe-exit` | `resting` | `unchanged` | `unchanged` |
+| `release` | `resting` | `unchanged` | `unchanged` |
+| `observe` | `resting` | `unchanged` | `dynamic` |
+| `attention-set` | `resting` | `unchanged` | `dynamic` |
+| `review-only` | `resting` | `unchanged` | `unchanged` |
+| `answered-set` | `resting` | `unchanged` | `unchanged` |
+| `set-worktree` | `P_RUNNING` | `unchanged` | `untouched` |
+| `set-executor` | `P_RUNNING` | `unchanged` | `untouched` |
+| `touch-executor` | `P_RUNNING` | `unchanged` | `untouched` |
+| `set-takeover` | `P_RUNNING` | `unchanged` | `untouched` |
+
+### フェーズ列と advance の辺
+
+検証フェーズの列は gate ごとに固定で、full は research → plan → implement → report、
+light は research+plan → implement → report。どちらもその後 `finalize` が続く。
+`advance` が通せるのは下表の隣接辺だけで、飛び越し・逆行・列違いは `conflict` になる。
+末尾の `rebase_fix → finalize` は迂回 (2.4 節) からの復帰辺である。
+
+| from | to | 列 (kind/gate) |
 |---|---|---|
-| `watch-init` | (任意) | `watching` |
-| `watch-set` | `watching`, `stopped` | (分岐) |
-| `fix-pending` | `watching`, `stopped` | (変えない) |
-| `fix-start` | `watching` | (分岐) |
-| `fix-done` | `watching`, `stopped` | (変えない) |
-| `review-only` | `watching`, `stopped` | (変えない) |
-| `answered-set` | `watching`, `stopped` | (変えない) |
-| `block` | (任意) | (静止) |
-| `recover-done` | (任意) | (静止) |
-| `restore` | (任意) | (静止) |
-
-### 機械 B' (review.rebase)
-
-rebase の軸のノードは 3 つ:
-
-| ノード | 意味 |
-|---|---|
-| `absent` | `review.rebase` が無い (載せ直しの控えが無い通常状態) |
-| `recorded` | 控えのみ (`rebase-record` が書いた blocked_onto / トリアージ結果) |
-| `pending` | `resolve_pending` が真 (解決サイクルの着手待ち) |
-
-verb ごとの rebase の from→to。**この表に無い verb は rebase に一切触れない**。
-`rebase-start` は機械 A の入口で前提が変わるため 2 行に分ける。to の「確保」は
-無ければ `recorded` を作る (有れば軸は不変)、「解除」は有れば `resolve_pending` を
-落として `recorded` に (無ければ `absent` のまま):
-
-| verb | rebase from | rebase to |
-|---|---|---|
-| `rebase-record` | (任意) | (確保) |
-| `rebase-resolve-pending` | `recorded`, `pending` | `pending` |
-| `rebase-start` (`in_review` から) | `pending` | (解除) |
-| `rebase-start` (`in_progress/finalize` から) | (任意) | (解除) |
-| `rebase-done` | (任意) | `absent` |
-| `rebase-give-up` | `recorded`, `pending` | (解除) |
+| `research` | `plan` | `initial/full` |
+| `plan` | `implement` | `initial/full` |
+| `implement` | `report` | `initial/full` |
+| `report` | `finalize` | `initial/full` |
+| `rebase_fix` | `finalize` | `initial/full` |
+| `research+plan` | `implement` | `initial/light` |
+| `implement` | `report` | `initial/light` |
+| `report` | `finalize` | `initial/light` |
+| `rebase_fix` | `finalize` | `initial/light` |
+| `pr_fix` | `finalize` | `pr_fix` |
+| `rebase_fix` | `finalize` | `pr_fix` |
+| `rebase_fix` | `finalize` | `rebase_fix` |
 
 ## verb 一覧
+
+45 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
+
+- **遷移 32** — `VERB_SPEC` のキー。上の遷移表に載る。
+- **帳簿 13** — `state-ledger-v2.ts` の `LEDGER_VERBS`。queue エントリの座標を持たない。
+
+### 帳簿系
 
 ### `init`
 
 ```
-state.ts init --state-dir <dir> --tracker <s> --source <s> --git-common-dir <dir> \
+state.ts init --state-dir <dir> --tracker <t> --source <s> --git-common-dir <gcd> \
   [--lock-retry-ms <n>] [--lock-max-retries <n>]
 ```
 
-`.task-pipeline/` (state dir) と `state.json` を作り、`<git common dir>/info/exclude` に
-`/<state dir のベース名>/` (通常 `/.task-pipeline/`) を未記載のときだけ追記する。追跡下の
-`.gitignore` には一切触れない。
+前提: なし (state dir を作る)。
+効果: `<gcd>/info/exclude` に `/<state dir 名>/` を冪等に追記し、state.json を次の 3 分岐で扱う。
 
-- state.json が既に無ければ新規作成 (`schema_version: 1`、他は空)。
-- 既に有れば `checkState` で妥当性を確認するだけ (invalid なら `schema` で失敗)。
-  **`--tracker`/`--source` の値では上書きしない。** `schema_version` が無ければ末尾に付与し、
-  既に有ればどんな値でも変更しない。
-- 成功: `{"ok": true, "created": <bool>, "state_dir": "<絶対パス>"}`
-  (`created` は新規作成のときだけ `true`)。
+- 無い → v2 の空 state を作る (`schema_version: 2`, `queue: []`, `completed: []`)。
+- `schema_version` が 2 → **何も書かない** (バイト単位の no-op)。
+- `schema_version` が 1、またはキーごと無い → `migrateV1toV2` を**一度だけ**適用する
+  (設計3.2節)。移行後は 2 になるので、次の `init` は no-op 分岐に落ちる。
+- それ以外 (3 以上・非数値) → `schema` で失敗し、ファイルは不変。
+
+成功: `{"ok": true, "created": <bool>, "migrated": <bool>, "state_dir": "<abs>"}`。
 
 ### `get`
 
@@ -217,9 +219,9 @@ state.ts init --state-dir <dir> --tracker <s> --source <s> --git-common-dir <dir
 state.ts get --state-dir <dir>
 ```
 
-state.json を読み `JSON.parse` するだけ (**スキーマ検証はしない**)。成功時、stdout は
-parse した state オブジェクトそのもの (他 verb のような `{"ok":true,...}` の包みは無い)。
-無ければ `missing`。空ファイル・構文的に壊れた JSON は `schema`。
+前提: state.json が存在する (`missing`)。
+効果: 無し (読み取り専用)。**スキーマ検証も行わない** — 壊れた state を人が読むための入口。
+成功: state.json の内容そのもの。
 
 ### `validate`
 
@@ -227,625 +229,509 @@ parse した state オブジェクトそのもの (他 verb のような `{"ok":
 state.ts validate --state-dir <dir>
 ```
 
-`get` と同じ読み・parse をした上で `checkState` を呼ぶ。invalid なら `schema`
-(message は `<path>: <message>`)。valid なら `{"ok": true}`。
+前提: state.json が存在する (`missing`)。
+効果: 無し。`checkStateV2` を掛け、違反なら `schema`。
+成功: `{"ok": true}`。
 
 ### `session-touch`
 
 ```
-state.ts session-touch --state-dir <dir> --id <id> [--cleanup-stale-min <n=1440>]
+state.ts session-touch --state-dir <dir> --id <session id> [--cleanup-stale-min <n>]
 ```
 
-`<state dir>/sessions/<id>` を作成 (無ければ) または mtime を今に更新 (有れば)、続けて同じ
-ディレクトリ内の `now - mtime > cleanup-stale-min 分` (strict) のファイルを削除する
-(自分自身は対象外)。`--id` は空文字・`/` を含む・`.`・`..` のいずれでもないこと (usage)。
-成功: `{"ok": true, "id": "<id>", "cleaned": ["<削除したid>", ...]}`。
+前提: なし。`--id` は空 / `.` / `..` / `/` を含むものを `usage` で弾く。
+効果: `<dir>/sessions/<id>` を作成 (または mtime を現在時刻に更新) し、既定 1440 分**より**
+古い他の session ファイルを削除する。lock は取らない。
+成功: `{"ok": true, "id": "<id>", "cleaned": ["<id>", ...]}`。
 
 ### `sessions-alive`
 
 ```
-state.ts sessions-alive --state-dir <dir> [--alive-max-min <n=90>]
+state.ts sessions-alive --state-dir <dir> [--alive-max-min <n>]
 ```
 
-`<state dir>/sessions/` 配下で `now - mtime < alive-max-min 分` (strict) のファイル名一覧を
-返す。`sessions/` が無ければエラーにせず空配列。成功: `{"ok": true, "alive": ["<id>", ...]}`。
+前提: なし (sessions ディレクトリが無ければ空配列)。
+効果: 無し (読み取り専用、lock 無し)。既定 90 分**未満**の mtime を持つものを生存とみなす。
+成功: `{"ok": true, "alive": ["<id>", ...]}`。
 
 ### `history-append`
 
 ```
-state.ts history-append --state-dir <dir> --line <text> \
+state.ts history-append --state-dir <dir> --line <s> \
   [--lock-retry-ms <n>] [--lock-max-retries <n>]
 ```
 
-lock 取得 → 読み直し → `checkState` → `history` 配列へ `--line` の値を追記
-(空文字列 `""` も許可される値) → `updated_at` を今に更新 → `schema_version` が無ければ付与 →
-原子的書き込み → lock 解放。state.json が無ければ `missing`。invalid なら `schema`。
+前提: state.json が存在する (`missing`)。
+効果: `history` に 1 行追加。空文字も有効な値。
 成功: `{"ok": true, "history_length": <n>}`。
-
-以下、`state-cli-verbs` タスクで追加し、その後 `answered-set` (gh-6) を加えた 37 verb。**すべて lock を使う書き込み系**で、
-共通の流れ (lock取得 → 読み直し → `checkState` → 前提検査 → フィールド書き換え →
-`updated_at`/`schema_version` 正規化 → 事後スキーマ検証 → 原子的書き込み → lock 解放) は
-共通なので、以下では verb ごとの**前提**と**効果**だけを記す。前提を満たさない場合は
-`conflict` (対象は存在する) または `missing` (`--id` の対象が存在しない) で失敗し、
-`state.json` は不変。
-
-### タスク進行
-
-### `approve`
-
-```
-state.ts approve --state-dir <dir> --id <id> --title <s> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `id` が `queue` に存在しない (`conflict`)。
-効果: `queue` へ `{id, title, status:"approved", gate:"full", phase:null, attempts:0,
-session:null, executor:null, executor_last_event_at:null, takeover_at:null,
-blocked_reason:null, worktree:null, base:null, review:null}` を追加。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `claim`
-
-```
-state.ts claim --state-dir <dir> --id <id> --session <s> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: 対象の `status` が `approved` (`conflict`)。
-効果: `status→"in_progress", phase→"research", attempts→0, session→<s>`。
-成功: `{"ok": true, "id": "<id>", "status": "in_progress", "phase": "research", "session": "<s>"}`。
-
-### `set-gate`
-
-```
-state.ts set-gate --state-dir <dir> --id <id> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_progress" && phase=="research" && gate=="full"` (`conflict`)。
-効果: `gate→"light", phase→"research+plan"`。
-成功: `{"ok": true, "id": "<id>", "gate": "light", "phase": "research+plan"}`。
-
-### `set-worktree`
-
-```
-state.ts set-worktree --state-dir <dir> --id <id> --worktree <path> --base <branch> \
-  [--drop-withdrawn-branch true] [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_progress"` (`conflict`)。`--drop-withdrawn-branch true` を渡すときは
-さらに `withdrawn_branches` に同一 `id` のエントリが存在すること (`conflict`)。
-効果: `worktree→<path>, base→<branch>`。`--drop-withdrawn-branch` 指定時は同じ書き込みで
-`withdrawn_branches` から該当エントリを削除する。
-成功: `{"ok": true, "id": "<id>", "worktree": "<path>", "base": "<branch>"}`。
-
-### `set-executor`
-
-```
-state.ts set-executor --state-dir <dir> --id <id> --executor <agentId> --session <s> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_progress"` (`conflict`)。
-効果: `executor→<agentId>, executor_last_event_at→now, session→<s>` の3つを**同時**に書く
-(3つのうち1つだけを書けるフラグの組み合わせは存在しない — `--executor`/`--session` はどちらも
-必須フラグ)。
-成功: `{"ok": true, "id": "<id>", "executor": "<agentId>", "session": "<s>"}`。
-
-### `touch-executor`
-
-```
-state.ts touch-executor --state-dir <dir> --id <id> [--session <s>] \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_progress" && executor!=null` (`conflict`)。
-効果: `executor_last_event_at→now`。`--session` を渡し、かつ現在 `session==null` のときだけ
-`session→<s>` (現在 `session` が非null なら `--session` を渡しても上書きしない)。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `set-takeover`
-
-```
-state.ts set-takeover --state-dir <dir> --id <id> (--at <iso> | --clear true) \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-`--at`/`--clear` はどちらか一方だけを指定 (両方/どちらも無しは `usage`)。
-前提: `status=="in_progress"` (`conflict`)。
-効果: `takeover_at→<iso>` (`--at`) または `takeover_at→null` (`--clear`)。
-成功: `{"ok": true, "id": "<id>", "takeover_at": <iso または null>}`。
-
-### `phase-pass`
-
-```
-state.ts phase-pass --state-dir <dir> --id <id> --from <phase> --to <phase> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-`--from`/`--to` は `phase` の全トークンのいずれか (それ以外は `usage`)。
-前提: `status=="in_progress" && phase==<from>`、かつ `<from> → <to>` が**そのタスクの
-`gate` のフェーズ列 (上記「遷移表」) の隣接ペア**であること (どちらを欠いても `conflict`)。
-飛び越し・自己辺・gate 違いの辺は通らない。`finalize`/`pr_fix`/`rebase_fix` への遷移は
-この verb では行えない (`finalize-start`/`fix-start`/`rebase-start` を使う)。
-効果: `phase→<to>, attempts→0`。
-成功: `{"ok": true, "id": "<id>", "phase": "<to>"}`。
-
-### `phase-fail`
-
-```
-state.ts phase-fail --state-dir <dir> --id <id> --phase <phase> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-`--phase` は検証ゲートを持つフェーズ (フェーズ列の各フェーズと `pr_fix`/`rebase_fix`)
-のみ。`finalize` は検証対象外なので `usage`。
-前提: `status=="in_progress" && phase==<phase>` (`conflict`)。
-効果: `attempts+=1`。
-成功: `{"ok": true, "id": "<id>", "attempts": <n>}`。
-
-### `block`
-
-```
-state.ts block --state-dir <dir> --id <id> --reason <text> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_progress"` (`conflict`)。
-効果: `status→"blocked", blocked_reason→<text>, phase→null, session→null`。
-`review.watch` が存在すれば `watch.state→"stopped", watch.proc→null,
-watch.proc_started_at→null` も同じ書き込みで行う (`pr_fix`/`rebase_fix` の途中で
-blocked になる経路がある — blocked は追従対象外)。
-(`executor`/`executor_last_event_at`/`takeover_at` は変更しない — 復帰時は `restore` が
-初期化する。)
-成功: `{"ok": true, "id": "<id>", "status": "blocked"}`。
-
-### `dequeue`
-
-```
-state.ts dequeue --state-dir <dir> --id <id> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_progress"` (`conflict`)。着手直後に「二重着手が発覚した」等で巻き戻す専用。
-効果: `queue` から該当エントリを丸ごと削除。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `finalize-start`
-
-```
-state.ts finalize-start --state-dir <dir> --id <id> --from <report|pr_fix|rebase_fix> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-`--from` は `report`/`pr_fix`/`rebase_fix` のみ (それ以外は `usage`)。`rebase_fix` は
-解決サイクル (載せ直しの衝突解消) が PASS したときに、report/pr_fix と同じく finalize を
-経て in-review へ戻るために要る。
-前提: `status=="in_progress" && phase==<from>` (`conflict`)。
-効果: `phase→"finalize", attempts→0`。
-成功: `{"ok": true, "id": "<id>", "phase": "finalize"}`。
-
-### `in-review`
-
-```
-state.ts in-review --state-dir <dir> --id <id> \
-  [--commits <n> --ref <s> --branch <s> --base <s> [--tip <sha>]] \
-  [--clear-session true] \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-`--commits`/`--ref`/`--branch`/`--base` は「4つとも指定」か「4つとも省略」のどちらかのみ
-(片方だけの指定は `usage`)。`--commits 0` のとき `--tip` を渡すと `usage`。`--commits` が
-1以上のとき `--tip` を省くと `usage`。
-前提: `status=="in_progress" && phase=="finalize"` (`conflict`)。
-効果: `status→"in_review", phase→null, attempts→0`。上記4フラグを指定したときは
-`review` の**グループフィールドだけ**を `{ref, branch, tip: (commits>=1 ? tip : null),
-base}` に書き換え、**既存の `review.watch` / `review.rebase` / `review.withdrawn` /
-`review.withdrawn_asked` は保持する** (丸ごと置換しない — `pr_fix` 復帰は毎回ここを
-通るため、置換すると `watch.fix_attempts` の上限と `watch.handled` の再浮上ガードが
-周回のたびに無効化される)。4フラグ省略時は既存の `review` を一切変更しない。`--clear-session true`
-を渡すと、同じ書き込みで `session→null` も行う (レビュー待ちにしたタスクに `watch-init` を
-呼ばない経路 — `ref` が PR URL でないとき — で使う。揮発資源がもう無いタスクに `session` を
-残すと、そのセッションが他の作業で生きている間、他セッションからは「所有中」に見えてマージの
-回収が heartbeat 失効 [最大90分] まで遅れるため)。
-成功: `{"ok": true, "id": "<id>", "status": "in_review"}`。
-
-### 追従
-
-### `watch-init`
-
-```
-state.ts watch-init --state-dir <dir> --id <id> --session <s> \
-  [--preserve-handled true] [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_review" && review!=null && review.ref!=null` (`conflict`)。
-効果: `review.watch` を既定値一式で作る
-(`{state:"watching", proc:null, proc_started_at:null, sig:null, head:null, ci:null,
-handled:[], fix_pending:false, pending_ids:[], findings:null, fix_attempts:0, errors:0,
-checked_at:null, note:null, review_only:[], answered:[]}`)。`--preserve-handled true` の
-ときは、既存 `review.watch.handled` があればそれを引き継ぐ (無ければ空配列のまま)。
-**`--preserve-handled` の及ぶ範囲は `handled` だけ**で、`review_only`/`answered` は常に
-`[]` から、`fix_attempts` は常に 0 から始まる (`pending_ids`/`findings` と同じく
-watch-init は毎回まっさらにする)。この verb を呼ぶのは**新しいレビュー周回の開始時だけ**
-(最初のレビュー待ち・restore 後の再走) で、`pr_fix`/`rebase_fix` からの復帰では呼ばない —
-復帰は `in-review` が `watch` を保持するので、`fix_attempts`/`handled` が周回をまたいで
-生き残る (SKILL.md の復帰列)。加えて `session→<s>`。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `watch-set`
-
-```
-state.ts watch-set --state-dir <dir> --id <id> \
-  [--proc <id|null>] [--sig <s|null>] [--head <s|null>] \
-  [--ci <passing|failing|pending|none|null>] [--checked-at <iso|null>] \
-  [--errors-inc true] [--errors-reset true] [--note <s|null>] \
-  [--state <watching|stopped>] [--session <s|null>] \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-最低1つのフィールドフラグが必須 (すべて省略は `usage`)。`--errors-inc`/`--errors-reset` は
-排他 (両方指定は `usage`)。`--session <非null値>` と `--state stopped` の同時指定も `usage`
-(`--state stopped` が既に `session→null` を行うため、両立し得ない値を同時に渡す形になる。
-`T-V-watch-set-12` が固定)。`--session null` と `--state stopped` はどちらも null を意味する
-ので同時指定してもよく、exit 0 で `session→null, review.watch.state→"stopped"` になる
-(`T-V-watch-set-13` が受理側として固定)。
-前提: `status=="in_review" && review.watch!=null` (`conflict`)。in_review に限るのは、
-飛行中 (`pr_fix`/`rebase_fix`) のタスクの `session` を watch 側の機械から null に
-落とせないようにするため。approved / blocked / done の watch は `restore`/`block`/
-`recover-done` がそれぞれ静止させるので、この verb の対象にならない。
-効果: 指定したフィールドだけ書く。**不変条件**: `--proc` に非null値を渡すと
-`proc_started_at→now` も同時に、`--proc null` なら `proc_started_at→null` も同時に書く
-(`--proc` 省略時は `proc_started_at` を変更しない)。`--state stopped` を渡すと、トップレベル
-`session→null` も同じ書き込みで行う (`--state watching` または `--state` 省略では `--session`
-を渡さない限り `session` を変更しない)。`--session <s>` (nullable フラグ) を渡すと、
-トップレベル `session→<s>` (または `--session null` で `session→null`) を同じ書き込みで
-無条件に上書きする。非null値での用途は watch プロセスを別セッションが張り直すとき (前の所有
-セッションが死んでいても `session` は非null のままなので、`touch-executor` の条件付き代入では
-上書きできない)。null での用途は、揮発資源を手放すが `review.watch.state` は `watching` の
-まま変えたくないとき (`watch-init` 直後に修正サイクル手順0で拾い直す場合など。`--state stopped`
-は `watch.state` も変えてしまうので使えない)。`--errors-inc` は現在の `errors` に+1、
-`--errors-reset` は `errors→0`。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `fix-pending`
-
-```
-state.ts fix-pending --state-dir <dir> --id <id> --pending-ids <csv> --findings <path> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_review" && review.watch!=null` (`conflict`)。
-効果: `watch.fix_pending→true, watch.pending_ids→<csvを分割した配列>, watch.findings→<path>`。
-`--pending-ids ""` は空配列。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `fix-start`
-
-```
-state.ts fix-start --state-dir <dir> --id <id> --session <s> \
-  [--reset-attempts true] [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_review" && watch.fix_pending==true && watch.state=="watching"`
-(`conflict`)。
-効果 (lock内で計算): 現在の `fix_attempts` (`--reset-attempts true` なら0とみなす) に+1 した
-値を `newAttempts` とする。`newAttempts<=3` なら
-`status→"in_progress", phase→"pr_fix", attempts→0, session→<s>, watch.fix_pending→false,
-watch.fix_attempts→newAttempts` (`started:true`)。`newAttempts>3` なら
-`watch.fix_attempts→newAttempts, watch.state→"stopped", watch.note→"追従上限",
-session→null` (`started:false`、`status`/`phase` は変更しない)。**どちらも exit 0** —
-上限超過は「修正しない」という正常分岐であって前提違反ではない。上限で `stopped` に
-なった後は前提 (`watch.state=="watching"`) が偽になるため、再度呼んでも `conflict` で
-加算されない (ラッチ)。ユーザーが `watch.state` を `watching` に戻したときだけ
-`--reset-attempts true` 付きで再開できる。
-成功: `{"ok": true, "id": "<id>", "started": <bool>, "fix_attempts": <n>}`。
-
-### `fix-done`
-
-```
-state.ts fix-done --state-dir <dir> --id <id> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_progress" && phase=="finalize" && review.watch!=null` (`conflict`)。
-効果: `watch.handled` に `watch.pending_ids` を重複無しで合流、`watch.pending_ids→[]`,
-`watch.findings→null` を単一の原子的書き込みで行う (分割不能 — kill しても実行前か実行後の
-どちらかの state しか観測されない)。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `review-only`
-
-```
-state.ts review-only --state-dir <dir> --id <id> --items-json <json> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-`--items-json` は `[{"id": "<s>", "updated_at": "<s>"|null}, ...]` 形の JSON 配列。各要素は
-`id` (文字列) と `updated_at` (文字列または `null`) の両方を必須で持つ。JSON として parse
-できない・配列でない・要素が上記の形を満たさない、のいずれも `usage`。
-前提: `status=="in_review" && review.watch!=null` (`conflict`)。
-効果: `watch.review_only` に `--items-json` の各要素を id ごとに upsert する (**`watch.handled`
-は変更しない** — `watch.handled` は `fix-done` を経由して実際に修正したものだけを表す)。既存の
-id と `updated_at` が完全一致していれば版は進んでいないとみなす。id が新規、または
-`updated_at` が前回の記録と異なる (前回・今回のいずれかが `null` の場合を含む — 版が比較でき
-ないので常に「進んだ」扱い) なら、その id を返り値の `new_or_changed` に含める。
-成功: `{"ok": true, "id": "<id>", "new_or_changed": ["<id>", ...], "review_only_total": <n>}`
-(`review_only_total` はこの呼び出し後の `watch.review_only` の件数)。
-
-### `answered-set`
-
-```
-state.ts answered-set --state-dir <dir> --id <id> --items-json <json> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-`review-only` と同じ入出力契約を、対象フィールドだけ `watch.answered` に変えて持つ (gh-6: レビュ
-アーの質問に回答・投稿したことを記録し、二重投稿を防ぐ)。`--items-json` の形・バリデーション
-(JSON として parse できない・配列でない・要素が `{id, updated_at}` の形を満たさない、のいずれも
-`usage`) と dedup 規則 (id と `updated_at` が完全一致していれば版は進んでいないとみなす。id が
-新規、または `updated_at` が前回の記録と異なる [前回・今回のいずれかが `null` の場合を含む] な
-ら `new_or_changed` に含める) は `review-only` と同一。
-前提: `status=="in_review" && review.watch!=null` (`conflict`)。
-効果: `watch.answered` に `--items-json` の各要素を id ごとに upsert する (**`watch.handled` にも
-`watch.review_only` にも触れない** — 「質問に回答・投稿済み」は「pr_fix でコードを直した」
-[`handled`] とも「人の判断待ちに回した」[`review_only`] とも別の語彙であるため)。
-成功: `{"ok": true, "id": "<id>", "new_or_changed": ["<id>", ...], "answered_total": <n>}`
-(`answered_total` はこの呼び出し後の `watch.answered` の件数)。
-
-### 載せ直し
-
-### `rebase-record`
-
-```
-state.ts rebase-record --state-dir <dir> --id <id> \
-  --blocked-onto <sha> --reason <dirty|diverged|conflict|push> \
-  [--kind <superseded|overlap|adjacent|structural|other>] [--cause <text>] [--report <path>] \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_review" && review!=null` (`conflict`)。
-効果: `review.rebase` が未存在なら新規作成 (`at→now`)。既存なら `at` は既存値のまま保持し、
-`blocked_onto`/`reason`/指定された `kind`/`cause`/`report` だけ上書きする (2段階の呼び出しで
-トリアージ結果を後から足せる)。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `rebase-resolve-pending`
-
-```
-state.ts rebase-resolve-pending --state-dir <dir> --id <id> --from-tip <sha> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_review" && review.rebase!=null` (`conflict`)。
-効果: `review.rebase.resolve_pending→true, review.rebase.from_tip→<sha>`。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `rebase-start`
-
-```
-state.ts rebase-start --state-dir <dir> --id <id> --session <s> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-`rebase_fix` への入口は 2 つあり、この verb が両方を受ける (遷移表の from):
-
-- **`in_review` から** (背景の載せ直しが衝突し、`rebase-record`/`rebase-resolve-pending`
-  で控えた復帰): 前提は `review.rebase!=null && review.rebase.resolve_pending==true`
-  (`conflict`)。
-- **`in_progress/finalize` から** (executor が push 直前の載せ直しで `REBASE-CONFLICT`
-  停止した直接進入): `review` を一切見ない (最初の PR を出す直前なら `review` は null の
-  まま)。衝突の控えとトリアージ結果は state に置かず、オーケストレーターがイテレーション
-  内で持ち回る (SKILL.md の「解決サイクル」の「finalize から入る経路」)。
-
-効果: `status→"in_progress", phase→"rebase_fix", attempts→0, session→<s>`。
-`review.rebase` が存在すれば `resolve_pending→false` も同じ書き込みで行う。
-成功: `{"ok": true, "id": "<id>", "status": "in_progress", "phase": "rebase_fix"}`。
-(`T-V-rebase-start-3`/`T-V-rebase-start-4` が finalize 入口を、`T-V-phase-pass-4` が
-`phase-pass` でこの遷移ができないことを固定。)
-
-### `rebase-done`
-
-```
-state.ts rebase-done --state-dir <dir> --id <id> --tip <sha> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-`--tip` は必須 (省略は `usage`)。
-前提: `status=="in_review" && review!=null` (`conflict`)。in_review に限るのは、飛行中
-(`in_progress/rebase_fix`) に `review.rebase` を消せると `rebase-give-up` の前提が永久に
-満たせなくなるため。`rebase_fix` からの復帰列では、`in-review` で `in_review` に戻した
-**後**にこの verb を呼ぶ (SKILL.md のレビュー待ち処理)。**`review.rebase` の存在は要求
-しない** — 背景の載せ直しが初回の試行で衝突なく成功した最頻パスには `rebase-record` の
-控えが無く、それでも tip の更新 (マージ回収の鍵) はこの verb にしか無い。
-効果: `review.tip→<sha>`。`review.rebase` プロパティが存在すれば削除する (`null` では
-なく削除 — スキーマの `reviewRebase` は type:"object" のみで null を許さないため。
-無ければ tip の更新だけを行う)。
-成功: `{"ok": true, "id": "<id>", "tip": "<sha>"}`。
-
-### `rebase-give-up`
-
-```
-state.ts rebase-give-up --state-dir <dir> --id <id> --blocked-onto <sha> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_progress" && phase=="rebase_fix" && review!=null && review.rebase!=null`
-(`conflict`)。
-効果: `status→"in_review", phase→null, attempts→0, session→null,
-review.rebase.reason→"conflict", review.rebase.blocked_onto→<sha>,
-review.rebase.resolve_pending→false` (`kind`/`cause`/`report`/`from_tip` は既存値を保持)。
-成功: `{"ok": true, "id": "<id>", "status": "in_review"}`。
-
-### 回収と候補
-
-### `recover-done`
-
-```
-state.ts recover-done --state-dir <dir> --id <id> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_review" && review!=null && review.tip!=null` (`conflict`)。
-効果: `status→"done", session→null`。`review.watch` が存在すれば
-`watch.state→"stopped", watch.proc→null, watch.proc_started_at→null` も同じ書き込みで
-行う (done は追従対象外 — `watching` のまま残すと停止経路が「自分の担当」として数え
-続ける。存在しなければ何もしない — `finish=commit` のタスクは `review.watch` を持たない)。
-成功: `{"ok": true, "id": "<id>", "status": "done"}`。
-
-### `withdraw`
-
-```
-state.ts withdraw --state-dir <dir> --id <id> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_review" && review!=null` (`conflict`)。
-効果: `review.withdrawn→true`。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `withdraw-remove`
-
-```
-state.ts withdraw-remove --state-dir <dir> --id <id> --reason <text> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_review" && review!=null && review.withdrawn==true && worktree!=null &&
-base!=null` (`conflict`)。
-効果: `branch="task-pipeline/<id>"` を導出し、`withdrawn_branches` へ
-`{id, branch, base, worktree, at:now, reason}` を追加**かつ** `queue` から該当エントリを
-削除する、単一の原子的書き込み。
-成功: `{"ok": true, "id": "<id>"}`。
-
-### `withdraw-asked`
-
-```
-state.ts withdraw-asked --state-dir <dir> --id <id> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
-```
-
-前提: `status=="in_review" && review!=null && review.withdrawn==true` (`conflict`)。
-効果: `review.withdrawn_asked→true`。
-成功: `{"ok": true, "id": "<id>"}`。
 
 ### `candidates-set`
 
 ```
-state.ts candidates-set --state-dir <dir> --candidates-json <json> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
+state.ts candidates-set --state-dir <dir> --candidates-json <json> [lock flags]
 ```
 
-`--candidates-json` は候補オブジェクト (最低 `id`/`title` の string を持つ) の JSON 配列
-文字列。形状が違えば `usage`。`--id` による対象指定は無い (トップレベル配列の丸ごと置換)。
-効果: `candidates` を丸ごと置換する。
+前提: `--candidates-json` が JSON 配列で、各要素が文字列の `id` と `title` を持つ (`usage`)。
+効果: `candidates` を置換。
 成功: `{"ok": true, "count": <n>}`。
 
 ### `candidates-drop`
 
 ```
-state.ts candidates-drop --state-dir <dir> --id <id> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
+state.ts candidates-drop --state-dir <dir> --id <id> [lock flags]
 ```
 
 前提: `id` が `candidates` に存在する (`missing`)。
-効果: `candidates` から該当エントリを削除。
+効果: 該当要素を除去。
 成功: `{"ok": true, "id": "<id>"}`。
 
 ### `promoted-add`
 
 ```
-state.ts promoted-add --state-dir <dir> --ids <csv> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
+state.ts promoted-add --state-dir <dir> --ids <csv> [lock flags]
 ```
 
-前提なし。
-効果: `promoted` へ `--ids` を重複無しで合流。
+前提: なし。
+効果: `promoted` に和集合で追加。
 成功: `{"ok": true, "ids": ["<id>", ...]}`。
 
 ### `promoted-drop`
 
 ```
-state.ts promoted-drop --state-dir <dir> --id <id> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
+state.ts promoted-drop --state-dir <dir> --id <id> [lock flags]
 ```
 
 前提: `id` が `promoted` に存在する (`missing`)。
-効果: `promoted` から該当id削除。
+効果: 該当要素を除去。
 成功: `{"ok": true, "id": "<id>"}`。
 
 ### `relisted-add`
 
 ```
-state.ts relisted-add --state-dir <dir> --id <id> --seen-at <iso> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
+state.ts relisted-add --state-dir <dir> --id <id> --seen-at <iso> [lock flags]
 ```
 
-前提: `id` が `relisted` に存在しない (`conflict`)。
-効果: `relisted` へ `{id, seen_at}` を追加。
+前提: `id` が `relisted` にまだ無い (`conflict`)。
+効果: `{id, seen_at}` を追加。
 成功: `{"ok": true, "id": "<id>"}`。
 
 ### `relisted-drop`
 
 ```
-state.ts relisted-drop --state-dir <dir> --id <id> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
+state.ts relisted-drop --state-dir <dir> --id <id> [lock flags]
 ```
 
 前提: `id` が `relisted` に存在する (`missing`)。
-効果: `relisted` から該当id削除。
+効果: 該当要素を除去。
+成功: `{"ok": true, "id": "<id>"}`。
+
+### `stalled-set`
+
+```
+state.ts stalled-set --state-dir <dir> --value depleted|max_open|null [--bump true] [lock flags]
+```
+
+前提: なし。
+効果: `stalled` を設定 (または `null` で解除)。`stalled_since` は「今まで null だった」か
+`--bump` のときだけ現在時刻に更新する。
+成功: `{"ok": true, "value": "<value>"|null}`。
+
+### 進行系
+
+### `approve`
+
+```
+state.ts approve --state-dir <dir> --id <id> --title <s> [lock flags]
+```
+
+前提: `id` が `queue` に存在しない (`conflict`)。
+効果: `queued × none` のエントリを追加する。
+成功: `{"ok": true, "id": "<id>"}`。
+
+### `claim`
+
+```
+state.ts claim --state-dir <dir> --id <id> --session <s> [lock flags]
+```
+
+前提: P が `queued`。
+効果: `running(initial, full, research)` にし、`session` を立てる。**follow があれば周回リセット**
+(設計2.3): `attention → auto`、`asks` 両方 null、`ledger.fix_attempts → 0`、
+`review_only`/`answered → []`、`probe.sig → null`。`ledger.handled` は保持する。
+成功: `{"ok": true, "id": "<id>", "kind": "initial", "gate": "full", "phase": "research", "session": "<s>"}`。
+
+### `set-gate`
+
+```
+state.ts set-gate --state-dir <dir> --id <id> [lock flags]
+```
+
+前提: P が `running(initial,full,research)`。
+効果: `gate → light`、`phase → research+plan`、`attempts → 0`。
+成功: `{"ok": true, "id": "<id>", "kind": "initial", "gate": "light", "phase": "research+plan"}`。
+
+### `advance`
+
+```
+state.ts advance --state-dir <dir> --id <id> --from <phase> --to <phase> [lock flags]
+```
+
+前提: P が `P_VERIFIED` のいずれか、`run.phase == <from>`、`<from> → <to>` が現在の列の
+隣接辺 (上のフェーズ列表)。`--from`/`--to` は全フェーズ名 (finalize を含む) を受ける。
+効果: `phase → <to>`、`attempts → 0`。
+成功: `{"ok": true, "id": "<id>", "phase": "<to>"}`。
+
+### `phase-fail`
+
+```
+state.ts phase-fail --state-dir <dir> --id <id> --phase <phase> [lock flags]
+```
+
+前提: P が `P_VERIFIED` のいずれかで `run.phase == <phase>`。`--phase` は**検証ゲートを持つ
+フェーズだけ**を受ける (`finalize` は `usage`)。
+効果: `attempts` を 1 増やす (ノードは動かない)。
+成功: `{"ok": true, "id": "<id>", "attempts": <n>}`。
+
+### `block`
+
+```
+state.ts block --state-dir <dir> --id <id> --reason <s> [lock flags]
+```
+
+前提: P が `P_RUNNING` のいずれか。
+効果: `blocked` にし、`run → null`、`blocked_reason → <s>`、`session → null`。
+追従の静止処理は無い (blocked は定義から追従対象外)。
+成功: `{"ok": true, "id": "<id>", "progress": "blocked"}`。
+
+### `dequeue`
+
+```
+state.ts dequeue --state-dir <dir> --id <id> [lock flags]
+```
+
+前提: P が `P_RUNNING` のいずれか。
+効果: queue からエントリを除去。
 成功: `{"ok": true, "id": "<id>"}`。
 
 ### `restore`
 
 ```
-state.ts restore --state-dir <dir> --id <id> \
-  [--lock-retry-ms <n>] [--lock-max-retries <n>]
+state.ts restore --state-dir <dir> --id <id> [lock flags]
 ```
 
-前提: `id` が `relisted` に存在する (`missing`) **かつ** 対応する `queue` エントリの
-`status` が `in_review`/`blocked`/`done` のいずれか (`conflict`)。
-効果: `queue` エントリを `status→"approved", gate→"full", phase→null, attempts→0,
-session→null, executor→null, executor_last_event_at→null, takeover_at→null,
-blocked_reason→null` に (`worktree`/`base`/`review` は変更しない)。`gate` を初期値に
-戻すのは、`light` のまま `claim` すると `(in_progress/research, gate: light)` という
-どの verb でも進めないノードに着地するため — gate の正はトラッカー側の宣言で、
-再 claim 時の gate 判定 (SKILL.md タスク実行手順 1) が改めて復元する。ただし `review.watch` が存在すれば
-`watch.state→"stopped", watch.proc→null, watch.proc_started_at→null` にする (前回周回の
-watching / proc を抱えたまま approved に再入させない。`handled`/`fix_attempts` の値は残り、
-次の周回の `watch-init --preserve-handled` が仕切り直す)。同じ書き込みで `relisted` から
-該当エントリを削除。
-成功: `{"ok": true, "id": "<id>", "status": "approved"}`。
+前提: P が `resting` または `blocked`、A が `merged` **以外**、かつ `id` が `relisted` に居る
+(`missing`)。
+効果: `queued` に戻し、`run → null`、`blocked_reason → null`、`session → null`、
+`probe` のリースを外す。`relisted` から当該エントリを外す。周回データのリセットは次の
+`claim` が行う。
+成功: `{"ok": true, "id": "<id>", "progress": "queued"}`。
 
-### 全体
-
-### `stalled-set`
+### `retire`
 
 ```
-state.ts stalled-set --state-dir <dir> --value <depleted|max_open|null> \
-  [--bump true] [--lock-retry-ms <n>] [--lock-max-retries <n>]
+state.ts retire --state-dir <dir> --id <id> [lock flags]
 ```
 
-`--id` は無い (トップレベルフィールド)。
-効果: `--value null` は `stalled→null, stalled_since→null` を無条件に行う。`--value` が
-`depleted`/`max_open` のときは `stalled→<value>`。`stalled_since` は、現在 `stalled` が
-`null` から非nullへ変わるときだけ現在時刻に進む。すでに非nullが継続する場合 (種別が
-変わる場合を含む) は `--bump true` を渡したときだけ現在時刻に進み、無ければ不変。
-成功: `{"ok": true, "value": <"depleted"|"max_open"|null>}`。
+前提: P が `resting`、A が `merged`、`session` が null (揮発資源ゼロ)。
+効果: queue からエントリを外し、`completed` に `{id, done_at}` を控える。同じ書き込みで
+24 時間超の控えを掃除する (設計2.5)。
+成功: `{"ok": true, "id": "<id>", "completed": <n>}`。
+
+### 完了系
+
+### `ship`
+
+```
+state.ts ship --state-dir <dir> --id <id> --commits <n> \
+  [--ref <url> --branch <b> --tip <sha> --base <b>] [lock flags]
+```
+
+前提: P が `P_FINALIZE` のいずれか。`--commits >= 1` なら 4 つのグループフラグが**全部必要**、
+`--commits 0` なら**全部省略必須** (どちらも違反は `usage`)。
+効果 (設計2.2 — 復帰列を 1 イベントに畳んだもの): P → `resting`。`commits >= 1` なら
+A が `none`/`withdrawn` のとき open を新規作成 (ref が PR URL なら follow も新規)、
+既に `open` ならグループ欄だけ更新して follow は保持。`commits 0` なら A は不変。
+`asks.fix.taken` の ids は `ledger.handled` へ合流して ask を消し、`asks.rebase.taken` も消す。
+未消費の rebase-ask は `resolve → false` に降格。`probe.sig → null`。`session` は遷移後の
+artifact が follow を持つときだけ保持し、そうでなければ null。
+成功: `{"ok": true, "id": "<id>", "notify": "initial"|"update"|"none", "mark": <bool>, "fix_count": <n>}`
+— `notify` は通知テンプレートの選択、`mark` はトラッカーへ `mark <id> in_review` が要るか
+(`run.kind == initial` のときだけ真)。
+
+### `merged`
+
+```
+state.ts merged --state-dir <dir> --id <id> [lock flags]
+```
+
+前提: P が `resting`、A が `open` で `tip` が非 null。
+効果: A → `merged` (follow は破棄)、`session → null`。
+成功: `{"ok": true, "id": "<id>", "artifact": "merged"}`。
+
+### `withdraw`
+
+```
+state.ts withdraw --state-dir <dir> --id <id> [--note <s>] [lock flags]
+```
+
+前提: P が `resting`、A が `open`。
+効果: A → `withdrawn(asked=false)` (follow は破棄、`note` を控える)、`session → null`。
+成功: `{"ok": true, "id": "<id>", "artifact": "withdrawn"}`。
+
+### `withdraw-asked`
+
+```
+state.ts withdraw-asked --state-dir <dir> --id <id> [lock flags]
+```
+
+前提: P が `resting`、A が `withdrawn`。
+効果: `asked → true`。
+成功: `{"ok": true, "id": "<id>"}`。
+
+### `withdraw-remove`
+
+```
+state.ts withdraw-remove --state-dir <dir> --id <id> --reason <s> [lock flags]
+```
+
+前提: P が `resting`、A が `withdrawn`、`worktree`/`base` が非 null。
+効果: queue からエントリを外し、`withdrawn_branches` に控えを追加。
+成功: `{"ok": true, "id": "<id>"}`。
+
+### 要求系
+
+### `fix-request`
+
+```
+state.ts fix-request --state-dir <dir> --id <id> --ids <csv> --findings <path> [lock flags]
+```
+
+前提: P が `resting`、A が `open` で follow を持つ。
+効果: `asks.fix = {ids, findings, taken: false}`。`--ids` が空文字なら空配列 (CI 失敗だけで
+指摘 id が無い周回)。
+成功: `{"ok": true, "id": "<id>", "ids": [...]}`。
+
+### `rebase-request`
+
+```
+state.ts rebase-request --state-dir <dir> --id <id> --blocked-onto <sha> \
+  --reason dirty|diverged|conflict|push \
+  [--kind superseded|overlap|adjacent|structural|other] [--cause <s>] [--report <path>] \
+  [--resolve true] [--from-tip <sha>] [lock flags]
+```
+
+前提: P が `resting`、A が `open` で follow を持つ。
+効果: `asks.rebase` を upsert する。**省略したフラグは既存値を保つ** (`at` も初回の値を保つ)。
+`--resolve true` が解決サイクル行きの宣言 (座標が `rebase:queued` になる)。`taken` には触れない。
+成功: `{"ok": true, "id": "<id>", "resolve": <bool>|null}`。
+
+### `rebase-applied`
+
+```
+state.ts rebase-applied --state-dir <dir> --id <id> --tip <sha> [lock flags]
+```
+
+前提: P が `resting`、A が `open` で follow を持つ (rebase-ask は無くてもよい — 衝突なく
+成功した背景載せ直しには控えが無い)。
+効果: `tip` を更新し、`asks.rebase → null`、`probe.sig → null`。
+成功: `{"ok": true, "id": "<id>", "tip": "<sha>"}`。
+
+### 仕上げ開始系
+
+### `fix-start`
+
+```
+state.ts fix-start --state-dir <dir> --id <id> --session <s> [--reset-attempts true] [lock flags]
+```
+
+前提: P が `resting`、A が `open` ∧ `auto` ∧ `fix:pending`。
+効果: `ledger.fix_attempts` を 1 増やし、上限 3 以内なら `running(pr_fix,-,pr_fix)` にして
+ask を `taken` にし `session` を立てる。上限超なら **P は `resting` のまま**
+`attention → human(fix_limit)`、`session → null`、リース解除だけを行い、**ask には触れない**
+(pending のまま人の再開を待つ)。どちらの分岐でも `probe.proc → null`。
+成功: `{"ok": true, "id": "<id>", "started": <bool>, "fix_attempts": <n>}`。
+
+### `rebase-start`
+
+```
+state.ts rebase-start --state-dir <dir> --id <id> --session <s> [lock flags]
+```
+
+前提: 入口が 2 つある (設計2.4)。
+
+- (a) 解決サイクル: P が `resting`、A が `open` ∧ `auto` ∧ `rebase:queued`。
+- (b) 迂回: P が `P_FINALIZE` のいずれか (A には触れない)。
+
+効果: (a) は `running(rebase_fix,-,rebase_fix)` を作り ask を `taken` に、`session` を立て、
+リースを外す。(b) は **phase だけ**を `rebase_fix` に動かす (`kind`・`gate`・`asks` は不変) —
+来歴が保たれることが `ship` の `mark`/`notify` 導出の安定性の根拠である。
+成功: `{"ok": true, "id": "<id>", "kind": "<kind>", "gate": <gate>, "phase": "rebase_fix"}`。
+
+### `rebase-give-up`
+
+```
+state.ts rebase-give-up --state-dir <dir> --id <id> --blocked-onto <sha> [lock flags]
+```
+
+前提: P が `P_CYCLE_REBASE` (解決サイクル専用)。
+効果: `resting` へ戻し、rebase-ask を quiet のガード控えに戻す (`taken → false`,
+`resolve → false`, `reason → conflict`, `blocked_onto` 更新)、`session → null`。
+成功: `{"ok": true, "id": "<id>", "progress": "resting"}`。
+
+### `rebase-forgo`
+
+```
+state.ts rebase-forgo --state-dir <dir> --id <id> --blocked-onto <sha> [lock flags]
+```
+
+前提: P が `P_DETOUR` (迂回専用 — `kind != rebase_fix`)。
+効果: `phase → finalize` (旧基点のまま push させる)。rebase-ask にガードの控えを upsert する。
+成功: `{"ok": true, "id": "<id>", "kind": "<kind>", "gate": <gate>, "phase": "finalize"}`。
+
+### 追従系
+
+### `probe-run`
+
+```
+state.ts probe-run --state-dir <dir> --id <id> --proc <id> [--session <s>] [lock flags]
+```
+
+前提: P が `resting`、A が `open` ∧ `auto` ∧ `fix:null` ∧ `rebase:quiet`
+(= 1.3 節の追従対象の導出式そのもの)。
+効果: `probe.proc` と `probe.proc_started_at` を立てる。既存リースは上書きしてよい
+(死んだリースの張り替え)。`--session` があれば `session` も立てる。
+成功: `{"ok": true, "id": "<id>", "proc": "<id>"}`。
+
+### `probe-exit`
+
+```
+state.ts probe-exit --state-dir <dir> --id <id> [--sig <s>|null] [lock flags]
+```
+
+前提: P が `resting`、A が `open` で follow を持つ。
+効果: リースを外し (`proc`/`proc_started_at → null`)、`--sig` があれば観測済み署名を保存。
+成功: `{"ok": true, "id": "<id>"}`。
+
+### `release`
+
+```
+state.ts release --state-dir <dir> --id <id> [lock flags]
+```
+
+前提: P が `resting`。
+効果: `session → null`、リースを外す。resting のタスクの揮発資源を手放す明示 verb。
+成功: `{"ok": true, "id": "<id>"}`。
+
+### `observe`
+
+```
+state.ts observe --state-dir <dir> --id <id> \
+  [--head <sha>|null] [--ci passing|failing|pending|none|null] [--checked-at <iso>|null] \
+  [--errors-inc true|--errors-reset true] [--note <s>|null] [--sig-clear true] [lock flags]
+```
+
+前提: P が `resting`、A が `open` で follow を持つ。フィールドフラグが 1 つも無ければ `usage`。
+`--errors-inc` と `--errors-reset` は同時に渡せない (`usage`)。
+効果: 観測キャッシュを更新する。**`errors` が 3 に達したら同じ書き込みで
+`attention → human(errors)`、`session → null`、リース解除**を行う。
+成功: `{"ok": true, "id": "<id>", "errors": <n>, "latched": <bool>}`。
+
+### `attention-set`
+
+```
+state.ts attention-set --state-dir <dir> --id <id> (--auto true | --human fix_limit|errors|manual) [lock flags]
+```
+
+前提: P が `resting`、A が `open` で follow を持つ。`--auto` と `--human` は**ちょうど一方**
+(両方・どちらも無しは `usage`)。
+効果: `--human` は `attention → human(<reason>)` にし、`session → null` とリース解除も同じ
+書き込みで行う。`--auto` は人の再開なので `probe.errors` も 0 に戻す。
+成功: `{"ok": true, "id": "<id>", "attention": "auto"|"<reason>"}`。
+
+### `review-only`
+
+```
+state.ts review-only --state-dir <dir> --id <id> --items-json <json> [lock flags]
+```
+
+前提: P が `resting`、A が `open` で follow を持つ。`--items-json` は `{id, updated_at}` の
+JSON 配列 (形状違反は `usage`)。
+効果: `ledger.review_only` に upsert する (`handled`/`answered` には触れない)。
+成功: `{"ok": true, "id": "<id>", "new_or_changed": [...], "review_only_total": <n>}` —
+`new_or_changed` は「今回新規、または前回記録した `updated_at` から版が進んだ」id だけ。
+`updated_at` が null の id は比較のしようが無いので毎回含める。
+
+### `answered-set`
+
+```
+state.ts answered-set --state-dir <dir> --id <id> --items-json <json> [lock flags]
+```
+
+前提・入出力は `review-only` と同じ形。書き込み先が `ledger.answered` になる
+(「質問に回答・投稿済み」の語彙で、`handled`/`review_only` とは混ぜない)。
+成功: `{"ok": true, "id": "<id>", "new_or_changed": [...], "answered_total": <n>}`。
+
+### 実行帳簿
+
+### `set-worktree`
+
+```
+state.ts set-worktree --state-dir <dir> --id <id> --worktree <path> --base <b> \
+  [--drop-withdrawn-branch true] [lock flags]
+```
+
+前提: P が `P_RUNNING` のいずれか。`--drop-withdrawn-branch` を渡すときは
+`withdrawn_branches` に当該 id の控えがある (`conflict`)。
+効果: `worktree`/`base` を設定し、指示があれば控えを外す。
+成功: `{"ok": true, "id": "<id>", "worktree": "<path>", "base": "<b>"}`。
+
+### `set-executor`
+
+```
+state.ts set-executor --state-dir <dir> --id <id> --executor <s> --session <s> [lock flags]
+```
+
+前提: P が `P_RUNNING` のいずれか。
+効果: `run.executor` と `run.executor_last_event_at` を設定し、`session` を立てる。
+成功: `{"ok": true, "id": "<id>", "executor": "<s>", "session": "<s>"}`。
+
+### `touch-executor`
+
+```
+state.ts touch-executor --state-dir <dir> --id <id> [--session <s>] [lock flags]
+```
+
+前提: P が `P_RUNNING` のいずれかで `run.executor` が非 null (`conflict`)。
+効果: `run.executor_last_event_at` を現在時刻に。`--session` は `session` が null のときだけ
+立てる (他セッションの所有権は奪わない)。
+成功: `{"ok": true, "id": "<id>"}`。
+
+### `set-takeover`
+
+```
+state.ts set-takeover --state-dir <dir> --id <id> (--at <iso> | --clear true) [lock flags]
+```
+
+前提: P が `P_RUNNING` のいずれか。`--at` と `--clear` は**ちょうど一方** (`usage`)。
+効果: `run.takeover_at` を設定 / 解除。
+成功: `{"ok": true, "id": "<id>", "takeover_at": "<iso>"|null}`。
 
 ## lock (排他) の契約
 
-`<state dir>/lock` を `mkdir` で作る (既存なら `AlreadyExists`)。作成時刻が **10分より古い**
-ときだけ stale とみなし、`mv` (rename) で退避してから削除する — 退避 (rename) に成功した
-プロセスだけが除去者になるので、複数プロセスが同時に stale 判定しても排他は破れない。
-`--lock-retry-ms` (既定 10000) 待って `--lock-max-retries` (既定 3) 回失敗したら `lock` で
-諦める。書き込みは一時ファイルに全文を書いてから `rename` で置換する (部分書き込み防止)。
-`init`/`history-append`、および `approve` 〜 `stalled-set` の
-37 verb がこの lock を使う (`get`/`validate` は読み専用で lock 不要。
-`session-touch`/`sessions-alive` は自分のファイルと日次残骸しか触らないため lock 不要)。
+- 書き込み系 verb は `<state dir>/lock` を `mkdir` で取り、`--lock-max-retries` 回まで
+  `--lock-retry-ms` 間隔で再試行する。取れなければ `lock` (exit 11)。
+- **10 分より古い** lock は stale とみなして回収する (ちょうど 10 分は回収しない)。回収は
+  rename → 削除で行い、同時に複数のプロセスが回収を試みても 1 つだけが成功する。
+- 書き込みは tmp ファイル + rename で原子的に行う。途中で落ちても state.json は前の内容の
+  まま残る。
+- `get` / `validate` / `sessions-alive` は lock を取らない (読み取り専用)。
+- `session-touch` も lock を取らない — 対象が state.json ではなく `sessions/*` の個別ファイル
+  であり、列挙中に他セッションが要素を消す TOCTOU は「消えている == 目的達成」として飛ばす。
 
 ## heartbeat の契約
 
-`session-touch` が付ける・掃除するタイミングと `sessions-alive` が見る窓は、
-`task-pipeline/SKILL.md` の「セッションの所有権」節の shell コマンド (`find -mmin +1440`
-`/-mmin -90`) と同じ strict 境界: 生存判定は年齢 **< 90分**、掃除対象は年齢 **> 1440分**。
+- `session-touch` は `<state dir>/sessions/<id>` の mtime を現在時刻に更新し、同時に
+  **1440 分より古い**他の session ファイルを掃除する (ちょうど 1440 分は残す)。
+- `sessions-alive` は **90 分未満**の mtime を持つものを生存として返す (ちょうど 90 分は
+  生存に含めない)。
+- どちらのしきい値も厳密不等号で、境界値は `state.test.ts` の T-H 系が固定している。

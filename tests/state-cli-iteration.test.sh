@@ -1,16 +1,16 @@
 #!/bin/sh
 # tests/state-cli-iteration.test.sh — 既存の .task-pipeline/state.json を持つプロジェクトを
-# 模したフィクスチャに対し、移行後の手順どおりに 1 イテレーション相当の遷移を CLI で流し、
-# validate が PASS することを確認する (skill-state-cli-migration の受け入れ条件 8)。
+# 模したフィクスチャに対し、v2 の手順どおりに 1 イテレーション相当の遷移を CLI で流し、
+# validate が PASS することを確認する。
 #
 #   sh tests/state-cli-iteration.test.sh      # deno があれば PASS/FAIL を表示
 #
-# タスク本文が言う「claim → phase-pass → in-review」は代表 verb の例示であり、実際の full
-# gate (このフィクスチャの queue エントリは gate: full) では
-#   claim → phase-pass(research→plan) → phase-pass(plan→implement) →
-#   phase-pass(implement→report) → finalize-start(report→finalize) → in-review → validate
-# という、各 verb の前提 (state-cli-contract.md) を実際に満たす順序で呼ぶ必要がある。前提を
-# 迂回するショートカットは取らない。
+# 各 verb の前提 (task-pipeline/docs/state-cli-contract.md) を実際に満たす順序で呼ぶ。
+# 前提を迂回するショートカットは取らない。
+#   シナリオ A (初回 engagement): claim → advance ×3 → ship → validate
+#   シナリオ B (pr_fix 復帰): fix-request → fix-start → advance → ship
+# v1 で 3 verb に分かれていた復帰列 (fix-done → in-review → watch-set) は ship 1 回に
+# 畳まれている (設計2.2) ので、「順序を誤ると壊れる」形そのものが無くなっている。
 #
 # - 依存ゼロ・ネットワーク不要。deno が無ければ SKIP + exit 0。
 set -u
@@ -18,7 +18,7 @@ set -u
 tests_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 repo_dir=$(CDPATH='' cd -- "$tests_dir/.." && pwd -P) || exit 1
 state_ts=$repo_dir/task-pipeline/scripts/state.ts
-fixture=$tests_dir/fixtures/state-cli/valid-skill-example.json
+fixture=$tests_dir/fixtures/state-cli/v2-queued.json
 id=t-1a2b3c4d
 
 [ -f "$state_ts" ] || { printf 'state.ts not found: %s\n' "$state_ts" >&2; exit 1; }
@@ -30,7 +30,8 @@ if ! command -v deno >/dev/null 2>&1; then
 fi
 
 work=$(mktemp -d) || exit 1
-trap 'if [ "${KEEP_SANDBOX:-0}" = 1 ]; then printf "sandbox kept: %s\n" "$work"; else rm -rf "$work"; fi' EXIT
+work2=$(mktemp -d) || exit 1
+trap 'if [ "${KEEP_SANDBOX:-0}" = 1 ]; then printf "sandbox kept: %s / %s\n" "$work" "$work2"; else rm -rf "$work" "$work2"; fi' EXIT
 
 state_dir=$work/.task-pipeline
 mkdir -p "$state_dir"
@@ -51,9 +52,14 @@ run_state() {
     rc=$?
 }
 
+# $1 = queue エントリ直下のフィールド名 (python3 で読む。jq 追加依存を避ける)
 field() {
-    # $1 = jq 風の単純フィールド抽出 (grep ベース。deno/jq 追加依存を避けるため python3 を使う)
-    python3 -c "import json,sys; d=json.load(open('$state_dir/state.json')); q=[x for x in d['queue'] if x['id']=='$id'][0]; print(q.get('$1'))"
+    python3 -c "import json; d=json.load(open('$state_dir/state.json')); q=[x for x in d['queue'] if x['id']=='$id'][0]; print(q.get('$1'))"
+}
+
+# $1 = run の中のフィールド名
+run_field() {
+    python3 -c "import json; d=json.load(open('$state_dir/state.json')); q=[x for x in d['queue'] if x['id']=='$id'][0]; r=q.get('run') or {}; print(r.get('$1'))"
 }
 
 step() {
@@ -74,42 +80,53 @@ step() {
 
 printf '# state-cli-iteration checks — repo=%s id=%s\n' "$repo_dir" "$id"
 
-# --- 前提: フィクスチャの queue エントリが claim 可能な状態 (status: approved) であること ---
-initial_status=$(field status)
-if [ "$initial_status" = "approved" ]; then
-    ok "フィクスチャの初期 status が approved である (claim の前提)"
+# --- 前提: フィクスチャの queue エントリが claim 可能な状態 (progress: queued) ---
+initial_progress=$(field progress)
+if [ "$initial_progress" = "queued" ]; then
+    ok "フィクスチャの初期 progress が queued である (claim の前提)"
 else
-    ng "フィクスチャの初期 status が approved である" "got=$initial_status"
+    ng "フィクスチャの初期 progress が queued である" "got=$initial_progress"
     aborted=1
 fi
 
-# --- 1 イテレーション相当の遷移 ---------------------------------------------
+# --- シナリオ A: 初回 engagement ---------------------------------------------
 step "claim --id $id --session sess-test" claim --id "$id" --session sess-test
 if [ "$aborted" != 1 ]; then
-    got=$(field phase)
+    got=$(run_field phase)
     if [ "$got" = "research" ]; then ok "claim 後 phase=research"; else ng "claim 後 phase=research" "got=$got"; fi
+    got=$(run_field kind)
+    if [ "$got" = "initial" ]; then ok "claim 後 kind=initial"; else ng "claim 後 kind=initial" "got=$got"; fi
 fi
 
-step "phase-pass research->plan" phase-pass --id "$id" --from research --to plan
-step "phase-pass plan->implement" phase-pass --id "$id" --from plan --to implement
-step "phase-pass implement->report" phase-pass --id "$id" --from implement --to report
-step "finalize-start --from report" finalize-start --id "$id" --from report
+step "advance research->plan" advance --id "$id" --from research --to plan
+step "advance plan->implement" advance --id "$id" --from plan --to implement
+step "advance implement->report" advance --id "$id" --from implement --to report
+step "advance report->finalize" advance --id "$id" --from report --to finalize
 if [ "$aborted" != 1 ]; then
-    got=$(field phase)
-    if [ "$got" = "finalize" ]; then ok "finalize-start 後 phase=finalize"; else ng "finalize-start 後 phase=finalize" "got=$got"; fi
+    got=$(run_field phase)
+    if [ "$got" = "finalize" ]; then ok "advance 後 phase=finalize"; else ng "advance 後 phase=finalize" "got=$got"; fi
 fi
 
-# finish=none 相当 (コミット 0 件) で in-review に入る。契約の 4 フラグ規則 (--commits/--ref/
-# --branch/--base は 4 つとも指定か 4 つとも省略のどちらかのみ) により、finish=none では 4
-# フラグを渡さない (review に書く値が無いため)。ref が PR URL でないので --clear-session true
-# を付ける (SKILL.md のレビュー待ち処理と同じ形)。
-step "in-review --clear-session true (finish=none)" in-review --id "$id" --clear-session true
+# finish=none 相当 (コミット 0 件)。契約の 4 フラグ規則により --ref/--branch/--tip/--base は
+# 4 つとも省略する (共有された成果物が無いため)。
+step "ship --commits 0 (finish=none)" ship --id "$id" --commits 0
 if [ "$aborted" != 1 ]; then
-    got=$(field status)
-    if [ "$got" = "in_review" ]; then ok "in-review 後 status=in_review"; else ng "in-review 後 status=in_review" "got=$got"; fi
+    got=$(field progress)
+    if [ "$got" = "resting" ]; then ok "ship 後 progress=resting"; else ng "ship 後 progress=resting" "got=$got"; fi
 
-    got=$(field review)
-    if [ "$got" = "None" ]; then ok "in-review(4フラグ省略) 後も review は書き換わらない (番兵文字列が入らない)"; else ng "in-review(4フラグ省略) 後も review は書き換わらない" "got=$got"; fi
+    got=$(python3 -c "import json; d=json.load(open('$state_dir/state.json')); q=[x for x in d['queue'] if x['id']=='$id'][0]; print(json.dumps(q['artifact']))")
+    if [ "$got" = '{"state": "none"}' ]; then
+        ok "ship(commits 0) 後も artifact は none のまま (グループ欄を書かない)"
+    else
+        ng "ship(commits 0) 後も artifact は none のまま" "got=$got"
+    fi
+
+    got=$(printf '%s' "$out" | python3 -c "import json,sys; print(json.load(sys.stdin)['mark'])")
+    if [ "$got" = "True" ]; then
+        ok "ship の応答が mark=true (initial の終端なのでトラッカー更新が要る)"
+    else
+        ng "ship の応答が mark=true" "got=$got"
+    fi
 fi
 
 # --- validate が PASS すること -----------------------------------------------
@@ -124,25 +141,20 @@ else
     ng "最終状態で validate が PASS する" "rc=$rc out=$(printf '%s' "$out" | tr '\n' '|')"
 fi
 
-# --- pr_fix 復帰の verb 列 -----------------------------------------------------
-# fix-pending → fix-start → finalize-start --from pr_fix → fix-done → in-review。
-# fix-done の前提は status=="in_progress" && phase=="finalize" && review.watch!=null で、
-# in-review は status を in_review に、phase を null に書き換える。fix-done は in-review より
-# 前に呼ぶ必要があり (SKILL.md の順序制約)、逆順で呼ぶと fix-done が conflict で失敗する
-# (このシナリオはその回帰を防ぐ)。独立したフィクスチャ・状態ディレクトリを使うため、上の
-# シナリオの $id / $state_dir / run_state / field / step は使わず、専用のヘルパーを使う。
-fixture2=$tests_dir/fixtures/state-cli/valid-watch-rebase.json
+# --- シナリオ B: pr_fix 復帰の verb 列 ----------------------------------------
+# fix-request → fix-start → advance(pr_fix→finalize) → ship。
+# v1 では ship に当たる処理が fix-done → in-review → watch-set の 3 verb に分かれており、
+# 順序を誤ると指摘が再浮上したり前提違反になったりした。v2 では 1 回の ship が
+# handled への合流・ask の消費・sig のリセット・session の扱いをまとめて行う。
+fixture2=$tests_dir/fixtures/state-cli/v2-open-follow.json
 id2=t-full
 
 [ -f "$fixture2" ] || { printf 'fixture not found: %s\n' "$fixture2" >&2; exit 1; }
 
-work2=$(mktemp -d) || exit 1
-trap 'if [ "${KEEP_SANDBOX:-0}" = 1 ]; then printf "sandbox kept: %s / %s\n" "$work" "$work2"; else rm -rf "$work" "$work2"; fi' EXIT
-
 state_dir2=$work2/.task-pipeline
 mkdir -p "$state_dir2"
 cp "$fixture2" "$state_dir2/state.json"
-findings2=$work2/findings.json
+findings2=$work2/findings.md
 
 aborted2=0
 
@@ -154,12 +166,21 @@ run_state2() {
     rc2=$?
 }
 
-field2() {
-    python3 -c "import json,sys; d=json.load(open('$state_dir2/state.json')); q=[x for x in d['queue'] if x['id']=='$id2'][0]; print(q.get('$1'))"
+run_field2() {
+    python3 -c "import json; d=json.load(open('$state_dir2/state.json')); q=[x for x in d['queue'] if x['id']=='$id2'][0]; r=q.get('run') or {}; print(r.get('$1'))"
 }
 
-watch_field2() {
-    python3 -c "import json,sys; d=json.load(open('$state_dir2/state.json')); q=[x for x in d['queue'] if x['id']=='$id2'][0]; print(json.dumps(q['review']['watch'].get('$1')))"
+# $1 = follow の中のパス (ledger.handled のような 2 段まで)
+follow_field2() {
+    python3 -c "
+import json
+d = json.load(open('$state_dir2/state.json'))
+q = [x for x in d['queue'] if x['id'] == '$id2'][0]
+node = q['artifact']['follow']
+for key in '$1'.split('.'):
+    node = node[key]
+print(json.dumps(node))
+"
 }
 
 step2() {
@@ -180,31 +201,52 @@ step2() {
 
 printf '\n# pr_fix 復帰 verb 列 checks — id=%s (fixture=%s)\n' "$id2" "$fixture2"
 
-step2 "fix-pending --id $id2 --pending-ids rc-9,rc-8" fix-pending --id "$id2" --pending-ids "rc-9,rc-8" --findings "$findings2"
+step2 "fix-request --id $id2 --ids rc-9,rc-8" fix-request --id "$id2" --ids "rc-9,rc-8" --findings "$findings2"
 step2 "fix-start --id $id2 --session sess-pr-fix" fix-start --id "$id2" --session sess-pr-fix
-step2 "finalize-start --id $id2 --from pr_fix" finalize-start --id "$id2" --from pr_fix
 if [ "$aborted2" != 1 ]; then
-    got=$(field2 phase)
-    if [ "$got" = "finalize" ]; then ok "finalize-start(pr_fix) 後 phase=finalize"; else ng "finalize-start(pr_fix) 後 phase=finalize" "got=$got"; fi
+    got=$(run_field2 kind)
+    if [ "$got" = "pr_fix" ]; then ok "fix-start 後 kind=pr_fix"; else ng "fix-start 後 kind=pr_fix" "got=$got"; fi
 fi
 
-# 正しい順序: fix-done を in-review より前に呼ぶ (SKILL.md の順序制約どおり)。
-step2 "fix-done --id $id2 (in-review より前)" fix-done --id "$id2"
-step2 "in-review --id $id2 (pr_fix 復帰・4フラグ省略)" in-review --id "$id2"
+step2 "advance pr_fix->finalize" advance --id "$id2" --from pr_fix --to finalize
+if [ "$aborted2" != 1 ]; then
+    got=$(run_field2 phase)
+    if [ "$got" = "finalize" ]; then ok "advance 後 phase=finalize"; else ng "advance 後 phase=finalize" "got=$got"; fi
+fi
+
+step2 "ship --id $id2 --commits 1 (pr_fix 復帰)" ship --id "$id2" --commits 1 \
+    --ref "https://github.com/o/r/pull/7" --branch "task-pipeline/$id2" --tip sha-tip-2 --base main
 
 if [ "$aborted2" != 1 ]; then
-    got=$(field2 status)
-    if [ "$got" = "in_review" ]; then ok "in-review 後 status=in_review"; else ng "in-review 後 status=in_review" "got=$got"; fi
-
-    got=$(watch_field2 pending_ids)
-    if [ "$got" = "[]" ]; then ok "fix-done 後 watch.pending_ids が空"; else ng "fix-done 後 watch.pending_ids が空" "got=$got"; fi
-
-    got=$(watch_field2 handled)
-    if [ "$got" = '["c1", "c2", "rc-9", "rc-8"]' ]; then
-        ok "fix-done 後 watch.handled に対応済み id (rc-9, rc-8) が重複無く合流している"
+    got=$(printf '%s' "$out2" | python3 -c "import json,sys; o=json.load(sys.stdin); print(o['notify'], o['mark'], o['fix_count'])")
+    if [ "$got" = "update False 2" ]; then
+        ok "ship の応答が notify=update / mark=false / fix_count=2 (復帰ではトラッカーを更新しない)"
     else
-        ng "fix-done 後 watch.handled に対応済み id が合流している" "got=$got"
+        ng "ship の応答が notify=update / mark=false / fix_count=2" "got=$got"
     fi
+
+    got=$(follow_field2 asks.fix)
+    if [ "$got" = "null" ]; then ok "ship 後 asks.fix が消費されている"; else ng "ship 後 asks.fix が消費されている" "got=$got"; fi
+
+    got=$(follow_field2 ledger.handled)
+    if [ "$got" = '["c1", "c2", "rc-9", "rc-8"]' ]; then
+        ok "ship 後 ledger.handled に対応済み id (rc-9, rc-8) が重複無く合流している"
+    else
+        ng "ship 後 ledger.handled に対応済み id が合流している" "got=$got"
+    fi
+
+    got=$(follow_field2 probe.sig)
+    if [ "$got" = "null" ]; then
+        ok "ship 後 probe.sig が null (push で head が変わったので次は catch-up 観測)"
+    else
+        ng "ship 後 probe.sig が null" "got=$got"
+    fi
+
+    run_state2 validate
+    case $out2 in
+        *'"ok":true'*) ok "pr_fix 復帰後も validate が PASS する" ;;
+        *) ng "pr_fix 復帰後も validate が PASS する" "rc=$rc2 out=$(printf '%s' "$out2" | tr '\n' '|')" ;;
+    esac
 fi
 
 printf '\n%s\n' "----------------------------------------"

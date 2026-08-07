@@ -237,7 +237,7 @@ Deno.test("M-STATUS-6: done かつ worktree 残 → resting × merged (watch は
       branch: "task-pipeline/t-1",
       tip: "abc123",
       base: "main",
-      // recover-done は watch を stopped で残す (state-transitions.ts withStoppedWatch)。
+      // v1 の recover-done は watch を stopped で残していた (withStoppedWatch)。
       watch: v1Watch({ state: "stopped", note: "追従上限", fix_attempts: 4 }),
     },
   }, "M-STATUS-6");

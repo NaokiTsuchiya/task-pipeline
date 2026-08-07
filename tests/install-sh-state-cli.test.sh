@@ -15,7 +15,7 @@ set -u
 tests_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 repo_dir=$(CDPATH='' cd -- "$tests_dir/.." && pwd -P) || exit 1
 install_sh=$repo_dir/install.sh
-fixture=$tests_dir/fixtures/state-cli/valid-skill-example.json
+fixture=$tests_dir/fixtures/state-cli/v2-queued.json
 
 [ -f "$install_sh" ] || { printf 'install.sh not found: %s\n' "$install_sh" >&2; exit 1; }
 [ -f "$fixture" ] || { printf 'fixture not found: %s\n' "$fixture" >&2; exit 1; }

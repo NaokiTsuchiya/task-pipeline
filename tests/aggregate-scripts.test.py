@@ -122,21 +122,36 @@ def main():
             ng(label, f"got phase={got!r}")
 
     # --- ケース SC: スキーマ駆動のフェーズ網羅 ----------------------------------------
-    # state.schema.json の phase enum 全部について、(1) 集計スクリプトの抽出正規表現
+    # state.schema.json の run の phase enum 全部について、(1) 集計スクリプトの抽出正規表現
     # \w+(?:\+\w+)* で名前が丸ごと拾える文法に収まっていること、(2) 実際に
     # aggregate-session-usage.py に通すと各フェーズが自分の名前のまま分類されること、
     # を機械検査する。フェーズを 1 つ足すと enum が伸び、この 2 検査が自動で新フェーズを
     # 問う — 過去に research+plan が research に黙って誤分類された事故 (cc16785 で修正)
     # を、フェーズ追加のたびに再発しうる形からテスト失敗で落ちる形に変える。
+    # v2 のスキーマでは run が kind/gate ごとの oneOf になり、phase enum は 4 つの
+    # サブタイプ (runInitialFull / runInitialLight / runPrFix / runRebaseFix) に分かれて
+    # いる。全フェーズ名はその和集合で、件数まで主張して「読み取り先を間違えて一部しか
+    # 拾わない」誤りを検出可能にする (空集合なら SC0 で落ちるが、部分集合は落ちないため)。
     schema_path = os.path.join(
         repo_dir, "task-pipeline", "scripts", "state.schema.json")
     with open(schema_path) as fh:
         schema = json.load(fh)
-    phases = [p for p in
-              schema["$defs"]["queueItem"]["properties"]["phase"]["enum"]
-              if p is not None]
+    run_subtypes = ["runInitialFull", "runInitialLight", "runPrFix",
+                    "runRebaseFix"]
+    phase_set = set()
+    for subtype in run_subtypes:
+        phase_set.update(
+            p for p in schema["$defs"][subtype]["properties"]["phase"]["enum"]
+            if p is not None)
+    phases = sorted(phase_set)
     if not phases:
         ng("SC0 schema phase enum の読み込み", "enum が空")
+    expected_phase_count = 8
+    if len(phases) == expected_phase_count:
+        ok(f"SC0b フェーズ名を {expected_phase_count} 件拾った")
+    else:
+        ng(f"SC0b フェーズ名を {expected_phase_count} 件拾った",
+           f"{len(phases)} 件しか拾えていない: {phases}")
 
     token_re = re.compile(r"\w+(?:\+\w+)*", re.ASCII)
     for p in phases:
