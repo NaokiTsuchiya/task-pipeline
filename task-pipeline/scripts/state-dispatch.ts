@@ -8,6 +8,8 @@
 // 「フラグ表には有るのに実装が無い」「実装は有るのに契約文書に無い」というずれが
 // state.test.ts の T-D2 / T-D6 で必ず落ちる形に閉じる。層の一覧は state-io.ts の冒頭。
 
+import { LEDGER_VERBS, type LedgerVerb } from "./state-ledger-v2.ts";
+import type { VerbName } from "./state-transitions-v2.ts";
 import {
   cmdCandidatesDrop,
   cmdCandidatesSet,
@@ -60,15 +62,95 @@ import {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 語彙 — verb 名とフラグ名を string ではなく宣言から導いたリテラルユニオンで持つ
+//
+// **`Verb` は新しい語彙ではなく、既にある 2 つの宣言の和である**:
+// `VerbName` (= VERB_SPEC のキー 32 個) と `LedgerVerb` (= LEDGER_VERBS 13 個)。
+// ディスパッチ集合の定義そのものを型にしているので、
+//
+//   - 下の 2 つの表を `Record<Verb, …>` で受けると、**verb の書き落としも綴り違いも
+//     コンパイルエラー**になる (実行時テストを待たない)。
+//   - ALLOWED_FLAGS と HANDLERS の**キー集合が一致することが型で保たれる** — 片方にだけ
+//     verb を足すと、もう一方が「プロパティが足りない」で落ちる。
+//   - VERB_SPEC / LEDGER_VERBS に verb を足すと、この 2 つの表が同時に赤くなる
+//     (「宣言だけ足して配線を忘れる」が書けない)。
+//
+// state.test.ts の T-D2 / T-D6 (契約文書との照合・分類ネット) は引き続き必要である —
+// 型が見るのは**このリポジトリのソース同士の一致**で、契約文書との一致は見ないため。
+// ---------------------------------------------------------------------------
+
+export type Verb = VerbName | LedgerVerb;
+
+// CLI が受理するフラグ名の全集合。値の集合の要素をこの型に締めることで、フラグ名の
+// 綴り違い (`--sesion` 等) もコンパイルエラーになる。
+export const FLAG_NAMES = [
+  "state-dir",
+  "alive-max-min",
+  "at",
+  "auto",
+  "base",
+  "blocked-onto",
+  "branch",
+  "bump",
+  "candidates-json",
+  "cause",
+  "checked-at",
+  "ci",
+  "cleanup-stale-min",
+  "clear",
+  "commits",
+  "drop-withdrawn-branch",
+  "errors-inc",
+  "errors-reset",
+  "executor",
+  "findings",
+  "from",
+  "from-tip",
+  "git-common-dir",
+  "head",
+  "human",
+  "id",
+  "ids",
+  "items-json",
+  "kind",
+  "line",
+  "lock-max-retries",
+  "lock-retry-ms",
+  "note",
+  "phase",
+  "proc",
+  "reason",
+  "ref",
+  "report",
+  "reset-attempts",
+  "resolve",
+  "seen-at",
+  "session",
+  "sig",
+  "sig-clear",
+  "source",
+  "tip",
+  "title",
+  "to",
+  "tracker",
+  "value",
+  "worktree",
+] as const;
+export type FlagName = (typeof FLAG_NAMES)[number];
+
 // 書き込み系 verb はすべて --lock-retry-ms/--lock-max-retries を受け付ける。個々の
 // エントリでは省略せず明記する — この一覧が state-cli-contract.md との突き合わせテスト
 // (T-D2) の一方の入力になるため、実際に受理するフラグと過不足なく一致している必要がある。
-const LOCK_FLAGS = ["lock-retry-ms", "lock-max-retries"];
+const LOCK_FLAGS = [
+  "lock-retry-ms",
+  "lock-max-retries",
+] as const satisfies readonly FlagName[];
 
 // export するのは state.test.ts のドキュメント突き合わせテスト (state-cli-contract.md の
 // verb 見出し一覧との差集合チェック) と、分類ネット (どの verb も VERB_SPEC か
 // LEDGER_VERBS のどちらかに属する) のため。
-export const ALLOWED_FLAGS: Record<string, ReadonlySet<string>> = {
+export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
   // --- 帳簿系 (LEDGER_VERBS) ---
   "init": new Set([
     "state-dir",
@@ -209,7 +291,7 @@ export type CmdHandler = (
   flags: Map<string, string>,
 ) => Promise<unknown>;
 
-export const HANDLERS: Record<string, CmdHandler> = {
+export const HANDLERS: Record<Verb, CmdHandler> = {
   // 帳簿系
   "init": cmdInit,
   "get": (stateDir) => cmdGet(stateDir),
@@ -263,3 +345,24 @@ export const HANDLERS: Record<string, CmdHandler> = {
   "touch-executor": cmdTouchExecutor,
   "set-takeover": cmdSetTakeover,
 };
+
+// ---------------------------------------------------------------------------
+// 境界 — 外から来た未検査の文字列を Verb に絞る
+//
+// argv の verb は当然 string である。**型で守れるのは宣言同士の一致までで、外から
+// 来る値は実行時に検査するしかない** ので、その 1 点をこの関数に閉じ込める
+// (ここを通った後は Verb として扱えるので、表の引き当てに as が要らない)。
+// ---------------------------------------------------------------------------
+
+export function asVerb(candidate: string): Verb | null {
+  return Object.hasOwn(ALLOWED_FLAGS, candidate) ? candidate as Verb : null;
+}
+
+// 同じく、未検査のフラグ名がその verb の許可集合に含まれるか。ReadonlySet<FlagName> の
+// has() は FlagName しか受けないので、境界の widening をここだけに閉じ込める。
+export function isAllowedFlag(verb: Verb, candidate: string): boolean {
+  return (ALLOWED_FLAGS[verb] as ReadonlySet<string>).has(candidate);
+}
+
+// LEDGER_VERBS を再 export する (state.ts の分類の出所を 1 箇所にまとめるため)。
+export { LEDGER_VERBS };

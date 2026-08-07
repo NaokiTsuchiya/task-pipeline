@@ -44,14 +44,20 @@
 //
 // 実行時の外部依存はゼロ (npm:/jsr: 参照なし)。
 
-import { LEDGER_VERBS } from "./state-ledger-v2.ts";
 import {
   CliErrorV2,
   type ExitCodeName,
   VERB_SPEC,
 } from "./state-transitions-v2.ts";
 import { parseFlags, requireFlag } from "./state-flags.ts";
-import { ALLOWED_FLAGS, HANDLERS } from "./state-dispatch.ts";
+import {
+  ALLOWED_FLAGS,
+  asVerb,
+  HANDLERS,
+  isAllowedFlag,
+  LEDGER_VERBS,
+  type Verb,
+} from "./state-dispatch.ts";
 
 export { ALLOWED_FLAGS };
 
@@ -103,18 +109,20 @@ function classifyError(
 
 export async function main(argv: string[]): Promise<number> {
   try {
-    const [verb, ...rest] = argv;
-    if (!verb) {
+    const [rawVerb, ...rest] = argv;
+    if (!rawVerb) {
       throw new CliErrorV2("usage", "verb is required");
     }
-    const allowed = ALLOWED_FLAGS[verb];
-    const handler = HANDLERS[verb];
-    if (!allowed || !handler) {
-      throw new CliErrorV2("usage", `unknown verb: ${verb}`);
+    // argv は未検査の文字列なので、ここで 1 度だけ Verb に絞る (state-dispatch.ts の
+    // 「境界」節)。絞った後は表の引き当てに型の逃げ道が要らない。
+    const verb = asVerb(rawVerb);
+    if (verb === null) {
+      throw new CliErrorV2("usage", `unknown verb: ${rawVerb}`);
     }
+    const handler = HANDLERS[verb];
     const flags = parseFlags(rest);
     for (const key of flags.keys()) {
-      if (!allowed.has(key)) {
+      if (!isAllowedFlag(verb, key)) {
         throw new CliErrorV2("usage", `unknown flag for ${verb}: --${key}`);
       }
     }
@@ -135,7 +143,9 @@ export async function main(argv: string[]): Promise<number> {
 
 // ディスパッチ集合が VERB_SPEC ∪ LEDGER_VERBS で尽きることを、型の上でも表明する
 // (実行時の検査は state.test.ts の分類ネット)。
-export const DISPATCH_VERBS: readonly string[] = Object.keys(ALLOWED_FLAGS);
+export const DISPATCH_VERBS: readonly Verb[] = Object.keys(
+  ALLOWED_FLAGS,
+) as Verb[];
 export const TRANSITION_VERBS: readonly string[] = Object.keys(VERB_SPEC);
 export { LEDGER_VERBS };
 

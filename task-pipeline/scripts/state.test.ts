@@ -31,6 +31,7 @@
 //           task-pipeline/scripts/state.test.ts
 
 import { ALLOWED_FLAGS, EXIT_CODES } from "./state.ts";
+import { asVerb } from "./state-dispatch.ts";
 import { LEDGER_VERBS } from "./state-ledger-v2.ts";
 import { ADVANCE_EDGES, VERB_SPEC } from "./state-transitions-v2.ts";
 import {
@@ -415,6 +416,42 @@ Deno.test("T-U1: unknown verb", async () => {
   assertEquals(parseJson(res.stdout).error, "usage");
 });
 
+// Object.prototype 由来の名前は「未知の verb」の中でも別クラスである。ディスパッチ表は
+// ただのオブジェクトリテラルなので、`ALLOWED_FLAGS[verb]` の truthy 判定や
+// `verb in ALLOWED_FLAGS` で verb を認識すると、`toString` や `constructor` は
+// **プロトタイプ経由で truthy になり** usage を素通りして後段で TypeError になる
+// (この CLI に実在した欠陥。`asVerb` の Object.hasOwn で解消した)。
+// `"nope"` はプロトタイプに無いので、その代表ではこのクラスを検出できない —
+// 型検査でも捕まらない書き換えなので、実行時の回帰テストで固定する。
+Deno.test("T-U1b: Object.prototype-derived names are usage errors, not crashes", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, []);
+  for (
+    const verb of [
+      "toString",
+      "constructor",
+      "hasOwnProperty",
+      "valueOf",
+      "__proto__",
+      "isPrototypeOf",
+    ]
+  ) {
+    const res = await runVerb(dir, [verb, "--state-dir", dir]);
+    assertEquals(
+      res.code,
+      EXIT_CODES.usage,
+      `${verb}: ${res.stdout} ${res.stderr}`,
+    );
+    const payload = parseJson(res.stdout);
+    assertEquals(payload.error, "usage", `${verb} must report a usage error`);
+    assertEquals(
+      payload.message,
+      `unknown verb: ${verb}`,
+      `${verb} must be reported as an unknown verb`,
+    );
+  }
+});
+
 Deno.test("T-U2: verb omitted", async () => {
   const dir = await tempDir();
   const res = await runVerb(dir, []);
@@ -530,9 +567,10 @@ Deno.test("T-U-retired: all 11 retired v1 verbs are usage errors", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [queueItem()]);
   for (const verb of RETIRED_VERBS) {
+    // 廃止 verb は Verb の語彙にそもそも属さない (型の上でも実行時にも)。
     assert(
-      ALLOWED_FLAGS[verb] === undefined,
-      `retired verb still in ALLOWED_FLAGS: ${verb}`,
+      asVerb(verb) === null,
+      `retired verb still in the dispatch vocabulary: ${verb}`,
     );
     const out = await expectFailureUnchanged(
       dir,
