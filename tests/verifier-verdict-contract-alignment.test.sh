@@ -202,7 +202,7 @@ fi
 
 # B4: SKILL.md の PASS 分岐を旧文言 (オーケストレータが判定 JSON を書く) に戻す
 b4_regressed=$(make_regressed B4 "$skill_md" \
-    's/\(判定 JSON は verifier が起動時に渡した verdict path へ既に書いている — オーケストレータは書かない\) `state\.ts phase-pass/判定 JSON を `runs\/<id>\/verdicts\/<phase>-<attempt>.json` に書き、`state.ts phase-pass/')
+    's/\(判定 JSON は verifier が起動時に渡した verdict path へ既に書いている — オーケストレータは書かない\) `state\.ts advance/判定 JSON を `runs\/<id>\/verdicts\/<phase>-<attempt>.json` に書き、`state.ts advance/')
 if cmp -s "$skill_md" "$b4_regressed"; then
     ng "B4 SKILL.md への回帰注入が効いている" "sed による置換が効かず元ファイルと同一になった"
 else

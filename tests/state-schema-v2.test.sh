@@ -1,6 +1,6 @@
 #!/bin/sh
 # tests/state-schema-v2.test.sh — task-pipeline/scripts/state-schema-v2.ts (state.json v2 の
-# スキーマ検証モジュール) と state-v2.schema.json のテストを走らせるラッパー。
+# スキーマ検証モジュール) と state.schema.json のテストを走らせるラッパー。
 # tests/run.sh から *.test.sh の glob で自動検出される。
 #
 #   sh tests/state-schema-v2.test.sh      # deno があれば fmt/lint/check/test を通しで実行

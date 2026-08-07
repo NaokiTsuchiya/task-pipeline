@@ -18,8 +18,8 @@
 // 直接 import する — どの層を検査しているかが import 文に出る。
 //
 // - 依存は ./state-model-v2.ts (#34 が置いた語彙・ノード・不変条件) と上記の層だけ。
-//   v1 (state.ts / state-transitions.ts / state-schema.ts / state.schema.json) には
-//   一切依存しない (#34 が宣言した方針の維持)。エラー型も v2 側で自己完結している。
+//   v1 の遷移コア・スキーマには依存しない (#34 が宣言した方針の維持。v1 の実装は #37 で
+//   削除済み)。エラー型も v2 側で自己完結している。
 // - Deno API を呼ばない純粋関数群。現在時刻は呼び出し元が引数で渡す。
 // - **CLI への配線は行わない** (issue #35 の明示的な範囲外。後続の切り替え issue)。
 // - `next` (設計5節) と帳簿系 state-level verb (init/get/validate/session-touch/

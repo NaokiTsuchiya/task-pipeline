@@ -10,11 +10,11 @@
 #         `missing` (exit 13) で止まらないことを確認する (issue が示した再現手順の反転)。
 # Case B: state.json が丸ごと無いプロジェクト (非 git) — SKILL.md:32 が定める非 git 時の
 #         `--git-common-dir` の値 (state dir 自身) で同じ手順が通ることを確認する。
-# Case C: 既存 state.json (schema_version 込み) を持つプロジェクト — 同じ手順を流しても
-#         tracker/source/schema_version/queue はおろかファイル全体が一切変化しないことを
-#         diff で確認する (schema_version の無い旧式フィクスチャを使うと CLI 契約どおりの
-#         正規化で無関係な差分が出るため、ここでは意図的に schema_version 込みのフィクスチャ
-#         [valid-watch-rebase.json] を使う)。
+# Case C: schema_version 1 の既存 state.json を持つプロジェクト — 1 回目の init が v2 へ
+#         移行し、**2 回目の init が再移行しない** (ファイル全体がバイト単位で無変化) ことを
+#         diff で確認する。移行は一度だけという要求 (設計3.2) を、CLI の実起動で固定する
+#         検査である。移行後は tracker/source が --tracker/--source では上書きされないこと、
+#         schema_version が 2 になること、queue の件数が保たれることも見る。
 #
 # - 依存ゼロ・ネットワーク不要 (deno と git 以外)。deno が無ければ SKIP + exit 0。
 set -u
@@ -123,8 +123,8 @@ else
     ok "Case B: get が missing(13) で止まらない (rc=$rcB)"
 fi
 
-# --- Case C: 既存 state.json (schema_version 込み) を持つ state dir -----------
-printf '\n# Case C — 既存 state.json を持つ state dir に同じ手順を流しても無変化\n'
+# --- Case C: 既存 state.json (schema_version 1) を持つ state dir ---------------
+printf '\n# Case C — schema_version 1 の既存 state.json は一度だけ移行され、2 回目は無変化\n'
 
 workC=$(mktemp -d) || exit 1
 cleanup_dirs="$cleanup_dirs $workC"
@@ -143,33 +143,67 @@ if [ "${workC_bad:-0}" != 1 ]; then
         "$state_ts" init --state-dir "$sdC" --tracker OTHER --source OTHER --git-common-dir "$gcdC" 2>&1)
     rcC=$?
     case $outC in
-        *'"ok":true'*'"created":false'*) ok "Case C: state.ts init (exit 0, created:false — no-op)" ;;
-        *) ng "Case C: state.ts init (exit 0, created:false — no-op)" "rc=$rcC out=$outC" ;;
+        *'"ok":true'*'"created":false'*'"migrated":true'*) ok "Case C: 1 回目の state.ts init が移行する (created:false, migrated:true)" ;;
+        *) ng "Case C: 1 回目の state.ts init が移行する" "rc=$rcC out=$outC" ;;
     esac
 
     if diff -q "$before" "$sdC/state.json" >/dev/null 2>&1; then
-        ok "Case C: state.json がバイト単位で無変化"
+        ng "Case C: 1 回目の init で state.json が書き換わる" "移行したのに無変化"
     else
-        ng "Case C: state.json がバイト単位で無変化" "$(diff "$before" "$sdC/state.json" 2>&1 | tr '\n' '|')"
+        ok "Case C: 1 回目の init で state.json が書き換わる (v1 → v2)"
     fi
 
-    for field in tracker source schema_version; do
+    got=$(python3 -c "import json; print(json.load(open('$sdC/state.json'))['schema_version'])" 2>&1)
+    if [ "$got" = "2" ]; then
+        ok "Case C: 移行後の schema_version が 2"
+    else
+        ng "Case C: 移行後の schema_version が 2" "got=$got"
+    fi
+
+    for field in tracker source; do
         got=$(python3 -c "import json; print(json.load(open('$sdC/state.json'))['$field'])" 2>&1)
         want=$(python3 -c "import json; print(json.load(open('$before'))['$field'])" 2>&1)
         if [ "$got" = "$want" ]; then
-            ok "Case C: $field が変化しない (got=$got)"
+            ok "Case C: $field が --tracker/--source で上書きされない (got=$got)"
         else
-            ng "Case C: $field が変化しない" "got=$got want=$want"
+            ng "Case C: $field が --tracker/--source で上書きされない" "got=$got want=$want"
         fi
     done
 
     got_queue=$(python3 -c "import json; print(len(json.load(open('$sdC/state.json'))['queue']))" 2>&1)
     want_queue=$(python3 -c "import json; print(len(json.load(open('$before'))['queue']))" 2>&1)
     if [ "$got_queue" = "$want_queue" ]; then
-        ok "Case C: queue の件数が変化しない (got=$got_queue)"
+        ok "Case C: queue の件数が移行で変化しない (got=$got_queue)"
     else
-        ng "Case C: queue の件数が変化しない" "got=$got_queue want=$want_queue"
+        ng "Case C: queue の件数が移行で変化しない" "got=$got_queue want=$want_queue"
     fi
+
+    # 2 回目の init は再移行しない (バイト単位で無変化)
+    after_first=$workC/after-first.json
+    cp "$sdC/state.json" "$after_first"
+
+    outC2=$(deno run --no-prompt \
+        --allow-read="$sdC,$gcdC/info" --allow-write="$sdC,$gcdC/info" \
+        "$state_ts" init --state-dir "$sdC" --tracker OTHER --source OTHER --git-common-dir "$gcdC" 2>&1)
+    rcC2=$?
+    case $outC2 in
+        *'"ok":true'*'"created":false'*'"migrated":false'*) ok "Case C: 2 回目の state.ts init が no-op を報告する (migrated:false)" ;;
+        *) ng "Case C: 2 回目の state.ts init が no-op を報告する" "rc=$rcC2 out=$outC2" ;;
+    esac
+
+    if diff -q "$after_first" "$sdC/state.json" >/dev/null 2>&1; then
+        ok "Case C: 2 回目の init で state.json がバイト単位で無変化 (再移行しない)"
+    else
+        ng "Case C: 2 回目の init で state.json がバイト単位で無変化" "$(diff "$after_first" "$sdC/state.json" 2>&1 | tr '\n' '|')"
+    fi
+
+    # 移行後の state に対して後続の verb が動く
+    outC3=$(deno run --no-prompt --allow-read="$sdC" --allow-write="$sdC" \
+        "$state_ts" validate --state-dir "$sdC" 2>&1)
+    case $outC3 in
+        *'"ok":true'*) ok "Case C: 移行後の state.json が validate を通る" ;;
+        *) ng "Case C: 移行後の state.json が validate を通る" "out=$outC3" ;;
+    esac
 fi
 
 printf '\n%s\n' "----------------------------------------"

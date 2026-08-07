@@ -5,9 +5,9 @@
 // - 完全な純関数: 時刻は引数 (nowIso) で受け、Deno API もファイルI/Oも呼ばない。入力
 //   オブジェクトを書き換えず、**出力は入力のオブジェクト/配列参照を1つも共有しない**。
 // - 語彙とフェーズ列は state-model-v2.ts (#34) を単一の出所として使う。スキーマ側の
-//   宣言 (state-v2.schema.json) との一致は state-schema-v2.test.ts の突き合わせが固定する。
-// - CLI への配線 (init が schema_version==1 を見て呼ぶ) はこのタスクのスコープ外。v1 実装
-//   (state.ts / state-transitions.ts / state.schema.json) には一切依存しない。
+//   宣言 (state.schema.json) との一致は state-schema-v2.test.ts の突き合わせが固定する。
+// - CLI への配線 (init が schema_version==1 を見て一度だけ呼ぶ) は state-ledger-v2.ts の
+//   applyInitV2 にある。v1 の実装には依存しない (削除済み — 入力の JSON の形だけを読む)。
 //
 // **入力が壊れているときは throw する** (状態オブジェクトでない / queue 要素が
 // オブジェクトでない / id が文字列でない / status が v1 の 5 値でない)。移行が黙って
@@ -19,11 +19,13 @@
 // テスト: state-migrate-v2.test.ts / 実行は sh tests/state-migrate-v2.test.sh
 
 import {
+  CI_VALUES,
   type Gate,
   GATE_VALUES,
   INITIAL_GATE_PHASE_SEQUENCES,
   isLegalRunNode,
   type RunKind,
+  STALLED_VALUES,
 } from "./state-model-v2.ts";
 
 export const V2_SCHEMA_VERSION = 2;
@@ -36,9 +38,6 @@ const V1_STATUS_VALUES = [
   "blocked",
 ] as const;
 type V1Status = (typeof V1_STATUS_VALUES)[number];
-
-const CI_VALUES = ["passing", "failing", "pending", "none"] as const;
-const STALLED_VALUES = ["depleted", "max_open"] as const;
 
 // ---------------------------------------------------------------------------
 // 素の JSON 値を読むための小さなヘルパ (v1 の値は型で守られていない)
@@ -195,7 +194,7 @@ function deriveAttention(
 // fix-ask (3.2節 + 不変条件3):
 // 設計の表は「fix_pending 真 → taken:false / 偽 → 破棄」だが、v1 の fix-start は成功時に
 // fix_pending を false にして pending_ids を残したまま in_progress/pr_fix へ進む
-// (state-transitions.ts applyFixStart)。したがって飛行中の pr_fix も「偽 かつ pending_ids
+// (v1 の applyFixStart)。したがって飛行中の pr_fix も「偽 かつ pending_ids
 // 非空」の形になり、そのまま破棄すると移行直後に不変条件3
 // (running(pr_fix) ⇒ artifact.state==open ∧ follow≠null ∧ asks.fix.taken) が破れる。
 // rebase 行の「kind=rebase_fix と判定した running のタスクだけ taken: true」と同じ規則を

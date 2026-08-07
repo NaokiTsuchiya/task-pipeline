@@ -1,0 +1,53 @@
+{
+  "tracker": "gh",
+  "source": "NaokiTsuchiya/task-pipeline",
+  "updated_at": "2026-08-07T09:00:00Z",
+  "stalled": "depleted",
+  "stalled_since": "2026-08-07T08:00:00Z",
+  "schema_version": 2,
+  "queue": [
+    {
+      "id": "t-full",
+      "title": "レビュー待ちのタスク (resting × open + follow)",
+      "progress": "resting",
+      "run": null,
+      "blocked_reason": null,
+      "artifact": {
+        "state": "open",
+        "ref": "https://github.com/o/r/pull/7",
+        "branch": "task-pipeline/t-full",
+        "tip": "sha-tip-1",
+        "base": "main",
+        "follow": {
+          "attention": "auto",
+          "asks": { "fix": null, "rebase": null },
+          "ledger": {
+            "handled": ["c1", "c2"],
+            "fix_attempts": 1,
+            "review_only": [],
+            "answered": []
+          },
+          "probe": {
+            "proc": null,
+            "proc_started_at": null,
+            "sig": "sig-1",
+            "head": "sha-head-1",
+            "ci": "passing",
+            "checked_at": "2026-08-07T08:30:00Z",
+            "errors": 0,
+            "note": null
+          }
+        }
+      },
+      "worktree": "/tmp/worktrees/t-full",
+      "base": "main",
+      "session": "sess-abc"
+    }
+  ],
+  "completed": [],
+  "candidates": [],
+  "relisted": [],
+  "promoted": [],
+  "withdrawn_branches": [],
+  "history": []
+}

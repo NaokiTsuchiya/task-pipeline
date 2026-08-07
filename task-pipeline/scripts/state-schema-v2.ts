@@ -1,22 +1,20 @@
 // task-pipeline/scripts/state-schema-v2.ts
 //
-// state.json **v2** のスキーマ検証 — state-v2.schema.json (JSON Schema draft 2020-12) を
-// 解釈する再帰的 walker。v1 の state-schema.ts と同型の純粋関数 (ファイルI/O・排他なし、
-// 外部パッケージ参照ゼロ) だが、v2 のスキーマは queueItem / run / artifact / attention を
-// **判別付き oneOf (tagged union)** で宣言する (設計 3.1b節) ため、oneOf を解釈できる
-// 必要がある。
+// state.json **v2** のスキーマ検証 — state.schema.json (JSON Schema draft 2020-12) を
+// 解釈する再帰的 walker。純粋関数 (ファイルI/O・排他なし、外部パッケージ参照ゼロ) だが、
+// v2 のスキーマは queueItem / run / artifact / attention を **判別付き oneOf
+// (tagged union)** で宣言する (設計 3.1b節) ため、oneOf を解釈できる必要がある。
 //
-// **なぜ state-schema.ts を拡張せず別ファイルにするか**: v1 の walker は
-// ALLOWED_KEYWORDS の外のキーワードを見たら compileChecker 自体が throw する
-// fail-closed 設計で、そこに oneOf を足すと v1 スキーマ (state.schema.json) に対する
-// 守備範囲まで変わる = v1 実装の挙動変更になる。このタスク (gh-36) の受け入れ条件は
-// 「既存の state.schema.json と v1 実装は無変更」なので、v2 側を新規ファイルとして置く。
-// v2 が現行スキーマを差し替える切り替え issue で、v1 側を捨てて 1 本にまとめるのが
-// 最終形である。
+// **ファイル名に -v2 が残っている理由**: このモジュールは #36 で v1 の walker
+// (state-schema.ts) と併存させるために新規ファイルとして置かれた。v1 の walker とスキーマは
+// #37 で削除され、v2 のスキーマが state.schema.json という正式な名前を引き継いだので、
+// 併存の必要はもう無い — 名前だけが残っている。改名は v2 の他のモジュール
+// (state-model-v2 / state-transitions-v2 / state-migrate-v2 / state-ledger-v2) と揃えて
+// まとめて行う方が差分が読みやすいので、ここでは据え置く。
 //
 // 公開API:
 //   checkStateV2(value: unknown): CheckResult
-//     state-v2.schema.json (静的import) に対して value を検証する。
+//     state.schema.json (静的import) に対して value を検証する。
 //
 // テスト (state-schema-v2.test.ts) からのみ使う追加 export:
 //   compileCheckerV2(schema: unknown): (value: unknown) => CheckResult
@@ -29,7 +27,7 @@
 //
 // テストの回し方: sh tests/state-schema-v2.test.sh (deno 不在なら SKIP + exit 0)
 
-import schemaJson from "./state-v2.schema.json" with { type: "json" };
+import schemaJson from "./state.schema.json" with { type: "json" };
 
 export type CheckResult =
   | { ok: true }

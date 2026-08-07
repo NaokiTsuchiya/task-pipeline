@@ -1,13 +1,13 @@
 // task-pipeline/scripts/state-schema-v2.test.ts
 //
 // state-schema-v2.ts (checkStateV2 / compileCheckerV2 / collectSchemaNodesV2) と
-// state-v2.schema.json のテスト。
+// state.schema.json のテスト。
 //
 //   deno test --allow-read=<repo> task-pipeline/scripts/state-schema-v2.test.ts
 //   または: sh tests/state-schema-v2.test.sh (deno 不在なら SKIP + exit 0)
 //
 // 系統 (plan §3.2 の S-*):
-//   S-META  — state-v2.schema.json 自体の形式検査
+//   S-META  — state.schema.json 自体の形式検査
 //   S-ALIGN — state-model-v2.ts (#34) の宣言との突き合わせ
 //   S-OK    — 合法な v2 state を誤って拒否しない
 //   S-NG    — 到達不能な組 (受け入れ条件4を含む) を invalid にする
@@ -22,7 +22,7 @@ import {
   collectSchemaNodesV2,
   compileCheckerV2,
 } from "./state-schema-v2.ts";
-import schemaJsonRaw from "./state-v2.schema.json" with { type: "json" };
+import schemaJsonRaw from "./state.schema.json" with { type: "json" };
 import {
   ARTIFACT_STATE_VALUES,
   GATE_VALUES,
@@ -701,7 +701,7 @@ const INVALID_CASES: { label: string; value: unknown }[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// S-META — state-v2.schema.json 自体の形式検査
+// S-META — state.schema.json 自体の形式検査
 // ---------------------------------------------------------------------------
 
 Deno.test("S-META", async (t) => {

@@ -69,12 +69,12 @@ else
 fi
 
 # --- T5: in_progress ゼロでのみ発火 / 仕上げ飛行中は止めない -------------------------
-if has 'この判定に到達するのは `in_progress` のタスクが1件も無いときだけ'; then
-    ok "T5a 判定は自分の in_progress がゼロの地点でのみ発火する旨がある"
+if has 'この判定に到達するのは `running` のタスクが1件も無いときだけ'; then
+    ok "T5a 判定は自分の running がゼロの地点でのみ発火する旨がある"
 else
-    ng "T5a 判定は自分の in_progress がゼロの地点でのみ発火する旨がある" "見つからない"
+    ng "T5a 判定は自分の running がゼロの地点でのみ発火する旨がある" "見つからない"
 fi
-if has '仕上げ (`pr_fix`/`rebase_fix`) が飛行中のタスクは `status: in_progress` なので同じく「飛行中の扱い」に分岐し、この判定へは来ない'; then
+if has '仕上げ (`pr_fix`/`rebase_fix`) が飛行中のタスクも `progress: running` なので同じく「飛行中の扱い」に分岐し、この判定へは来ない'; then
     ok "T5b 仕上げ (pr_fix/rebase_fix) 飛行中は止めない旨がある"
 else
     ng "T5b 仕上げ (pr_fix/rebase_fix) 飛行中は止めない旨がある" "見つからない"
@@ -88,7 +88,7 @@ else
 fi
 section=$(sed -n '/^### `max_tasks` による安全停止$/,/^## /p' "$skill_md")
 _detail=
-printf '%s' "$section" | grep -qF 'state.ts watch-set --id <id> --proc null --session null' || _detail="$_detail watch-set 呼び出しが無い"
+printf '%s' "$section" | grep -qF 'state.ts release --id <id>' || _detail="$_detail release 呼び出しが無い"
 printf '%s' "$section" | grep -qF 'ScheduleWakeup `stop: true`' || _detail="$_detail ScheduleWakeup stop:true が無い"
 printf '%s' "$section" | grep -qF 'CronList' || _detail="$_detail CronList が無い"
 printf '%s' "$section" | grep -qF 'CronDelete' || _detail="$_detail CronDelete が無い"

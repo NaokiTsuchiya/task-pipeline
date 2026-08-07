@@ -190,6 +190,10 @@ export interface V2State {
   readonly withdrawn_branches: readonly WithdrawnBranchEntry[];
   readonly history: readonly string[];
   readonly schema_version: number;
+  // 停滞の記録 (スキーマ上は任意キー)。queue エントリの座標を持たない帳簿の値で、
+  // 書き換えるのは stalled-set だけ (state-ledger-v2.ts)。
+  readonly stalled?: string | null;
+  readonly stalled_since?: string | null;
 }
 
 // ---------------------------------------------------------------------------
