@@ -108,7 +108,7 @@ else
 fi
 
 # --- A9: verifier 起動プロンプト行の verdict path が CLI の返り値を指す -----------------
-# この行は tests/verifier-verdict-contract-alignment.test.sh の A2 がトークンの出現順
+# この行は tests/verifier-verdict-contract-alignment.test.ts の A2 がトークンの出現順
 # (phase < task < run dir < target project < verdict path) を見ている行そのものである。
 # 順序は同スイートが、パスの出所はここが固定する。
 prompt_line=$(grep -F 'verdict path:' "$skill_md" | head -1)
