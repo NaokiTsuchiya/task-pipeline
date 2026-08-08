@@ -24,7 +24,7 @@ SKILL.md を持つ skill ディレクトリがすべて `~/.claude/skills/` へ�
 
 `agents/` を入れなくても skill は動く (task-pipeline の検証ゲートは general-purpose にフォールバックする) が、`agents/task-pipeline-verifier.md` は検証ゲートの tools を読み取り + テスト実行に必要な最小限に絞る (verifier は target project を変更しない、という行動境界の機械的な裏付け) ので、入れておくのが既定である。
 
-**task-pipeline の実行には `deno` が前提。** `.task-pipeline/state.json` への読み書き (排他・原子的書き込み・heartbeat を含む) は `task-pipeline/scripts/state.ts` という Deno/TypeScript 製 CLI が担う。未導入の環境で task-pipeline を動かすと、CLI の呼び出しコマンド自体がシェルレベルで `deno: command not found` のように失敗する (`deno` 不在は `tests/state-cli.test.sh` 等のテストでは SKIP として扱われるだけで失敗にはならないが、実運用では必須)。
+**task-pipeline の実行には `deno` が前提。** `.task-pipeline/state.json` への読み書き (排他・原子的書き込み・heartbeat を含む) は `task-pipeline/scripts/state.ts` という Deno/TypeScript 製 CLI が担う。未導入の環境で task-pipeline を動かすと、CLI の呼び出しコマンド自体がシェルレベルで `deno: command not found` のように失敗する (`deno` 不在は `tests/install-sh-state-cli.test.sh` 等の sh スイートでは SKIP として扱われるだけで失敗にはならないが、実運用では必須)。TypeScript のテスト・型検査・整形はリポジトリルートの `deno.json` に集約してあり、`deno task test` / `deno task check` / `deno task lint` / `deno task fmt` で回す (`deno task test` は引数なしでリポジトリ内の `*.test.ts` を自動検出する)。
 
 ## task-pipeline の使い方
 

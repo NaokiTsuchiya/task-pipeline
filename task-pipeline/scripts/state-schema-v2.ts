@@ -25,7 +25,7 @@
 //   ALLOWED_KEYWORDS_V2
 //     v1 の 8 キーワード + oneOf。
 //
-// テストの回し方: sh tests/state-schema-v2.test.sh (deno 不在なら SKIP + exit 0)
+// テストの回し方: deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
 
 import schemaJson from "./state.schema.json" with { type: "json" };
 

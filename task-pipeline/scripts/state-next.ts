@@ -27,8 +27,9 @@
 //   所有権は state-ownership.ts の `classifySessionOwnership` / `isTouchable`、
 //   status 導出は `deriveStatus` をそのまま呼ぶ。
 //
-// テスト: state-next.test.ts (直接importで検査)。実行は tests/state-next.test.sh 経由、
-// または tests/run.sh の glob 自動検出。CLI 経路 (`state.ts next`) の観測は state.test.ts。
+// テスト: state-next.test.ts (直接importで検査)。実行は deno task test
+// (リポジトリルートの deno.json が *.test.ts を自動検出する)。
+// CLI 経路 (`state.ts next`) の観測は state.test.ts。
 
 import {
   type ArtifactState,

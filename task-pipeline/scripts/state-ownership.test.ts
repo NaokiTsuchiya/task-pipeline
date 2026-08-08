@@ -3,8 +3,8 @@
 // state-ownership.ts (classifySessionOwnership/isTouchable) のテスト。ファイルI/O・
 // サブプロセスを一切使わない直接 import 呼び出し (state-schema.test.ts と同型)。
 //
-//   deno test --allow-read task-pipeline/scripts/state-ownership.test.ts
-//   または: sh tests/state-cli.test.sh (state.ts と一緒に fmt/lint/check/test される)
+//   deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
+//   単体: deno test --allow-read task-pipeline/scripts/state-ownership.test.ts
 
 import { classifySessionOwnership, isTouchable } from "./state-ownership.ts";
 

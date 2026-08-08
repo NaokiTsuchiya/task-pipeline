@@ -16,7 +16,8 @@
 // watch.review_only/answered など) は既定値で埋める — v2 では required だが、欠落は
 // v1-valid な入力として実在するため (tests/fixtures/state-cli/valid-legacy-live.json)。
 //
-// テスト: state-migrate-v2.test.ts / 実行は sh tests/state-migrate-v2.test.sh
+// テスト: state-migrate-v2.test.ts / 実行は deno task test
+// (リポジトリルートの deno.json が *.test.ts を自動検出する)。
 
 import {
   CI_VALUES,

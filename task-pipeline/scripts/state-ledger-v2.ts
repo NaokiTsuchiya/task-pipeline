@@ -26,8 +26,8 @@
 // - init の移行は migrateV1toV2 (state-migrate-v2.ts) に委譲する。ここが持つのは
 //   「いつ移行を掛けるか」の判定だけである。
 //
-// テスト: state-ledger-v2.test.ts (直接importで検査)。実行は
-// tests/state-ledger-v2.test.sh 経由、または tests/run.sh の glob 自動検出。
+// テスト: state-ledger-v2.test.ts (直接importで検査)。実行は deno task test
+// (リポジトリルートの deno.json が *.test.ts を自動検出する)。
 
 import { STALLED_VALUES } from "./state-model-v2.ts";
 import {

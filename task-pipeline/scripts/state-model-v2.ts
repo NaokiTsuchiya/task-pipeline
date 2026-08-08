@@ -18,8 +18,8 @@
 //   フィールド (this) を読むので、`{...record, taken: true}` のようにスプレッドで一部を
 //   差し替えたオブジェクトでも差し替え後の値で答える。
 //
-// テスト: state-model-v2.test.ts (直接importで検査)。実行は tests/state-model-v2.test.sh
-// (deno fmt/lint/check/test を通しで回す) 経由、または tests/run.sh の glob 自動検出。
+// テスト: state-model-v2.test.ts (直接importで検査)。実行は deno task test
+// (リポジトリルートの deno.json が *.test.ts を自動検出する)。
 
 // ---------------------------------------------------------------------------
 // 型レベルの補助 — 宣言どうしの一致をコンパイル時に表明する

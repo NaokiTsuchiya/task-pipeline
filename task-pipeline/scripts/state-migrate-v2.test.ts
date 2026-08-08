@@ -4,8 +4,8 @@
 // 入力 → 期待出力を固定し、出力が v2 スキーマ (checkStateV2) と #34 の不変条件述語を
 // 満たすことまで見る。
 //
-//   deno test task-pipeline/scripts/state-migrate-v2.test.ts
-//   または: sh tests/state-migrate-v2.test.sh (deno 不在なら SKIP + exit 0)
+//   deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
+//   単体: deno test task-pipeline/scripts/state-migrate-v2.test.ts
 //
 // 系統 (plan §3.2 の M-*):
 //   M-STATUS / M-RUN / M-DROP / M-ARTIFACT / M-FOLLOW / M-ATTENTION / M-ASKS /

@@ -32,8 +32,8 @@
 // **使わない**。item は素データ (V2Item) として持ち、座標導出と不変条件検査の入口でだけ
 // make* を通して導出ビューを組む (層 6〜7)。
 //
-// テスト: state-transitions-v2.test.ts (直接importで検査)。実行は
-// tests/state-transitions-v2.test.sh 経由、または tests/run.sh の glob 自動検出。
+// テスト: state-transitions-v2.test.ts (直接importで検査)。実行は deno task test
+// (リポジトリルートの deno.json が *.test.ts を自動検出する)。
 
 import {
   FINALIZE_PHASE,
