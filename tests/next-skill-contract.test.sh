@@ -7,7 +7,7 @@
 # なぜ prose を grep で固定するのか: SKILL.md はオーケストレーター (モデル) が読む唯一の
 # 仕様書であり、そこに判定式が残っていれば `next` の応答と食い違ったときに二重の真実に
 # なる。判定式が「消えた」ことと、代わりに `next` の出力を参照するようになったことは、
-# 節スコープの grep でしか機械検査できない (tests/max-tasks-skill-contract.test.sh と
+# 節スコープの grep でしか機械検査できない (tests/max-tasks-skill-contract.test.ts と
 # 同じパターン)。
 #
 # **全域の否定形は使わない** — 閾値と同じ数字は別 verb の契約説明・ScheduleWakeup の秒数・
