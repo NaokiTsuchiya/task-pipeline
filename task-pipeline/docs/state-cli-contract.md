@@ -188,10 +188,10 @@ light は research+plan → implement → report。どちらもその後 `finali
 
 ## verb 一覧
 
-46 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
+47 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
 
 - **遷移 32** — `VERB_SPEC` のキー。上の遷移表に載る。
-- **帳簿 14** — `state-ledger-v2.ts` の `LEDGER_VERBS`。queue エントリの座標を持たない。
+- **帳簿 15** — `state-ledger-v2.ts` の `LEDGER_VERBS`。queue エントリの座標を持たない。
 
 ### 帳簿系
 
@@ -313,6 +313,51 @@ state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
 - `stalled.set_to` は `stalled-set --value` に渡す値。`"null"` / `"max_open"` /
   `"defer"` (= `tracker-list` の結果次第。`defer` オブジェクトの `if_empty` /
   `otherwise` がその分岐) / `"keep"` (停滞の 2 種類のどちらでもないので書き換えない)。
+
+### `verdict-path`
+
+```
+state.ts verdict-path --state-dir <dir> --id <id>
+```
+
+前提: state.json が存在し (`missing`)、`checkStateV2` を満たす (`schema`)。`id` が `queue` に
+ある (`missing`)。そのタスクが **`progress == running` かつ `run != null`** (`conflict`)、かつ
+`run.phase` が**検証ゲートを持つフェーズ** (= `finalize` 以外。`VERIFIED_PHASE_VALUES`) である
+(`conflict`)。
+効果: **無し (読み取り専用)。lock を取らず、state.json をバイト単位で変更しない。**
+読むのは state.json と `<state dir>/runs/<id>/` 直下の**ファイル名の列挙**だけ。
+
+成功 (1 行の JSON):
+
+```json
+{"ok": true, "id": "gh-46", "phase": "pr_fix", "attempt": 1, "seq": 2,
+ "seq_source": "findings", "run_dir": "<state dir>/runs/gh-46",
+ "file": "pr_fix-2-1.json",
+ "path": "<state dir>/runs/gh-46/verdicts/pr_fix-2-1.json"}
+```
+
+- `attempt` は `run.attempts` (0 始まり) をそのまま写す。
+- `seq` は**修正・解決サイクルの連番**で、連番を要さないフェーズでは `null`
+  (`seq_source` も `null`)。要するのは `pr_fix` と `rebase_fix` の 2 つだけである。
+  **`attempts` はサイクルの開始 (`fix-start` / `rebase-start`) と `advance` で 0 に戻るので、
+  連番が無いと前サイクルの判定 JSON を上書きする** — `seq` はそれを防ぐためにある。
+- `file` は `seq` が `null` なら `<phase>-<attempt>.json`、あれば
+  `<phase>-<seq>-<attempt>.json`。`path` は `<run_dir>/verdicts/<file>`
+  (`--state-dir` に渡された値を前置しただけで、パスの正規化はしない)。
+- **`seq` の出所はフェーズで分かれる** (`seq_source` がどちらだったかを返す):
+  - `pr_fix` … `asks.fix.findings` の basename (`<run dir>/watch/<連番>.md`) の数字
+    (`"findings"`)。取れなければ run dir の `pr-fix-<n>.md` の最大 (`"run-dir"`)、
+    それも無ければ `1` (`"default"`)。
+  - `rebase_fix` … run dir の `rebase-fix-<n>.md` の**数値としての**最大 (`"run-dir"`)、
+    無ければ `1` (`"default"`)。**`findings` は見ない。** finalize からの迂回
+    (`rebase-start` の入口 b) は `run.phase` だけを動かし `asks` に触れないので、
+    `asks.fix` が findings を保持したまま `rebase_fix` になりうる — そこで findings の連番を
+    拾うと、解決サイクルの判定が修正サイクルの番号で書かれてしまう。
+- **`ledger.fix_attempts` とは一致しない。** `fix-start --reset-attempts` は
+  `fix_attempts` を 1 から数え直すが、findings の連番も run dir の成果物も書き換えないので
+  `seq` は巻き戻らない。
+- run dir が無い / 成果物がまだ無いのはエラーではない (`seq_source: "default"`)。
+  サブディレクトリ (`verdicts/` `watch/` `rebase/`) は成果物として数えない。
 
 ### `session-touch`
 
@@ -805,11 +850,11 @@ state.ts set-takeover --state-dir <dir> --id <id> (--at <iso> | --clear true) [l
   rename → 削除で行い、同時に複数のプロセスが回収を試みても 1 つだけが成功する。
 - 書き込みは tmp ファイル + rename で原子的に行う。途中で落ちても state.json は前の内容の
   まま残る。
-- **lock を取らない verb**: `get` / `validate` / `next` / `sessions-alive` / `session-touch`。
-  内訳は 2 種類で、前の 4 つは**読み取り専用** (state.json を読むだけで書き換えない)、
+- **lock を取らない verb**: `get` / `validate` / `next` / `verdict-path` / `sessions-alive` / `session-touch`。
+  内訳は 2 種類で、前の 5 つは**読み取り専用** (state.json を読むだけで書き換えない)、
   `session-touch` は対象が state.json ではなく `sessions/*` の個別ファイルであり、列挙中に
   他セッションが要素を消す TOCTOU は「消えている == 目的達成」として飛ばす。
-  この 5 つは lock フラグ (`--lock-retry-ms` / `--lock-max-retries`) も受け付けず、渡すと
+  この 6 つは lock フラグ (`--lock-retry-ms` / `--lock-max-retries`) も受け付けず、渡すと
   usage になる — 「lock を取らない」が `ALLOWED_FLAGS` の形として観測でき、
   `state.test.ts` の T-D8 が上の一覧と突き合わせる。
 

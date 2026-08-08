@@ -48,6 +48,7 @@ export const LEDGER_VERBS = [
   "get",
   "validate",
   "next",
+  "verdict-path",
   "session-touch",
   "sessions-alive",
   "history-append",

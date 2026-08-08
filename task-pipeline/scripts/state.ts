@@ -15,11 +15,11 @@
 //     --allow-write=<state dir>[,<git common dir>/info] \
 //     task-pipeline/scripts/state.ts <verb> --state-dir <dir> [verb固有フラグ...]
 //
-// verb は 46 個で、出所は 2 つある (どちらにも属さない verb は存在しない):
+// verb は 47 個で、出所は 2 つある (どちらにも属さない verb は存在しない):
 //   - 遷移 32 verb … state-transitions-v2-spec.ts の VERB_SPEC のキー。queue エントリの
 //     領域 P × 領域 A の座標を持ち、from/to が宣言されている。
-//   - 帳簿 14 verb … state-ledger-v2.ts の LEDGER_VERBS。座標を持たない
-//     (init/get/validate/next/session-touch/sessions-alive/history-append/
+//   - 帳簿 15 verb … state-ledger-v2.ts の LEDGER_VERBS。座標を持たない
+//     (init/get/validate/next/verdict-path/session-touch/sessions-alive/history-append/
 //     candidates-*/promoted-*/relisted-*/stalled-set)。
 // 契約 (終了コード・JSON出力・verb別引数・前提・不変条件) の詳細は
 // task-pipeline/docs/state-cli-contract.md (ALLOWED_FLAGS のキー一覧と見出しの対応を
@@ -31,7 +31,7 @@
 //   層 0  state-io.ts        … Deno API (時刻・パス・原子的書き込み・読み取り・lock)
 //   層 1  state-flags.ts     … 引数パース (純粋)
 //   層 2  state-store.ts     … lock 越しの読み直し・検証・書き込みの glue
-//   層 3  state-verbs-ledger.ts / state-verbs-queue.ts … 46 verb の cmd 実装
+//   層 3  state-verbs-ledger.ts / state-verbs-queue.ts … 47 verb の cmd 実装
 //   層 4  state-dispatch.ts  … ALLOWED_FLAGS と HANDLERS
 //   層 5  このファイル       … 終了コード・エラー分類・main
 //
@@ -103,7 +103,7 @@ function classifyError(
 // dispatch
 //
 // ディスパッチ表のキー集合は ALLOWED_FLAGS と一致し、その内訳は VERB_SPEC (遷移 32) と
-// LEDGER_VERBS (帳簿 14) で尽きる。どちらにも属さない verb を足すと state.test.ts の
+// LEDGER_VERBS (帳簿 15) で尽きる。どちらにも属さない verb を足すと state.test.ts の
 // 分類ネットが落ちる。
 // ---------------------------------------------------------------------------
 
