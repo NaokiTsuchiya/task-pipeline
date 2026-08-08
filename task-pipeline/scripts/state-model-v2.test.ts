@@ -3,8 +3,8 @@
 // state-model-v2.ts (状態モデル v2 の語彙・ノード導出・不変条件・到達可能性テストの枠)
 // のテスト。直接importで純粋関数をそのまま呼ぶ。
 //
-//   deno test task-pipeline/scripts/state-model-v2.test.ts
-//   または: sh tests/state-model-v2.test.sh (deno 不在なら SKIP + exit 0)
+//   deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
+//   単体: deno test task-pipeline/scripts/state-model-v2.test.ts
 //
 // 命名は T-V2-<領域>-<連番> (state-transitions.test.ts の T-ALIGN/T-MX 系の命名を
 // 踏襲しつつ、v2専用の名前空間にする)。

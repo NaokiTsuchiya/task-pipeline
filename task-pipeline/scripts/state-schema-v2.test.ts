@@ -3,8 +3,8 @@
 // state-schema-v2.ts (checkStateV2 / compileCheckerV2 / collectSchemaNodesV2) と
 // state.schema.json のテスト。
 //
-//   deno test --allow-read=<repo> task-pipeline/scripts/state-schema-v2.test.ts
-//   または: sh tests/state-schema-v2.test.sh (deno 不在なら SKIP + exit 0)
+//   deno task test    (リポジトリルートの deno.json。*.test.ts を自動検出して実行する)
+//   単体で回すなら: deno test --allow-read=<repo> task-pipeline/scripts/state-schema-v2.test.ts
 //
 // 系統 (plan §3.2 の S-*):
 //   S-META  — state.schema.json 自体の形式検査
@@ -12,8 +12,8 @@
 //   S-OK    — 合法な v2 state を誤って拒否しない
 //   S-NG    — 到達不能な組 (受け入れ条件4を含む) を invalid にする
 //   S-WALK  — walker のキーワード実装 (特に oneOf) の固定ケース
-//   S-AJV   — ajv (draft 2020-12) との判定一致 (取得不能環境では早期 return)
-//   S-NONPM — state-schema-v2.ts の実行時依存ゼロ
+//   S-AJV   — ajv (draft 2020-12) との判定一致 (取得不能環境では ignored になる)
+//   S-NONPM — state-schema-v2.ts / state-migrate-v2.ts / state-next.ts の実行時依存ゼロ
 
 import {
   ALLOWED_KEYWORDS_V2,
@@ -1007,38 +1007,57 @@ interface AjvConstructor {
   new (options: { strict: boolean }): AjvInstance;
 }
 
-Deno.test("S-AJV", async (t) => {
-  let AjvCtor: AjvConstructor;
-  try {
-    const mod = await import("npm:ajv@8.17.1/dist/2020.js");
-    AjvCtor = mod.default as unknown as AjvConstructor;
-  } catch {
-    console.log(
-      "SKIP: ajv unavailable (offline or --cached-only) — skipping S-AJV",
-    );
-    return;
-  }
+// ajv の取得可否をテスト登録より前に確定させる。取得できなければ Deno.test の `ignore` を
+// 立てて、deno test の集計に **ignored** として現れるようにする (以前は fn の中で
+// console.log + 早期 return していたが、それだと集計上は PASS と区別が付かず、ajv が
+// 取れない環境でスキーマ判定の突き合わせが行われていないことに気づけなかった)。
+// CI は ignored が 1 件でもあれば失敗する (.github/workflows/tests.yml)。
+//
+// npm: の直書きはこのテストファイルだけの例外。実装側 (S-NONPM が見る 3 ファイル) は
+// 実行時依存ゼロを保つ。動的 import なので、取得できない環境でも catch できる。
+let AjvCtor: AjvConstructor | undefined;
+try {
+  // deno-lint-ignore no-import-prefix
+  const mod = await import("npm:ajv@8.17.1/dist/2020.js");
+  AjvCtor = mod.default as unknown as AjvConstructor;
+} catch {
+  AjvCtor = undefined;
+}
 
-  const ajv = new AjvCtor({ strict: true });
-  const validate = ajv.compile(schemaJson);
+Deno.test({
+  name: "S-AJV",
+  ignore: AjvCtor === undefined,
+  fn: async (t) => {
+    const ajv = new AjvCtor!({ strict: true });
+    const validate = ajv.compile(schemaJson);
 
-  for (const c of [...VALID_CASES, ...INVALID_CASES]) {
-    await t.step(c.label, () => {
-      const ajvOk = validate(c.value);
-      const ourOk = checkStateV2(c.value).ok;
-      if (ajvOk !== ourOk) {
-        throw new Error(`disagreement: ajv=${ajvOk} checkStateV2=${ourOk}`);
-      }
-    });
-  }
+    for (const c of [...VALID_CASES, ...INVALID_CASES]) {
+      await t.step(c.label, () => {
+        const ajvOk = validate(c.value);
+        const ourOk = checkStateV2(c.value).ok;
+        if (ajvOk !== ourOk) {
+          throw new Error(`disagreement: ajv=${ajvOk} checkStateV2=${ourOk}`);
+        }
+      });
+    }
+  },
 });
 
 // ---------------------------------------------------------------------------
 // S-NONPM — 実行時依存ゼロを grep で固定
 // ---------------------------------------------------------------------------
 
+// state-next.ts が入っているのは、旧 tests/state-next.test.sh が `deno check --no-remote` /
+// `deno test --no-remote` で強制していた「外部モジュールを一切呼ばない」を、ラッパー削除後も
+// 残すため (deno task check/test は --no-remote を付けない)。
 Deno.test("S-NONPM", async () => {
-  for (const name of ["state-schema-v2.ts", "state-migrate-v2.ts"]) {
+  for (
+    const name of [
+      "state-schema-v2.ts",
+      "state-migrate-v2.ts",
+      "state-next.ts",
+    ]
+  ) {
     const src = await Deno.readTextFile(new URL(`./${name}`, import.meta.url));
     if (/\bnpm:|\bjsr:/.test(src)) {
       throw new Error(`${name} must not reference npm: or jsr: specifiers`);

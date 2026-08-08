@@ -26,8 +26,8 @@
 // stdout の JSON) は前提違反 1 種類 (conflict) に集約されているので、verb ごとに
 // 1 本で経路が確認できる。
 //
-// 実行: sh tests/state-cli.test.sh (deno fmt/lint/check/test を通しで)
-//   直接: deno test --allow-read --allow-write --allow-env --allow-run \
+// 実行: deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
+//   単体: deno test --allow-read --allow-write --allow-env --allow-run \
 //           task-pipeline/scripts/state.test.ts
 
 import { ALLOWED_FLAGS, EXIT_CODES } from "./state.ts";

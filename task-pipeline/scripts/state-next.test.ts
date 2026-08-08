@@ -7,8 +7,9 @@
 // すべて現れる。CLI 経路 (exit code・state.json のバイト列不変・lock 非取得) の観測は
 // state.test.ts が持つ。
 //
-// 実行: deno test task-pipeline/scripts/state-next.test.ts
-//       (ラッパーは tests/state-next.test.sh。Deno API を呼ばないので権限フラグは不要)
+// 実行: deno task test (リポジトリルートの deno.json。*.test.ts を自動検出して実行する)
+//       単体なら deno test task-pipeline/scripts/state-next.test.ts (Deno API を呼ばないので
+//       権限フラグは不要)。8 分類が揃っているかの検査は下の nextTest / DERIVATION_KEYS が持つ。
 
 import {
   countTaskLines,
@@ -32,6 +33,37 @@ import type {
   V2Run,
   V2State,
 } from "./state-transitions-v2.ts";
+
+// ---------------------------------------------------------------------------
+// テスト登録 — 設計 5.1 の導出 8 分類の網羅を固定する
+//
+// テスト名は `next/<分類キー>: …` の形。nextTest はキーを拾って集め、ファイル末尾で
+// 8 分類が揃っていることを検査する (揃っていなければモジュール読み込み時に throw し、
+// deno test はこのファイルごと失敗する)。
+//
+// この検査は旧 tests/state-next.test.sh:48-61 が `deno test` の出力を grep して行っていた
+// もので、ラッパー削除 (#11 要求 6) の移設先がここになる。Deno.test や t.step を足すと
+// 移行前後で件数が変わってしまうため、テストではなくモジュールの不変条件として置いている。
+// ---------------------------------------------------------------------------
+
+const DERIVATION_KEYS = [
+  "ownership",
+  "follow",
+  "cycle",
+  "finalize",
+  "liveness",
+  "start",
+  "retire",
+  "observation",
+] as const;
+
+const seenDerivationKeys = new Set<string>();
+
+function nextTest(name: string, fn: () => void): void {
+  const m = /^next\/([a-z_]+):/.exec(name);
+  if (m) seenDerivationKeys.add(m[1]);
+  Deno.test(name, fn);
+}
 
 // ---------------------------------------------------------------------------
 // アサーション (外部依存を増やさないため自前。state-model-v2.test.ts と同じ流儀)
@@ -246,7 +278,7 @@ function actionOf<K extends NextAction["kind"]>(
 // 設定 (--config) のパース
 // ---------------------------------------------------------------------------
 
-Deno.test("next/config: 省略・空文字は既定値", () => {
+nextTest("next/config: 省略・空文字は既定値", () => {
   assertEquals(parseNextConfig(undefined), DEFAULT_NEXT_CONFIG);
   assertEquals(parseNextConfig(""), DEFAULT_NEXT_CONFIG);
   assertEquals(DEFAULT_NEXT_CONFIG, {
@@ -258,7 +290,7 @@ Deno.test("next/config: 省略・空文字は既定値", () => {
   });
 });
 
-Deno.test("next/config: 既知キーを受理する", () => {
+nextTest("next/config: 既知キーを受理する", () => {
   assertEquals(
     parseNextConfig("finish=pr,approve=auto,rebase=off,max_open=3,max_tasks=5"),
     {
@@ -274,7 +306,7 @@ Deno.test("next/config: 既知キーを受理する", () => {
   assertEquals(parseNextConfig("max_tasks=0").max_tasks, 0);
 });
 
-Deno.test("next/config: 未知キー・= 無し・enum 外・整数でない値は usage", () => {
+nextTest("next/config: 未知キー・= 無し・enum 外・整数でない値は usage", () => {
   for (
     const raw of [
       "foo=1",
@@ -297,12 +329,12 @@ Deno.test("next/config: 未知キー・= 無し・enum 外・整数でない値�
   }
 });
 
-Deno.test("next/config: 同じキーは後勝ち", () => {
+nextTest("next/config: 同じキーは後勝ち", () => {
   assertEquals(parseNextConfig("max_open=1,max_open=4").max_open, 4);
   assertEquals(parseNextConfig("finish=pr,finish=commit").finish, "commit");
 });
 
-Deno.test("next/config: --now がパースできなければ usage", () => {
+nextTest("next/config: --now がパースできなければ usage", () => {
   const err = assertThrowsCli(() =>
     deriveNext(state([]), input({ now: "not-a-time" }))
   );
@@ -313,81 +345,90 @@ Deno.test("next/config: --now がパースできなければ usage", () => {
 // 1. 担当判定
 // ---------------------------------------------------------------------------
 
-Deno.test("next/ownership: session の 4 パターンを分類し alive-other だけ excluded", () => {
-  const result = deriveNext(
-    state([
-      item("t-self", { session: SELF }),
-      item("t-unowned", { session: null }),
-      item("t-dead", { session: "session-gone" }),
-      item("t-alive-other", { session: OTHER }),
-    ]),
-    input({ alive: [SELF, OTHER] }),
-  );
-  assertEquals(taskOf(result, "t-self").ownership, "self");
-  assertEquals(taskOf(result, "t-unowned").ownership, "unowned");
-  assertEquals(taskOf(result, "t-dead").ownership, "dead");
-  assertEquals(taskOf(result, "t-alive-other").ownership, "alive-other");
-  assertEquals(
-    result.tasks.filter((t) => t.excluded).map((t) => t.id),
-    ["t-alive-other"],
-  );
-  assertEquals(result.counts.excluded, 1);
-});
+nextTest(
+  "next/ownership: session の 4 パターンを分類し alive-other だけ excluded",
+  () => {
+    const result = deriveNext(
+      state([
+        item("t-self", { session: SELF }),
+        item("t-unowned", { session: null }),
+        item("t-dead", { session: "session-gone" }),
+        item("t-alive-other", { session: OTHER }),
+      ]),
+      input({ alive: [SELF, OTHER] }),
+    );
+    assertEquals(taskOf(result, "t-self").ownership, "self");
+    assertEquals(taskOf(result, "t-unowned").ownership, "unowned");
+    assertEquals(taskOf(result, "t-dead").ownership, "dead");
+    assertEquals(taskOf(result, "t-alive-other").ownership, "alive-other");
+    assertEquals(
+      result.tasks.filter((t) => t.excluded).map((t) => t.id),
+      ["t-alive-other"],
+    );
+    assertEquals(result.counts.excluded, 1);
+  },
+);
 
-Deno.test("next/ownership: --session 省略なら非 null の session は他 id 扱い", () => {
-  const result = deriveNext(
-    state([item("t-1", { session: OTHER })]),
-    input({ session: "", alive: [OTHER] }),
-  );
-  assertEquals(result.session, null);
-  assertEquals(taskOf(result, "t-1").ownership, "alive-other");
-  assertEquals(taskOf(result, "t-1").excluded, true);
-});
+nextTest(
+  "next/ownership: --session 省略なら非 null の session は他 id 扱い",
+  () => {
+    const result = deriveNext(
+      state([item("t-1", { session: OTHER })]),
+      input({ session: "", alive: [OTHER] }),
+    );
+    assertEquals(result.session, null);
+    assertEquals(taskOf(result, "t-1").ownership, "alive-other");
+    assertEquals(taskOf(result, "t-1").excluded, true);
+  },
+);
 
-Deno.test("next/ownership: excluded なタスクには actions も observations も出さない", () => {
-  // 除外が無ければ必ず action が出る 3 つの形を、すべて生きている他セッション所有にする。
-  const result = deriveNext(
-    state([
-      // (i) 追従対象でリースが無い → 除外が無ければ probe-run
-      item("t-probe", {
-        progress: "resting",
-        session: OTHER,
-        artifact: openArtifact(),
-      }),
-      // (ii) 沈黙した実行 → 除外が無ければ status-check / set-takeover
-      item("t-silent", {
-        progress: "running",
-        session: OTHER,
-        run: run({ executor_last_event_at: isoMinutesAgo(300) }),
-      }),
-      // (iii) 回収済み → 除外が無ければ retire
-      item("t-merged", {
-        progress: "resting",
-        session: OTHER,
-        artifact: mergedArtifact(),
-      }),
-    ]),
-    input({ alive: [SELF, OTHER] }),
-  );
+nextTest(
+  "next/ownership: excluded なタスクには actions も observations も出さない",
+  () => {
+    // 除外が無ければ必ず action が出る 3 つの形を、すべて生きている他セッション所有にする。
+    const result = deriveNext(
+      state([
+        // (i) 追従対象でリースが無い → 除外が無ければ probe-run
+        item("t-probe", {
+          progress: "resting",
+          session: OTHER,
+          artifact: openArtifact(),
+        }),
+        // (ii) 沈黙した実行 → 除外が無ければ status-check / set-takeover
+        item("t-silent", {
+          progress: "running",
+          session: OTHER,
+          run: run({ executor_last_event_at: isoMinutesAgo(300) }),
+        }),
+        // (iii) 回収済み → 除外が無ければ retire
+        item("t-merged", {
+          progress: "resting",
+          session: OTHER,
+          artifact: mergedArtifact(),
+        }),
+      ]),
+      input({ alive: [SELF, OTHER] }),
+    );
 
-  for (const id of ["t-probe", "t-silent", "t-merged"]) {
-    const task = taskOf(result, id);
-    assertEquals(task.ownership, "alive-other", id);
-    assertEquals(task.excluded, true, id);
-    assertEquals(task.actions, [], `${id}: actions must be empty`);
-    assertEquals(task.observations, [], `${id}: observations must be empty`);
-  }
-  assertEquals(result.counts.excluded, 3);
-  // 非除外の集計にも入らない
-  assertEquals(result.counts.resting, 0);
-  assertEquals(result.counts.running, 0);
-});
+    for (const id of ["t-probe", "t-silent", "t-merged"]) {
+      const task = taskOf(result, id);
+      assertEquals(task.ownership, "alive-other", id);
+      assertEquals(task.excluded, true, id);
+      assertEquals(task.actions, [], `${id}: actions must be empty`);
+      assertEquals(task.observations, [], `${id}: observations must be empty`);
+    }
+    assertEquals(result.counts.excluded, 3);
+    // 非除外の集計にも入らない
+    assertEquals(result.counts.resting, 0);
+    assertEquals(result.counts.running, 0);
+  },
+);
 
 // ---------------------------------------------------------------------------
 // 2. 追従の要否と probe リース
 // ---------------------------------------------------------------------------
 
-Deno.test("next/follow: 追従対象の導出式は連言項を 1 つ崩すと外れる", () => {
+nextTest("next/follow: 追従対象の導出式は連言項を 1 つ崩すと外れる", () => {
   const liveProbe = probe({
     proc: "bash-1",
     proc_started_at: isoMinutesAgo(1),
@@ -454,7 +495,7 @@ Deno.test("next/follow: 追従対象の導出式は連言項を 1 つ崩すと�
   }
 });
 
-Deno.test("next/follow: リースの失効理由と 7 時間の境界", () => {
+nextTest("next/follow: リースの失効理由と 7 時間の境界", () => {
   const build = (p: V2Probe, session: string | null = SELF) =>
     item("t-1", {
       session,
@@ -505,64 +546,70 @@ Deno.test("next/follow: リースの失効理由と 7 時間の境界", () => {
   assertEquals(actionOf(taskOf(result, "t-1"), "probe-run").reason, "expired");
 });
 
-Deno.test("next/follow: catch_up は sig が null のときだけ、drop_foreign_proc は他人の proc のとき", () => {
-  const mk = (p: V2Probe, session: string | null) =>
-    state([
-      item("t-1", {
-        session,
-        artifact: openArtifact({ follow: follow({ probe: p }) }),
-      }),
-    ]);
+nextTest(
+  "next/follow: catch_up は sig が null のときだけ、drop_foreign_proc は他人の proc のとき",
+  () => {
+    const mk = (p: V2Probe, session: string | null) =>
+      state([
+        item("t-1", {
+          session,
+          artifact: openArtifact({ follow: follow({ probe: p }) }),
+        }),
+      ]);
 
-  let action = actionOf(
-    taskOf(deriveNext(mk(probe(), SELF), input()), "t-1"),
-    "probe-run",
-  );
-  assertEquals(action.catch_up, true);
-  assertEquals(action.drop_foreign_proc, false);
+    let action = actionOf(
+      taskOf(deriveNext(mk(probe(), SELF), input()), "t-1"),
+      "probe-run",
+    );
+    assertEquals(action.catch_up, true);
+    assertEquals(action.drop_foreign_proc, false);
 
-  action = actionOf(
-    taskOf(deriveNext(mk(probe({ sig: "s" }), SELF), input()), "t-1"),
-    "probe-run",
-  );
-  assertEquals(action.catch_up, false);
+    action = actionOf(
+      taskOf(deriveNext(mk(probe({ sig: "s" }), SELF), input()), "t-1"),
+      "probe-run",
+    );
+    assertEquals(action.catch_up, false);
 
-  // 他セッション由来の proc が残っている → 止めずに release で落とすだけ
-  action = actionOf(
-    taskOf(
-      deriveNext(
-        mk(
-          probe({ proc: "bash-x", proc_started_at: isoMinutesAgo(1) }),
-          "gone",
+    // 他セッション由来の proc が残っている → 止めずに release で落とすだけ
+    action = actionOf(
+      taskOf(
+        deriveNext(
+          mk(
+            probe({ proc: "bash-x", proc_started_at: isoMinutesAgo(1) }),
+            "gone",
+          ),
+          input(),
         ),
-        input(),
+        "t-1",
       ),
-      "t-1",
-    ),
-    "probe-run",
-  );
-  assertEquals(action.drop_foreign_proc, true);
+      "probe-run",
+    );
+    assertEquals(action.drop_foreign_proc, true);
 
-  // 所有者が居ない (session null) のに proc が残っている → これも他人の proc
-  action = actionOf(
-    taskOf(
-      deriveNext(
-        mk(probe({ proc: "bash-x", proc_started_at: isoMinutesAgo(1) }), null),
-        input(),
+    // 所有者が居ない (session null) のに proc が残っている → これも他人の proc
+    action = actionOf(
+      taskOf(
+        deriveNext(
+          mk(
+            probe({ proc: "bash-x", proc_started_at: isoMinutesAgo(1) }),
+            null,
+          ),
+          input(),
+        ),
+        "t-1",
       ),
-      "t-1",
-    ),
-    "probe-run",
-  );
-  assertEquals(action.drop_foreign_proc, true);
-  assertEquals(action.reason, "owner-dead");
-});
+      "probe-run",
+    );
+    assertEquals(action.drop_foreign_proc, true);
+    assertEquals(action.reason, "owner-dead");
+  },
+);
 
 // ---------------------------------------------------------------------------
 // 3. サイクルの分岐
 // ---------------------------------------------------------------------------
 
-Deno.test("next/cycle: rebase-ask queued が fix-ask pending に優先する", () => {
+nextTest("next/cycle: rebase-ask queued が fix-ask pending に優先する", () => {
   const mk = (fix: V2FixAsk | null, rebase: V2RebaseAsk | null) =>
     state([
       item("t-1", {
@@ -612,32 +659,35 @@ Deno.test("next/cycle: rebase-ask queued が fix-ask pending に優先する", (
   );
 });
 
-Deno.test("next/cycle: rebase-start は控えの blocked_onto / from_tip を渡す", () => {
-  const result = deriveNext(
-    state([
-      item("t-1", {
-        artifact: openArtifact({
-          follow: follow({
-            asks: {
-              fix: null,
-              rebase: rebaseAsk({
-                resolve: true,
-                blocked_onto: "sha-onto",
-                from_tip: "sha-old",
-              }),
-            },
+nextTest(
+  "next/cycle: rebase-start は控えの blocked_onto / from_tip を渡す",
+  () => {
+    const result = deriveNext(
+      state([
+        item("t-1", {
+          artifact: openArtifact({
+            follow: follow({
+              asks: {
+                fix: null,
+                rebase: rebaseAsk({
+                  resolve: true,
+                  blocked_onto: "sha-onto",
+                  from_tip: "sha-old",
+                }),
+              },
+            }),
           }),
         }),
-      }),
-    ]),
-    input(),
-  );
-  const action = actionOf(taskOf(result, "t-1"), "rebase-start");
-  assertEquals(action.blocked_onto, "sha-onto");
-  assertEquals(action.from_tip, "sha-old");
-});
+      ]),
+      input(),
+    );
+    const action = actionOf(taskOf(result, "t-1"), "rebase-start");
+    assertEquals(action.blocked_onto, "sha-onto");
+    assertEquals(action.from_tip, "sha-old");
+  },
+);
 
-Deno.test("next/cycle: fix-start の at_limit と reset_attempts の境界", () => {
+nextTest("next/cycle: fix-start の at_limit と reset_attempts の境界", () => {
   const mk = (attempts: number, attention: V2Follow["attention"] = "auto") =>
     state([
       item("t-1", {
@@ -676,7 +726,7 @@ Deno.test("next/cycle: fix-start の at_limit と reset_attempts の境界", () 
   assertEquals(actionKinds(taskOf(humanResult, "t-1")), []);
 });
 
-Deno.test("next/cycle: 自分の仕上げが走っているときは release に落ちる", () => {
+nextTest("next/cycle: 自分の仕上げが走っているときは release に落ちる", () => {
   const mkQueue = (finishingSession: string | null) => [
     item("t-open", {
       artifact: openArtifact({
@@ -727,66 +777,69 @@ Deno.test("next/cycle: 自分の仕上げが走っているときは release に
 // 4. FINALIZED 後の ship 引数構成
 // ---------------------------------------------------------------------------
 
-Deno.test("next/finalize: finalize フェーズでだけヒントを返し ref_kind は finish 由来", () => {
-  const mk = (phase: string, kind: V2Run["kind"] = "initial") =>
-    state([
+nextTest(
+  "next/finalize: finalize フェーズでだけヒントを返し ref_kind は finish 由来",
+  () => {
+    const mk = (phase: string, kind: V2Run["kind"] = "initial") =>
+      state([
+        item("t-1", {
+          progress: "running",
+          run: run({
+            kind,
+            gate: kind === "initial" ? "full" : null,
+            phase,
+          }),
+        }),
+      ]);
+
+    // finalize でないフェーズではヒントを返さない
+    assertEquals(
+      taskOf(deriveNext(mk("implement"), input()), "t-1").finalize,
+      null,
+    );
+
+    for (
+      const [finish, refKind] of [
+        ["pr", "pr"],
+        ["commit", "commit"],
+        ["none", null],
+      ] as const
+    ) {
+      const result = deriveNext(
+        mk("finalize"),
+        input({ config: config({ finish }) }),
+      );
+      const finalize = taskOf(result, "t-1").finalize;
+      assert(finalize !== null, `finalize hint expected for finish=${finish}`);
+      assertEquals(finalize.ship.ref_kind, refKind, finish);
+      assertEquals(finalize.ship.group_flags, ["ref", "branch", "tip", "base"]);
+      assertEquals(finalize.ship.branch, "task-pipeline/t-1");
+      assertEquals(finalize.ship.base, "main");
+      assertEquals(finalize.base, "main");
+    }
+
+    // run.kind はそのまま転記される (ship の mark/notify 導出の来歴)
+    for (const kind of ["initial", "pr_fix", "rebase_fix"] as const) {
+      const result = deriveNext(mk("finalize", kind), input());
+      assertEquals(taskOf(result, "t-1").finalize?.run_kind, kind);
+    }
+
+    // artifact が open なら既存のブランチ名を使う (restore 再走で切り直さない)
+    const openState = state([
       item("t-1", {
         progress: "running",
-        run: run({
-          kind,
-          gate: kind === "initial" ? "full" : null,
-          phase,
-        }),
+        run: run({ phase: "finalize" }),
+        artifact: openArtifact({ branch: "task-pipeline/legacy" }),
       }),
     ]);
-
-  // finalize でないフェーズではヒントを返さない
-  assertEquals(
-    taskOf(deriveNext(mk("implement"), input()), "t-1").finalize,
-    null,
-  );
-
-  for (
-    const [finish, refKind] of [
-      ["pr", "pr"],
-      ["commit", "commit"],
-      ["none", null],
-    ] as const
-  ) {
-    const result = deriveNext(
-      mk("finalize"),
-      input({ config: config({ finish }) }),
+    assertEquals(
+      deriveNext(openState, input()).tasks[0].finalize?.ship.branch,
+      "task-pipeline/legacy",
     );
-    const finalize = taskOf(result, "t-1").finalize;
-    assert(finalize !== null, `finalize hint expected for finish=${finish}`);
-    assertEquals(finalize.ship.ref_kind, refKind, finish);
-    assertEquals(finalize.ship.group_flags, ["ref", "branch", "tip", "base"]);
-    assertEquals(finalize.ship.branch, "task-pipeline/t-1");
-    assertEquals(finalize.ship.base, "main");
-    assertEquals(finalize.base, "main");
-  }
+  },
+);
 
-  // run.kind はそのまま転記される (ship の mark/notify 導出の来歴)
-  for (const kind of ["initial", "pr_fix", "rebase_fix"] as const) {
-    const result = deriveNext(mk("finalize", kind), input());
-    assertEquals(taskOf(result, "t-1").finalize?.run_kind, kind);
-  }
-
-  // artifact が open なら既存のブランチ名を使う (restore 再走で切り直さない)
-  const openState = state([
-    item("t-1", {
-      progress: "running",
-      run: run({ phase: "finalize" }),
-      artifact: openArtifact({ branch: "task-pipeline/legacy" }),
-    }),
-  ]);
-  assertEquals(
-    deriveNext(openState, input()).tasks[0].finalize?.ship.branch,
-    "task-pipeline/legacy",
-  );
-});
-
-Deno.test("next/finalize: rebase_off は config.rebase だけから来る", () => {
+nextTest("next/finalize: rebase_off は config.rebase だけから来る", () => {
   const mkState = (rebase: V2RebaseAsk | null) =>
     state([
       item("t-1", {
@@ -827,73 +880,79 @@ Deno.test("next/finalize: rebase_off は config.rebase だけから来る", () =
 // 5. 実行の生存管理
 // ---------------------------------------------------------------------------
 
-Deno.test("next/liveness: takeover_at 経路 (解除 / 30 分ちょうど / 未満)", () => {
-  const mk = (overrides: Partial<V2Run>) =>
-    state([item("t-1", { progress: "running", run: run(overrides) })]);
+nextTest(
+  "next/liveness: takeover_at 経路 (解除 / 30 分ちょうど / 未満)",
+  () => {
+    const mk = (overrides: Partial<V2Run>) =>
+      state([item("t-1", { progress: "running", run: run(overrides) })]);
 
-  // takeover_at より後に executor が動いた → 手を引く
-  assertEquals(
-    actionKinds(
-      taskOf(
-        deriveNext(
-          mk({
-            takeover_at: isoMinutesAgo(40),
-            executor_last_event_at: isoMinutesAgo(5),
-          }),
-          input(),
+    // takeover_at より後に executor が動いた → 手を引く
+    assertEquals(
+      actionKinds(
+        taskOf(
+          deriveNext(
+            mk({
+              takeover_at: isoMinutesAgo(40),
+              executor_last_event_at: isoMinutesAgo(5),
+            }),
+            input(),
+          ),
+          "t-1",
         ),
-        "t-1",
       ),
-    ),
-    ["clear-takeover"],
-  );
+      ["clear-takeover"],
+    );
 
-  // 30 分ちょうど → 引き継ぐ
-  assertEquals(
-    actionKinds(
-      taskOf(
-        deriveNext(
-          mk({
-            takeover_at: isoMinutesAgo(30),
-            executor_last_event_at: isoMinutesAgo(200),
-          }),
-          input(),
+    // 30 分ちょうど → 引き継ぐ
+    assertEquals(
+      actionKinds(
+        taskOf(
+          deriveNext(
+            mk({
+              takeover_at: isoMinutesAgo(30),
+              executor_last_event_at: isoMinutesAgo(200),
+            }),
+            input(),
+          ),
+          "t-1",
         ),
-        "t-1",
       ),
-    ),
-    ["takeover"],
-  );
+      ["takeover"],
+    );
 
-  // 30 分未満 → 待つ
-  const waiting = taskOf(
-    deriveNext(
-      mk({
-        takeover_at: isoMinutesAgo(29),
-        executor_last_event_at: isoMinutesAgo(200),
-      }),
-      input(),
-    ),
-    "t-1",
-  );
-  assertEquals(actionOf(waiting, "wait").reason, "takeover-pending");
+    // 30 分未満 → 待つ
+    const waiting = taskOf(
+      deriveNext(
+        mk({
+          takeover_at: isoMinutesAgo(29),
+          executor_last_event_at: isoMinutesAgo(200),
+        }),
+        input(),
+      ),
+      "t-1",
+    );
+    assertEquals(actionOf(waiting, "wait").reason, "takeover-pending");
 
-  // executor_last_event_at が無い場合も前後比較は成立しない → 経過で判断
-  assertEquals(
-    actionKinds(
-      taskOf(
-        deriveNext(
-          mk({ takeover_at: isoMinutesAgo(31), executor_last_event_at: null }),
-          input(),
+    // executor_last_event_at が無い場合も前後比較は成立しない → 経過で判断
+    assertEquals(
+      actionKinds(
+        taskOf(
+          deriveNext(
+            mk({
+              takeover_at: isoMinutesAgo(31),
+              executor_last_event_at: null,
+            }),
+            input(),
+          ),
+          "t-1",
         ),
-        "t-1",
       ),
-    ),
-    ["takeover"],
-  );
-});
+      ["takeover"],
+    );
+  },
+);
 
-Deno.test("next/liveness: executor が null なら 30 分を待たずに引き継ぐ", () => {
+nextTest("next/liveness: executor が null なら 30 分を待たずに引き継ぐ", () => {
   for (const takeoverAt of [null, isoMinutesAgo(1)]) {
     const result = deriveNext(
       state([
@@ -931,155 +990,170 @@ Deno.test("next/liveness: executor が null なら 30 分を待たずに引き�
   assertEquals(action.reason, "no-executor");
 });
 
-Deno.test("next/liveness: 90 分ちょうどは稼働中、超で status-check、dead 所有者は set-takeover", () => {
-  const mk = (min: number | null, session: string | null) =>
-    state([
-      item("t-1", {
-        progress: "running",
-        session,
-        run: run({
-          executor_last_event_at: min === null ? null : isoMinutesAgo(min),
-        }),
-      }),
-    ]);
-
-  // 90 分ちょうど → 稼働中
-  const alive = taskOf(deriveNext(mk(90, SELF), input()), "t-1");
-  assertEquals(actionOf(alive, "wait").reason, "executor-alive");
-
-  // 90 分より古い → Status check
-  assertEquals(
-    actionKinds(taskOf(deriveNext(mk(91, SELF), input()), "t-1")),
-    ["status-check"],
-  );
-
-  // 所有者不明 (unowned) でも SendMessage は試す
-  assertEquals(
-    actionKinds(taskOf(deriveNext(mk(91, null), input()), "t-1")),
-    ["status-check"],
-  );
-
-  // 所有セッションが死んでいる → 送らずに引き継ぎ待ちへ
-  const dead = taskOf(deriveNext(mk(91, "gone"), input()), "t-1");
-  assertEquals(actionOf(dead, "set-takeover").reason, "owner-dead-silent");
-
-  // 時刻が無いのも沈黙扱い
-  assertEquals(
-    actionKinds(taskOf(deriveNext(mk(null, SELF), input()), "t-1")),
-    ["status-check"],
-  );
-});
-
-Deno.test("next/liveness: 引き取りの枠は kind ごとに別で、埋まっていれば wait", () => {
-  const target = (kind: V2Run["kind"]) =>
-    item("t-target", {
-      progress: "running",
-      session: "gone",
-      run: run({
-        kind,
-        gate: kind === "initial" ? "full" : null,
-        phase: kind === "initial" ? "implement" : kind,
-        executor: null,
-      }),
-      artifact: kind === "pr_fix"
-        ? openArtifact({
-          follow: follow({
-            asks: { fix: fixAsk({ taken: true }), rebase: null },
+nextTest(
+  "next/liveness: 90 分ちょうどは稼働中、超で status-check、dead 所有者は set-takeover",
+  () => {
+    const mk = (min: number | null, session: string | null) =>
+      state([
+        item("t-1", {
+          progress: "running",
+          session,
+          run: run({
+            executor_last_event_at: min === null ? null : isoMinutesAgo(min),
           }),
-        })
-        : NONE_ARTIFACT,
-    });
-  const mine = (id: string, kind: V2Run["kind"]) =>
-    item(id, {
-      progress: "running",
-      session: SELF,
-      run: run({
-        kind,
-        gate: kind === "initial" ? "full" : null,
-        phase: "implement",
-      }),
-    });
+        }),
+      ]);
 
-  // initial の引き取り × 自分の initial が別に居る → 見送る
-  let result = deriveNext(
-    state([target("initial"), mine("t-mine", "initial")]),
-    input(),
-  );
-  assertEquals(
-    actionOf(taskOf(result, "t-target"), "wait").reason,
-    "own-slot-busy",
-  );
+    // 90 分ちょうど → 稼働中
+    const alive = taskOf(deriveNext(mk(90, SELF), input()), "t-1");
+    assertEquals(actionOf(alive, "wait").reason, "executor-alive");
 
-  // initial の引き取り × 自分の仕上げだけ → 枠は別なので引き取る
-  result = deriveNext(
-    state([target("initial"), mine("t-mine", "pr_fix")]),
-    input(),
-  );
-  assertEquals(actionKinds(taskOf(result, "t-target")), ["takeover"]);
-
-  // 仕上げの引き取り × 自分の仕上げが別に居る → 見送る
-  result = deriveNext(
-    state([target("pr_fix"), mine("t-mine", "rebase_fix")]),
-    input(),
-  );
-  assertEquals(
-    actionOf(taskOf(result, "t-target"), "wait").reason,
-    "own-slot-busy",
-  );
-
-  // 仕上げの引き取り × 自分の initial だけ → 引き取る
-  result = deriveNext(
-    state([target("pr_fix"), mine("t-mine", "initial")]),
-    input(),
-  );
-  assertEquals(actionKinds(taskOf(result, "t-target")), ["takeover"]);
-
-  // 自分が所有する同じタスク自身は枠を塞がない (起動し忘れの再起動)
-  result = deriveNext(
-    state([
-      item("t-solo", {
-        progress: "running",
-        session: SELF,
-        run: run({ executor: null }),
-      }),
-    ]),
-    input(),
-  );
-  assertEquals(actionKinds(taskOf(result, "t-solo")), ["takeover"]);
-});
-
-Deno.test("next/liveness: takeover は resume_phase / recheck_gate / needs_worktree を返す", () => {
-  const mk = (
-    phase: string,
-    gate: V2Run["gate"],
-    worktree: string | null,
-  ) =>
-    state([
-      item("t-1", {
-        progress: "running",
-        worktree,
-        run: run({ phase, gate, executor: null }),
-      }),
-    ]);
-
-  const takeover = (
-    phase: string,
-    gate: V2Run["gate"],
-    worktree: string | null,
-  ) =>
-    actionOf(
-      taskOf(deriveNext(mk(phase, gate, worktree), input()), "t-1"),
-      "takeover",
+    // 90 分より古い → Status check
+    assertEquals(
+      actionKinds(taskOf(deriveNext(mk(91, SELF), input()), "t-1")),
+      ["status-check"],
     );
 
-  assertEquals(takeover("research", "full", "/wt/x").resume_phase, "research");
-  assertEquals(takeover("research", "full", "/wt/x").recheck_gate, true);
-  assertEquals(takeover("implement", "full", "/wt/x").recheck_gate, false);
-  // light は既に降格済みなので gate 判定をやり直す意味が無い
-  assertEquals(takeover("research+plan", "light", "/wt/x").recheck_gate, false);
-  assertEquals(takeover("implement", "full", "/wt/x").needs_worktree, false);
-  assertEquals(takeover("implement", "full", null).needs_worktree, true);
-});
+    // 所有者不明 (unowned) でも SendMessage は試す
+    assertEquals(
+      actionKinds(taskOf(deriveNext(mk(91, null), input()), "t-1")),
+      ["status-check"],
+    );
+
+    // 所有セッションが死んでいる → 送らずに引き継ぎ待ちへ
+    const dead = taskOf(deriveNext(mk(91, "gone"), input()), "t-1");
+    assertEquals(actionOf(dead, "set-takeover").reason, "owner-dead-silent");
+
+    // 時刻が無いのも沈黙扱い
+    assertEquals(
+      actionKinds(taskOf(deriveNext(mk(null, SELF), input()), "t-1")),
+      ["status-check"],
+    );
+  },
+);
+
+nextTest(
+  "next/liveness: 引き取りの枠は kind ごとに別で、埋まっていれば wait",
+  () => {
+    const target = (kind: V2Run["kind"]) =>
+      item("t-target", {
+        progress: "running",
+        session: "gone",
+        run: run({
+          kind,
+          gate: kind === "initial" ? "full" : null,
+          phase: kind === "initial" ? "implement" : kind,
+          executor: null,
+        }),
+        artifact: kind === "pr_fix"
+          ? openArtifact({
+            follow: follow({
+              asks: { fix: fixAsk({ taken: true }), rebase: null },
+            }),
+          })
+          : NONE_ARTIFACT,
+      });
+    const mine = (id: string, kind: V2Run["kind"]) =>
+      item(id, {
+        progress: "running",
+        session: SELF,
+        run: run({
+          kind,
+          gate: kind === "initial" ? "full" : null,
+          phase: "implement",
+        }),
+      });
+
+    // initial の引き取り × 自分の initial が別に居る → 見送る
+    let result = deriveNext(
+      state([target("initial"), mine("t-mine", "initial")]),
+      input(),
+    );
+    assertEquals(
+      actionOf(taskOf(result, "t-target"), "wait").reason,
+      "own-slot-busy",
+    );
+
+    // initial の引き取り × 自分の仕上げだけ → 枠は別なので引き取る
+    result = deriveNext(
+      state([target("initial"), mine("t-mine", "pr_fix")]),
+      input(),
+    );
+    assertEquals(actionKinds(taskOf(result, "t-target")), ["takeover"]);
+
+    // 仕上げの引き取り × 自分の仕上げが別に居る → 見送る
+    result = deriveNext(
+      state([target("pr_fix"), mine("t-mine", "rebase_fix")]),
+      input(),
+    );
+    assertEquals(
+      actionOf(taskOf(result, "t-target"), "wait").reason,
+      "own-slot-busy",
+    );
+
+    // 仕上げの引き取り × 自分の initial だけ → 引き取る
+    result = deriveNext(
+      state([target("pr_fix"), mine("t-mine", "initial")]),
+      input(),
+    );
+    assertEquals(actionKinds(taskOf(result, "t-target")), ["takeover"]);
+
+    // 自分が所有する同じタスク自身は枠を塞がない (起動し忘れの再起動)
+    result = deriveNext(
+      state([
+        item("t-solo", {
+          progress: "running",
+          session: SELF,
+          run: run({ executor: null }),
+        }),
+      ]),
+      input(),
+    );
+    assertEquals(actionKinds(taskOf(result, "t-solo")), ["takeover"]);
+  },
+);
+
+nextTest(
+  "next/liveness: takeover は resume_phase / recheck_gate / needs_worktree を返す",
+  () => {
+    const mk = (
+      phase: string,
+      gate: V2Run["gate"],
+      worktree: string | null,
+    ) =>
+      state([
+        item("t-1", {
+          progress: "running",
+          worktree,
+          run: run({ phase, gate, executor: null }),
+        }),
+      ]);
+
+    const takeover = (
+      phase: string,
+      gate: V2Run["gate"],
+      worktree: string | null,
+    ) =>
+      actionOf(
+        taskOf(deriveNext(mk(phase, gate, worktree), input()), "t-1"),
+        "takeover",
+      );
+
+    assertEquals(
+      takeover("research", "full", "/wt/x").resume_phase,
+      "research",
+    );
+    assertEquals(takeover("research", "full", "/wt/x").recheck_gate, true);
+    assertEquals(takeover("implement", "full", "/wt/x").recheck_gate, false);
+    // light は既に降格済みなので gate 判定をやり直す意味が無い
+    assertEquals(
+      takeover("research+plan", "light", "/wt/x").recheck_gate,
+      false,
+    );
+    assertEquals(takeover("implement", "full", "/wt/x").needs_worktree, false);
+    assertEquals(takeover("implement", "full", null).needs_worktree, true);
+  },
+);
 
 // ---------------------------------------------------------------------------
 // 6. 着手可否
@@ -1101,7 +1175,7 @@ const openWithFollow = (id: string, session: string | null) =>
     }),
   });
 
-Deno.test("next/start: open_prs に数えない集合 (拒否側)", () => {
+nextTest("next/start: open_prs に数えない集合 (拒否側)", () => {
   const rejected: Array<[string, V2Item]> = [
     // 生きている他セッション所有 (excluded)
     ["alive-other", openWithFollow("t-x", OTHER)],
@@ -1147,7 +1221,7 @@ Deno.test("next/start: open_prs に数えない集合 (拒否側)", () => {
   }
 });
 
-Deno.test("next/start: open_prs に数える集合 (self / unowned / dead)", () => {
+nextTest("next/start: open_prs に数える集合 (self / unowned / dead)", () => {
   for (
     const [label, session] of [
       ["self", SELF],
@@ -1171,7 +1245,7 @@ Deno.test("next/start: open_prs に数える集合 (self / unowned / dead)", () 
   }
 });
 
-Deno.test("next/start: 拒否側 5 種と受理側 3 種を混ぜても open_prs は 3", () => {
+nextTest("next/start: 拒否側 5 種と受理側 3 種を混ぜても open_prs は 3", () => {
   const result = deriveNext(
     state([
       openWithFollow("t-other", OTHER),
@@ -1199,7 +1273,7 @@ Deno.test("next/start: 拒否側 5 種と受理側 3 種を混ぜても open_prs
   assertEquals(result.start.blocked_by.includes("max_open"), false);
 });
 
-Deno.test("next/start: 新規着手を塞ぐのは running(initial) だけ", () => {
+nextTest("next/start: 新規着手を塞ぐのは running(initial) だけ", () => {
   const queued = item("t-q", { progress: "queued", session: null });
   const mine = (kind: V2Run["kind"], session: string | null = SELF) =>
     item(`t-${kind}`, {
@@ -1240,40 +1314,43 @@ Deno.test("next/start: 新規着手を塞ぐのは running(initial) だけ", () 
   assertEquals(result.start.blocked_by, []);
 });
 
-Deno.test("next/start: inflight_limit は excluded な initial だけを 2 件から数える", () => {
-  const queued = item("t-q", { progress: "queued", session: null });
-  const other = (id: string, kind: V2Run["kind"]) =>
-    item(id, {
-      progress: "running",
-      session: OTHER,
-      run: run({ kind, gate: kind === "initial" ? "full" : null }),
-    });
+nextTest(
+  "next/start: inflight_limit は excluded な initial だけを 2 件から数える",
+  () => {
+    const queued = item("t-q", { progress: "queued", session: null });
+    const other = (id: string, kind: V2Run["kind"]) =>
+      item(id, {
+        progress: "running",
+        session: OTHER,
+        run: run({ kind, gate: kind === "initial" ? "full" : null }),
+      });
 
-  // 除外された running が 2 件でも、両方仕上げなら上限の対象外
-  let result = deriveNext(
-    state([queued, other("t-a", "pr_fix"), other("t-b", "rebase_fix")]),
-    input({ alive: [SELF, OTHER] }),
-  );
-  assertEquals(result.counts.running_excluded_initial, 0);
-  assertEquals(result.start.blocked_by, []);
+    // 除外された running が 2 件でも、両方仕上げなら上限の対象外
+    let result = deriveNext(
+      state([queued, other("t-a", "pr_fix"), other("t-b", "rebase_fix")]),
+      input({ alive: [SELF, OTHER] }),
+    );
+    assertEquals(result.counts.running_excluded_initial, 0);
+    assertEquals(result.start.blocked_by, []);
 
-  // initial 1 件 → 塞がない
-  result = deriveNext(
-    state([queued, other("t-a", "initial")]),
-    input({ alive: [SELF, OTHER] }),
-  );
-  assertEquals(result.start.blocked_by, []);
+    // initial 1 件 → 塞がない
+    result = deriveNext(
+      state([queued, other("t-a", "initial")]),
+      input({ alive: [SELF, OTHER] }),
+    );
+    assertEquals(result.start.blocked_by, []);
 
-  // initial 2 件ちょうど → 塞ぐ
-  result = deriveNext(
-    state([queued, other("t-a", "initial"), other("t-b", "initial")]),
-    input({ alive: [SELF, OTHER] }),
-  );
-  assertEquals(result.counts.running_excluded_initial, 2);
-  assertEquals(result.start.blocked_by, ["inflight_limit"]);
-});
+    // initial 2 件ちょうど → 塞ぐ
+    result = deriveNext(
+      state([queued, other("t-a", "initial"), other("t-b", "initial")]),
+      input({ alive: [SELF, OTHER] }),
+    );
+    assertEquals(result.counts.running_excluded_initial, 2);
+    assertEquals(result.start.blocked_by, ["inflight_limit"]);
+  },
+);
 
-Deno.test("next/start: max_tasks / max_open の境界と blocked_by の順序", () => {
+nextTest("next/start: max_tasks / max_open の境界と blocked_by の順序", () => {
   const queued = item("t-q", { progress: "queued", session: null });
 
   // max_tasks 省略 = 無制限
@@ -1336,7 +1413,7 @@ Deno.test("next/start: max_tasks / max_open の境界と blocked_by の順序", 
   });
 });
 
-Deno.test("next/start: countTaskLines は wc -l と同じ意味論", () => {
+nextTest("next/start: countTaskLines は wc -l と同じ意味論", () => {
   assertEquals(countTaskLines(""), 0);
   assertEquals(countTaskLines("a\nb\n"), 2);
   // 末尾改行が無い最終行は数えない
@@ -1348,116 +1425,130 @@ Deno.test("next/start: countTaskLines は wc -l と同じ意味論", () => {
 // 7. 回収の後始末
 // ---------------------------------------------------------------------------
 
-Deno.test("next/retire: resting × merged に retire を出し release_first は session 由来", () => {
-  const mk = (session: string | null, worktree: string | null) =>
-    state([
-      item("t-1", {
-        progress: "resting",
-        session,
-        worktree,
-        artifact: mergedArtifact({ branch: "task-pipeline/t-1" }),
-      }),
-    ]);
+nextTest(
+  "next/retire: resting × merged に retire を出し release_first は session 由来",
+  () => {
+    const mk = (session: string | null, worktree: string | null) =>
+      state([
+        item("t-1", {
+          progress: "resting",
+          session,
+          worktree,
+          artifact: mergedArtifact({ branch: "task-pipeline/t-1" }),
+        }),
+      ]);
 
-  let action = actionOf(
-    taskOf(deriveNext(mk(null, "/wt/t-1"), input()), "t-1"),
-    "retire",
-  );
-  assertEquals(action.release_first, false);
-  assertEquals(action.cleanup, {
-    worktree: "/wt/t-1",
-    branch: "task-pipeline/t-1",
-  });
+    let action = actionOf(
+      taskOf(deriveNext(mk(null, "/wt/t-1"), input()), "t-1"),
+      "retire",
+    );
+    assertEquals(action.release_first, false);
+    assertEquals(action.cleanup, {
+      worktree: "/wt/t-1",
+      branch: "task-pipeline/t-1",
+    });
 
-  // 揮発資源が残っていれば先に release
-  action = actionOf(
-    taskOf(deriveNext(mk(SELF, "/wt/t-1"), input()), "t-1"),
-    "retire",
-  );
-  assertEquals(action.release_first, true);
+    // 揮発資源が残っていれば先に release
+    action = actionOf(
+      taskOf(deriveNext(mk(SELF, "/wt/t-1"), input()), "t-1"),
+      "retire",
+    );
+    assertEquals(action.release_first, true);
 
-  // worktree が既に片付いていれば cleanup に載せない
-  action = actionOf(
-    taskOf(deriveNext(mk(null, null), input()), "t-1"),
-    "retire",
-  );
-  assertEquals(action.cleanup.worktree, null);
+    // worktree が既に片付いていれば cleanup に載せない
+    action = actionOf(
+      taskOf(deriveNext(mk(null, null), input()), "t-1"),
+      "retire",
+    );
+    assertEquals(action.cleanup.worktree, null);
 
-  // merged は follow を持たないので追従対象ではない
-  assertEquals(
-    taskOf(deriveNext(mk(null, null), input()), "t-1").follow_target,
-    false,
-  );
-});
+    // merged は follow を持たないので追従対象ではない
+    assertEquals(
+      taskOf(deriveNext(mk(null, null), input()), "t-1").follow_target,
+      false,
+    );
+  },
+);
 
 // ---------------------------------------------------------------------------
 // 8. 観測依頼と停滞
 // ---------------------------------------------------------------------------
 
-Deno.test("next/observation: merge-proof は open かつ tip 非 null のときだけ", () => {
-  let result = deriveNext(
-    state([
-      item("t-1", {
-        progress: "resting",
-        artifact: openArtifact({ tip: "sha-tip", branch: "task-pipeline/t-1" }),
-      }),
-    ]),
-    input(),
-  );
-  assertEquals(taskOf(result, "t-1").observations, [{
-    kind: "merge-proof",
-    tip: "sha-tip",
-    base: "main",
-    branch: "task-pipeline/t-1",
-    worktree: "/wt/t-1",
-  }]);
+nextTest(
+  "next/observation: merge-proof は open かつ tip 非 null のときだけ",
+  () => {
+    let result = deriveNext(
+      state([
+        item("t-1", {
+          progress: "resting",
+          artifact: openArtifact({
+            tip: "sha-tip",
+            branch: "task-pipeline/t-1",
+          }),
+        }),
+      ]),
+      input(),
+    );
+    assertEquals(taskOf(result, "t-1").observations, [{
+      kind: "merge-proof",
+      tip: "sha-tip",
+      base: "main",
+      branch: "task-pipeline/t-1",
+      worktree: "/wt/t-1",
+    }]);
 
-  // tip が無い (finish=none でコミット 0 件) → 依頼しない
-  result = deriveNext(
-    state([
-      item("t-1", {
-        progress: "resting",
-        artifact: openArtifact({ tip: null }),
-      }),
-    ]),
-    input(),
-  );
-  assertEquals(taskOf(result, "t-1").observations, []);
+    // tip が無い (finish=none でコミット 0 件) → 依頼しない
+    result = deriveNext(
+      state([
+        item("t-1", {
+          progress: "resting",
+          artifact: openArtifact({ tip: null }),
+        }),
+      ]),
+      input(),
+    );
+    assertEquals(taskOf(result, "t-1").observations, []);
 
-  // 回収済みには依頼しない
-  result = deriveNext(
-    state([item("t-1", { progress: "resting", artifact: mergedArtifact() })]),
-    input(),
-  );
-  assertEquals(taskOf(result, "t-1").observations, []);
-});
+    // 回収済みには依頼しない
+    result = deriveNext(
+      state([item("t-1", { progress: "resting", artifact: mergedArtifact() })]),
+      input(),
+    );
+    assertEquals(taskOf(result, "t-1").observations, []);
+  },
+);
 
-Deno.test("next/observation: tracker-list は非除外の queued も running も無いとき", () => {
-  const listed = (queue: V2Item[]) =>
-    deriveNext(state(queue), input({ alive: [SELF, OTHER] })).observations
-      .some((o) => o.kind === "tracker-list");
+nextTest(
+  "next/observation: tracker-list は非除外の queued も running も無いとき",
+  () => {
+    const listed = (queue: V2Item[]) =>
+      deriveNext(state(queue), input({ alive: [SELF, OTHER] })).observations
+        .some((o) => o.kind === "tracker-list");
 
-  assertEquals(listed([]), true);
-  assertEquals(listed([item("t-q", { progress: "queued" })]), false);
-  assertEquals(
-    listed([item("t-r", { progress: "running", run: run() })]),
-    false,
-  );
-  assertEquals(
-    listed([item("t-rest", { progress: "resting", artifact: openArtifact() })]),
-    true,
-  );
-  // 除外されたタスクとしてだけ存在する場合は「実質無い」ので list を依頼する
-  assertEquals(
-    listed([
-      item("t-q", { progress: "queued", session: OTHER }),
-      item("t-r", { progress: "running", session: OTHER, run: run() }),
-    ]),
-    true,
-  );
-});
+    assertEquals(listed([]), true);
+    assertEquals(listed([item("t-q", { progress: "queued" })]), false);
+    assertEquals(
+      listed([item("t-r", { progress: "running", run: run() })]),
+      false,
+    );
+    assertEquals(
+      listed([
+        item("t-rest", { progress: "resting", artifact: openArtifact() }),
+      ]),
+      true,
+    );
+    // 除外されたタスクとしてだけ存在する場合は「実質無い」ので list を依頼する
+    assertEquals(
+      listed([
+        item("t-q", { progress: "queued", session: OTHER }),
+        item("t-r", { progress: "running", session: OTHER, run: run() }),
+      ]),
+      true,
+    );
+  },
+);
 
-Deno.test("next/observation: stalled の set_to / defer / cutoff", () => {
+nextTest("next/observation: stalled の set_to / defer / cutoff", () => {
   const queued = item("t-q", { progress: "queued", session: null });
 
   // 着手できる → null
@@ -1549,42 +1640,60 @@ Deno.test("next/observation: stalled の set_to / defer / cutoff", () => {
   );
 });
 
-Deno.test("next/observation: 応答の骨格 (now / session / config / counts) を返す", () => {
-  const result = deriveNext(
-    state([
-      item("t-q", { progress: "queued", session: null }),
-      item("t-run", { progress: "running", run: run() }),
-      openWithFollow("t-open", SELF),
-      item("t-blocked", {
-        progress: "blocked",
-        blocked_reason: "人待ち",
-        session: null,
-      }),
-      openWithFollow("t-other", OTHER),
-    ]),
-    input({ alive: [SELF, OTHER], tasksStarted: 2 }),
+nextTest(
+  "next/observation: 応答の骨格 (now / session / config / counts) を返す",
+  () => {
+    const result = deriveNext(
+      state([
+        item("t-q", { progress: "queued", session: null }),
+        item("t-run", { progress: "running", run: run() }),
+        openWithFollow("t-open", SELF),
+        item("t-blocked", {
+          progress: "blocked",
+          blocked_reason: "人待ち",
+          session: null,
+        }),
+        openWithFollow("t-other", OTHER),
+      ]),
+      input({ alive: [SELF, OTHER], tasksStarted: 2 }),
+    );
+    assertEquals(result.ok, true);
+    assertEquals(result.now, NOW);
+    assertEquals(result.session, SELF);
+    assertEquals(result.config, DEFAULT_NEXT_CONFIG);
+    assertEquals(result.counts, {
+      queued: 1,
+      running: 1,
+      resting: 1,
+      blocked: 1,
+      excluded: 1,
+      open_prs: 1,
+      running_attendable_initial: 1,
+      running_excluded_initial: 0,
+      running_mine_finishing: 0,
+      tasks_started: 2,
+    });
+    // blocked は導出 status も blocked で、アクションは無い
+    assertEquals(taskOf(result, "t-blocked").status, "blocked");
+    assertEquals(actionKinds(taskOf(result, "t-blocked")), []);
+    // 導出 status (設計 1.1)
+    assertEquals(taskOf(result, "t-q").status, "approved");
+    assertEquals(taskOf(result, "t-run").status, "in_progress");
+    assertEquals(taskOf(result, "t-open").status, "in_review");
+  },
+);
+
+// ---------------------------------------------------------------------------
+// 導出 8 分類の網羅 (モジュール読み込み時の不変条件。冒頭の nextTest を参照)
+// ---------------------------------------------------------------------------
+
+const missingDerivationKeys = DERIVATION_KEYS.filter(
+  (k) => !seenDerivationKeys.has(k),
+);
+if (missingDerivationKeys.length > 0) {
+  throw new Error(
+    `state-next.test.ts: 導出 8 分類のうち ${
+      missingDerivationKeys.map((k) => `next/${k}`).join(" / ")
+    } のテストが無い`,
   );
-  assertEquals(result.ok, true);
-  assertEquals(result.now, NOW);
-  assertEquals(result.session, SELF);
-  assertEquals(result.config, DEFAULT_NEXT_CONFIG);
-  assertEquals(result.counts, {
-    queued: 1,
-    running: 1,
-    resting: 1,
-    blocked: 1,
-    excluded: 1,
-    open_prs: 1,
-    running_attendable_initial: 1,
-    running_excluded_initial: 0,
-    running_mine_finishing: 0,
-    tasks_started: 2,
-  });
-  // blocked は導出 status も blocked で、アクションは無い
-  assertEquals(taskOf(result, "t-blocked").status, "blocked");
-  assertEquals(actionKinds(taskOf(result, "t-blocked")), []);
-  // 導出 status (設計 1.1)
-  assertEquals(taskOf(result, "t-q").status, "approved");
-  assertEquals(taskOf(result, "t-run").status, "in_progress");
-  assertEquals(taskOf(result, "t-open").status, "in_review");
-});
+}

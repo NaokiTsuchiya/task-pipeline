@@ -17,5 +17,36 @@ jobs:
         with:
           deno-version: v2.x
 
+      - name: deno task check
+        run: deno task check
+
+      - name: deno task lint
+        run: deno task lint
+
+      # deno task fmt は書き込む。すべて整形済みなら作業ツリーは clean のままなので、
+      # 汚れた = 未整形のファイルがあった、として落とす。
+      - name: deno task fmt (tree must stay clean)
+        run: |
+          set -eu
+          deno task fmt
+          git status --porcelain
+          test -z "$(git status --porcelain)"
+
+      # ignored が 1 件でもあれば失敗させる。ignored は「実行されなかったテスト」であり、
+      # 例えば npm:ajv が取れないと S-AJV が ignored になる — CI ではそれを緑にしない。
+      # deno の要約行は ignored が 0 件のときトークンごと出さない (NO_COLOR で色を外して grep)。
+      # ログは作業ツリーの外 ($RUNNER_TEMP) に置く (上の fmt クリーン判定と干渉させない)。
+      - name: deno task test (no test may be ignored)
+        env:
+          NO_COLOR: "1"
+        run: |
+          set -euo pipefail
+          deno task test 2>&1 | tee "$RUNNER_TEMP/deno-test.log"
+          if grep -qE '\| [0-9]+ ignored' "$RUNNER_TEMP/deno-test.log"; then
+            echo "::error::some tests were ignored — every test must actually run in CI"
+            grep -E '\| [0-9]+ ignored' "$RUNNER_TEMP/deno-test.log"
+            exit 1
+          fi
+
       - name: Run test suite (fail on SKIP)
         run: TESTS_FAIL_ON_SKIP=1 sh tests/run.sh

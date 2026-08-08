@@ -9,7 +9,8 @@
 //   L-SESS   heartbeat のしきい値 (厳密不等号)
 //   L-DECL   LEDGER_VERBS の宣言
 //
-// 実行: sh tests/state-ledger-v2.test.sh
+// 実行: deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
+//       単体: deno test task-pipeline/scripts/state-ledger-v2.test.ts
 
 import {
   applyCandidatesDropV2,

@@ -22,8 +22,8 @@
 // 加えて、行列とフレームでは検出できない「座標を変えずに値を間違える」誤実装のための
 // 専用ケース: T-V2T-SHIP / T-V2T-CLAIM / T-V2T-LEDGER / T-V2T-OPT。
 //
-//   deno test task-pipeline/scripts/state-transitions-v2.test.ts
-//   または: sh tests/state-transitions-v2.test.sh (deno 不在なら SKIP + exit 0)
+//   deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
+//   単体: deno test task-pipeline/scripts/state-transitions-v2.test.ts
 
 import {
   checkReachability,

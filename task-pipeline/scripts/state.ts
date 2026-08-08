@@ -38,9 +38,9 @@
 // 依存は上から下への一方向で、逆向きの import は無い (各ファイルの冒頭コメント参照)。
 // 起動パスは分割前と同じ `task-pipeline/scripts/state.ts` のままである。
 //
-// テストの回し方: sh tests/state-cli.test.sh (deno 不在なら SKIP + exit 0)
-//   直接実行する場合: deno test --allow-read --allow-write --allow-env --allow-run
-//     task-pipeline/scripts/state.test.ts
+// テストの回し方: deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
+//   このファイルだけ直接回す場合: deno test --allow-read --allow-write --allow-env
+//     --allow-run task-pipeline/scripts/state.test.ts
 //
 // 実行時の外部依存はゼロ (npm:/jsr: 参照なし)。
 

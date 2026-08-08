@@ -9,7 +9,7 @@
 #   install.sh を一時ディレクトリへ実行した後、その symlink 越しのパス
 #   (<tmp skills dir>/task-pipeline/scripts/state.ts) を deno run にそのまま渡して `get` を
 #   実行し、リポジトリ実体を直接指すのではなく symlink を辿って正しく動くことを確認する。
-# - 依存ゼロ・ネットワーク不要。deno が無ければ SKIP + exit 0 (tests/state-cli.test.sh と同じ流儀)。
+# - 依存ゼロ・ネットワーク不要。deno が無ければ SKIP + exit 0 (tests/state-cli-iteration.test.sh と同じ流儀)。
 set -u
 
 tests_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
