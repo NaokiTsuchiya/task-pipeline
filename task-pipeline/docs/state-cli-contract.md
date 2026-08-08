@@ -847,7 +847,10 @@ state.ts set-takeover --state-dir <dir> --id <id> (--at <iso> | --clear true) [l
 - 書き込み系 verb は `<state dir>/lock` を `mkdir` で取り、`--lock-max-retries` 回まで
   `--lock-retry-ms` 間隔で再試行する。取れなければ `lock` (exit 11)。
 - **10 分より古い** lock は stale とみなして回収する (ちょうど 10 分は回収しない)。回収は
-  rename → 削除で行い、同時に複数のプロセスが回収を試みても 1 つだけが成功する。
+  rename → **退避したディレクトリが stale と判定した当のものであることを mtime で確認** →
+  削除の順で行い、同時に複数のプロセスが回収を試みても 1 つだけが成功する。確認で取り違えが
+  分かった場合 (判定と rename の間に別プロセスが回収を終えて lock を張り直していた場合) は、
+  掴んだ lock を元の名前へ戻して回収者にならない (設計根拠は `docs/state-machine.md` の 1 節)。
 - 書き込みは tmp ファイル + rename で原子的に行う。途中で落ちても state.json は前の内容の
   まま残る。
 - **lock を取らない verb**: `get` / `validate` / `next` / `verdict-path` / `sessions-alive` / `session-touch`。

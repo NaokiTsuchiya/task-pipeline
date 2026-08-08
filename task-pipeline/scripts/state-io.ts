@@ -75,6 +75,15 @@ function readLockReleasePauseMs(): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+// stale 判定と退避 (rename) の間で止まるフック。「判定は済ませたが退避が遅れた回収者」の
+// interleaving をテストから決定的に踏むためだけにある (state.test.ts の T-L7)。
+function readStaleRecoverPauseMs(): number {
+  const raw = tryReadEnv("STATE_TEST_STALE_RECOVER_PAUSE_MS");
+  if (raw === undefined) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -155,9 +164,19 @@ async function tryMkdirLock(lockPath: string): Promise<boolean> {
   }
 }
 
+async function mtimeMsOf(path: string): Promise<number | undefined> {
+  try {
+    return (await Deno.stat(path)).mtime?.getTime();
+  } catch {
+    return undefined;
+  }
+}
+
 // stale (10分より古い) lock を単独性を保って回収する。回収に成功した (=自分が除去者になった)
-// ときだけ true を返す。rename が失敗する (他所が同時に退避成功した) ときは false を返し、
-// 呼び出し側は通常の待ちに戻る。
+// ときだけ true を返す。false を返すのは 2 通りで、どちらも「自分は除去者ではない」を意味し、
+// 呼び出し側は通常の待ちに戻る:
+//   - rename が失敗した (他所が同時に退避に成功した、あるいは既に消えていた)
+//   - rename には成功したが、掴んだのが **stale と判定した当のディレクトリではなかった** (下記)
 async function tryRecoverStaleLock(lockPath: string): Promise<boolean> {
   let info: Deno.FileInfo;
   try {
@@ -170,10 +189,31 @@ async function tryRecoverStaleLock(lockPath: string): Promise<boolean> {
   if (!mtime) return false;
   const age = nowMs() - mtime.getTime();
   if (age <= STALE_LOCK_MS) return false; // 10分「より」古いときだけ (strict)
+
+  const pauseMs = readStaleRecoverPauseMs();
+  if (pauseMs > 0) await sleep(pauseMs);
+
   const stalePath = `${lockPath}.stale.${crypto.randomUUID()}`;
   try {
     await Deno.rename(lockPath, stalePath);
   } catch {
+    return false;
+  }
+  // rename がアトミックなのは「今 lock という名前が指しているもの」に対してであって、
+  // 上で stale と判定したディレクトリに対してではない。判定と rename の間に別プロセスが
+  // 回収を終えて lock を張り直していると、ここで掴んでいるのは **その新しい lock** になる
+  // (放置すると 2 プロセスが同時に回収者になり、同時に lock を保持してしまう)。
+  // mtime は rename で保存され、lock ディレクトリは作成後に中身が変わらないので、判定時の
+  // mtime と一致するかどうかが、そのまま「同じディレクトリを掴んでいるか」の判定になる。
+  if ((await mtimeMsOf(stalePath)) !== mtime.getTime()) {
+    try {
+      await Deno.rename(stalePath, lockPath); // 取り違え: 掴んだ lock を元の名前へ戻す
+    } catch {
+      // 戻せない場合に退避名を残すと、誰も掃除しないディレクトリが state dir に残る。
+      try {
+        await Deno.remove(stalePath, { recursive: true });
+      } catch { /* 消せなくても「回収者ではない」に変わりはない */ }
+    }
     return false;
   }
   await Deno.remove(stalePath, { recursive: true });

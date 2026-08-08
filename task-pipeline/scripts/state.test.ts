@@ -138,6 +138,15 @@ async function statMtime(path: string): Promise<number> {
   return info.mtime?.getTime() ?? 0;
 }
 
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await Deno.stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function setMtimeMinutesAgo(
   path: string,
   nowMsValue: number,
@@ -1014,6 +1023,10 @@ Deno.test("T-L4: a lock older than 10 minutes is reclaimed exactly once", async 
     allowEnv: ["STATE_TEST_NOW_MS"],
     env: { STATE_TEST_NOW_MS: String(now) },
   };
+  // リトライ予算 (20ms × 199 ≒ 4 秒) は、回収した側の read-modify-write が終わるまで
+  // もう一方が待ち切れる長さに取る。予算は lock を取得できる条件 (mkdir の成功、または
+  // stale 回収 + mkdir の成功) には現れないので、増やしても排他は緩まない — 負けた側が
+  // lock エラーで降りる代わりに実際に待って書くようになるぶん、検査は厳しくなる。
   const [a, b] = await Promise.all([
     runCli([
       "history-append",
@@ -1022,9 +1035,9 @@ Deno.test("T-L4: a lock older than 10 minutes is reclaimed exactly once", async 
       "--line",
       "a",
       "--lock-retry-ms",
-      "5",
+      "20",
       "--lock-max-retries",
-      "5",
+      "200",
     ], env),
     runCli([
       "history-append",
@@ -1033,15 +1046,87 @@ Deno.test("T-L4: a lock older than 10 minutes is reclaimed exactly once", async 
       "--line",
       "b",
       "--lock-retry-ms",
-      "5",
+      "20",
       "--lock-max-retries",
-      "5",
+      "200",
     ], env),
   ]);
   assertEquals(a.code, 0, a.stdout);
   assertEquals(b.code, 0, b.stdout);
   const state = await readState(dir);
-  assertEquals((state.history as string[]).length, 2);
+  const history = state.history as string[];
+  // 件数だけでは「2 件あるが片方が重複」を検出できないので、両方の line の存在も見る。
+  assertEquals(history.length, 2);
+  assert(history.includes("a"), `history must keep line a: ${history}`);
+  assert(history.includes("b"), `history must keep line b: ${history}`);
+  assert(
+    !(await pathExists(`${dir}/lock`)),
+    "lock must not be left behind after both callers finish",
+  );
+});
+
+Deno.test("T-L7: a stale recovery landing on a re-created lock does not steal it", async () => {
+  // stale 判定 (stat) と退避 (rename) の間に、別プロセスが回収を終えて lock を張り直す
+  // interleaving を決定的に踏ませる。rename がアトミックなのは「今 lock という名前が指して
+  // いるもの」に対してであって、判定したディレクトリに対してではないので、確認が無いと
+  // 遅れた側が **新しい保持者の lock** を退避・削除してしまい、2 プロセスが同時に lock を
+  // 持って互いの書き込みを踏む (両者 exit 0 のまま history が 1 件になる)。
+  const dir = await tempDir();
+  await setupQueue(dir, []);
+  await Deno.mkdir(`${dir}/lock`);
+  const now = Date.now();
+  await setMtimeMinutesAgo(`${dir}/lock`, now, 11);
+  const lockFlags = ["--lock-retry-ms", "20", "--lock-max-retries", "200"];
+  // 先発 b: stale と判定した後 600ms 止まってから rename する (= 遅れた回収者)。
+  const slow = spawnCli([
+    "history-append",
+    "--state-dir",
+    dir,
+    "--line",
+    "b",
+    ...lockFlags,
+  ], {
+    allowRead: [dir],
+    allowWrite: [dir],
+    allowEnv: ["STATE_TEST_NOW_MS", "STATE_TEST_STALE_RECOVER_PAUSE_MS"],
+    env: {
+      STATE_TEST_NOW_MS: String(now),
+      STATE_TEST_STALE_RECOVER_PAUSE_MS: "600",
+    },
+  });
+  // 先発が stale を判定し終える頃に後発を出す。
+  await new Promise((r) => setTimeout(r, 150));
+  // 後発 a: 回収して lock を張り直し、state.json の置き換え直前で lock を保持したまま
+  // 900ms 止まる。先発の rename はこの保持中に着地する。
+  const fast = spawnCli([
+    "history-append",
+    "--state-dir",
+    dir,
+    "--line",
+    "a",
+    ...lockFlags,
+  ], {
+    allowRead: [dir],
+    allowWrite: [dir],
+    allowEnv: ["STATE_TEST_NOW_MS", "STATE_TEST_PAUSE_MS"],
+    env: { STATE_TEST_NOW_MS: String(now), STATE_TEST_PAUSE_MS: "900" },
+  });
+  const [rb, ra] = await Promise.all([slow.output(), fast.output()]);
+  const decoder = new TextDecoder();
+  assertEquals(ra.code, 0, decoder.decode(ra.stderr));
+  assertEquals(rb.code, 0, decoder.decode(rb.stderr));
+  const state = await readState(dir);
+  const history = state.history as string[];
+  assertEquals(history.length, 2);
+  assert(history.includes("a"), `history must keep line a: ${history}`);
+  assert(history.includes("b"), `history must keep line b: ${history}`);
+  assert(!(await pathExists(`${dir}/lock`)), "lock must not be left behind");
+  // 退避名 (lock.stale.*) の取りこぼしも残置として検出する。
+  const leftovers: string[] = [];
+  for await (const entry of Deno.readDir(dir)) {
+    if (entry.name.startsWith("lock")) leftovers.push(entry.name);
+  }
+  assertEquals(leftovers, []);
 });
 
 Deno.test("T-L5: a lock removed by someone else during release is tolerated", async () => {
