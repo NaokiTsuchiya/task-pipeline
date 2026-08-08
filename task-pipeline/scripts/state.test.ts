@@ -3076,6 +3076,449 @@ Deno.test("T-V-next-6: --session/--alive/--now/--config are all optional", async
   assertEquals((out.counts as Record<string, number>).tasks_started, 0);
 });
 
+// ---------------------------------------------------------------------------
+// T-V-verdict-path — 読み取り専用 verb `verdict-path` の CLI 固有の観測
+//
+// 導出そのもの (フェーズ・findings・run dir の入力クラス) は state-verdict-path.test.ts が
+// 直 import で網羅する。ここが持つのは CLI 経路でしか見えないものだけ: exit code、
+// state.json のバイト列不変、lock を取らないこと、**run dir の実列挙**
+// (サブディレクトリを成果物と取り違えないこと、ディレクトリ不在の許容)、
+// そして gh-46 の受け入れ条件が「CLI が返す」ことを求める 3 点
+// (全フェーズが変更前の規則と一致 / サイクル 2 周で上書きしない /
+//  fix-start --reset-attempts で連番が巻き戻らない)。
+// ---------------------------------------------------------------------------
+
+// 変更前の SKILL.md 手順 6 の規則をそのまま写した独立オラクル (実装から import しない)。
+function legacyVerdictPath(
+  dir: string,
+  id: string,
+  phase: string,
+  attempt: number,
+  n: number | null,
+): string {
+  const file = phase === "pr_fix" || phase === "rebase_fix"
+    ? `${phase}-${n}-${attempt}.json`
+    : `${phase}-${attempt}.json`;
+  return `${dir}/runs/${id}/verdicts/${file}`;
+}
+
+async function writeRunDirFiles(
+  dir: string,
+  id: string,
+  names: string[],
+): Promise<void> {
+  const runDir = `${dir}/runs/${id}`;
+  await Deno.mkdir(runDir, { recursive: true });
+  for (const name of names) await Deno.writeTextFile(`${runDir}/${name}`, "");
+}
+
+function runningItem(
+  id: string,
+  run: Record<string, unknown>,
+  fixFindings: string | null = null,
+): Record<string, unknown> {
+  const artifact = fixFindings === null ? { state: "none" } : openArtifact({
+    follow: followOf({
+      asks: {
+        fix: fixAsk({ findings: fixFindings, taken: true }),
+        rebase: null,
+      },
+    }),
+  });
+  return queueItem({ id, progress: "running", run: runOf(run), artifact });
+}
+
+Deno.test("T-V-verdict-path-1: every verified phase matches the pre-change SKILL.md rule", async () => {
+  const dir = await tempDir();
+  // [id, run の上書き, findings, run dir に置くファイル, 旧規則に渡す <n>]
+  const cases: Array<
+    [string, Record<string, unknown>, string | null, string[], number | null]
+  > = [
+    // gate: full の 4 フェーズ
+    [
+      "f-research",
+      { gate: "full", phase: "research", attempts: 0 },
+      null,
+      [],
+      null,
+    ],
+    ["f-plan", { gate: "full", phase: "plan", attempts: 1 }, null, [], null],
+    [
+      "f-implement",
+      { gate: "full", phase: "implement", attempts: 2 },
+      null,
+      [],
+      null,
+    ],
+    [
+      "f-report",
+      { gate: "full", phase: "report", attempts: 0 },
+      null,
+      [],
+      null,
+    ],
+    // gate: light の 3 フェーズ
+    [
+      "l-rp",
+      { gate: "light", phase: "research+plan", attempts: 0 },
+      null,
+      [],
+      null,
+    ],
+    [
+      "l-implement",
+      { gate: "light", phase: "implement", attempts: 1 },
+      null,
+      [],
+      null,
+    ],
+    [
+      "l-report",
+      { gate: "light", phase: "report", attempts: 0 },
+      null,
+      [],
+      null,
+    ],
+    // 連番を要する 2 フェーズ
+    [
+      "c-prfix",
+      { kind: "pr_fix", gate: null, phase: "pr_fix", attempts: 1 },
+      "/x/watch/2.md",
+      ["pr-fix-2.md"],
+      2,
+    ],
+    [
+      "c-rebasefix",
+      { kind: "rebase_fix", gate: null, phase: "rebase_fix", attempts: 0 },
+      null,
+      ["rebase-fix-3.md"],
+      3,
+    ],
+    // finalize からの迂回 (rebase-start の入口 b): kind は pr_fix のまま phase だけが
+    // rebase_fix に動き、asks.fix は taken:true で findings を保持している。
+    // 旧規則の <n> は「対応する rebase-fix-<n>.md の連番」であって findings の連番ではない。
+    [
+      "c-detour",
+      { kind: "pr_fix", gate: null, phase: "rebase_fix", attempts: 0 },
+      "/x/watch/2.md",
+      ["rebase-fix-1.md", "pr-fix-2.md"],
+      1,
+    ],
+  ];
+
+  await setupQueue(
+    dir,
+    cases.map(([id, run, findings]) => runningItem(id, run, findings)),
+  );
+  for (const [id, , , files] of cases) await writeRunDirFiles(dir, id, files);
+
+  for (const [id, run, , , n] of cases) {
+    const out = await expectOkUnchanged(dir, [
+      "verdict-path",
+      "--state-dir",
+      dir,
+      "--id",
+      id,
+    ]);
+    assertEquals(out.ok, true, id);
+    assertEquals(out.id, id, id);
+    assertEquals(
+      out.path,
+      legacyVerdictPath(
+        dir,
+        id,
+        run.phase as string,
+        run.attempts as number,
+        n,
+      ),
+      `path for ${id}`,
+    );
+    assertEquals(out.run_dir, `${dir}/runs/${id}`, `run_dir for ${id}`);
+    assertEquals(out.seq, n, `seq for ${id}`);
+  }
+});
+
+Deno.test("T-V-verdict-path-2: a second fix cycle does not overwrite the first verdict", async () => {
+  const dir = await tempDir();
+  const id = "t-1";
+  // 1 周目: fix-request → fix-start で attempts が 0 になった直後。
+  await setupQueue(dir, [
+    restingOpen({
+      asks: {
+        fix: fixAsk({ findings: `${dir}/runs/${id}/watch/1.md` }),
+        rebase: null,
+      },
+    }),
+  ]);
+  await writeRunDirFiles(dir, id, []);
+  await expectOk(dir, [
+    "fix-start",
+    "--state-dir",
+    dir,
+    "--id",
+    id,
+    "--session",
+    "s1",
+  ]);
+  await writeRunDirFiles(dir, id, ["pr-fix-1.md"]);
+  const first = await expectOkUnchanged(dir, [
+    "verdict-path",
+    "--state-dir",
+    dir,
+    "--id",
+    id,
+  ]);
+  assertEquals(first.attempt, 0, "fix-start resets attempts");
+  assertEquals(first.seq, 1);
+  assertEquals(first.seq_source, "findings");
+
+  // ship → 新しい findings で 2 周目。fix-start がまた attempts を 0 に戻す。
+  await expectOk(dir, [
+    "advance",
+    "--state-dir",
+    dir,
+    "--id",
+    id,
+    "--from",
+    "pr_fix",
+    "--to",
+    "finalize",
+  ]);
+  await expectOk(dir, [
+    "ship",
+    "--state-dir",
+    dir,
+    "--id",
+    id,
+    "--commits",
+    "1",
+    "--ref",
+    "https://example.com/o/r/pull/1",
+    "--branch",
+    "task-pipeline/t-1",
+    "--tip",
+    "sha-tip",
+    "--base",
+    "main",
+  ]);
+  await expectOk(dir, [
+    "fix-request",
+    "--state-dir",
+    dir,
+    "--id",
+    id,
+    "--ids",
+    "rc-2",
+    "--findings",
+    `${dir}/runs/${id}/watch/2.md`,
+  ]);
+  await expectOk(dir, [
+    "fix-start",
+    "--state-dir",
+    dir,
+    "--id",
+    id,
+    "--session",
+    "s1",
+  ]);
+  await writeRunDirFiles(dir, id, ["pr-fix-1.md", "pr-fix-2.md"]);
+  const second = await expectOkUnchanged(dir, [
+    "verdict-path",
+    "--state-dir",
+    dir,
+    "--id",
+    id,
+  ]);
+  assertEquals(second.attempt, 0, "the second cycle starts at attempt 0 again");
+  assertEquals(second.seq, 2);
+  assert(
+    first.path !== second.path,
+    `the second cycle must not reuse ${String(first.path)}`,
+  );
+});
+
+Deno.test("T-V-verdict-path-3: fix-start --reset-attempts does not rewind the sequence", async () => {
+  const dir = await tempDir();
+  const id = "t-1";
+  await setupQueue(dir, [
+    restingOpen({
+      asks: {
+        fix: fixAsk({ findings: `${dir}/runs/${id}/watch/3.md` }),
+        rebase: null,
+      },
+      ledger: ledgerOf({ fix_attempts: 4 }),
+    }),
+  ]);
+  await writeRunDirFiles(dir, id, [
+    "pr-fix-1.md",
+    "pr-fix-2.md",
+    "pr-fix-3.md",
+  ]);
+  const started = await expectOk(dir, [
+    "fix-start",
+    "--state-dir",
+    dir,
+    "--id",
+    id,
+    "--session",
+    "s1",
+    "--reset-attempts",
+    "true",
+  ]);
+  // ledger.fix_attempts は 1 から数え直される — 連番の材料ではないことの対照。
+  assertEquals(started.fix_attempts, 1);
+  const out = await expectOkUnchanged(dir, [
+    "verdict-path",
+    "--state-dir",
+    dir,
+    "--id",
+    id,
+  ]);
+  assertEquals(
+    out.seq,
+    3,
+    "the findings sequence must not rewind with fix_attempts",
+  );
+  assertEquals(out.path, `${dir}/runs/${id}/verdicts/pr_fix-3-0.json`);
+});
+
+Deno.test("T-V-verdict-path-4: run dir subdirectories and a missing run dir are tolerated", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    runningItem("t-dirs", {
+      kind: "rebase_fix",
+      gate: null,
+      phase: "rebase_fix",
+    }),
+    runningItem("t-norundir", {
+      kind: "rebase_fix",
+      gate: null,
+      phase: "rebase_fix",
+    }),
+  ]);
+  // `verdicts/` `watch/` `rebase/` は成果物ではない。紛らわしい名前のディレクトリも置く。
+  await Deno.mkdir(`${dir}/runs/t-dirs/verdicts`, { recursive: true });
+  await Deno.mkdir(`${dir}/runs/t-dirs/watch`, { recursive: true });
+  await Deno.mkdir(`${dir}/runs/t-dirs/rebase-fix-9.md`, { recursive: true });
+  await writeRunDirFiles(dir, "t-dirs", ["rebase-fix-2.md", "research.md"]);
+
+  const withDirs = await expectOkUnchanged(dir, [
+    "verdict-path",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-dirs",
+  ]);
+  assertEquals(
+    withDirs.seq,
+    2,
+    "a directory named like an artifact is not counted",
+  );
+  assertEquals(withDirs.seq_source, "run-dir");
+
+  const noRunDir = await expectOkUnchanged(dir, [
+    "verdict-path",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-norundir",
+  ]);
+  assertEquals(noRunDir.seq, 1, "a missing run dir is not an error");
+  assertEquals(noRunDir.seq_source, "default");
+});
+
+Deno.test("T-V-verdict-path-5: preconditions — missing id, not running, finalize", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ id: "t-queued", progress: "queued" }),
+    restingOpen({}, { id: "t-resting" }),
+    runningItem("t-finalize", { gate: "full", phase: "finalize" }),
+    runningItem("t-ok", { gate: "full", phase: "report" }),
+  ]);
+  const unknown = await expectFailureUnchanged(
+    dir,
+    ["verdict-path", "--state-dir", dir, "--id", "t-nope"],
+    EXIT_CODES.missing,
+  );
+  assertEquals(unknown.error, "missing");
+  for (const id of ["t-queued", "t-resting", "t-finalize"]) {
+    const out = await expectFailureUnchanged(
+      dir,
+      ["verdict-path", "--state-dir", dir, "--id", id],
+      EXIT_CODES.conflict,
+    );
+    assertEquals(out.error, "conflict", id);
+  }
+  // 対照: 同じ state で前提を満たすものは通る。
+  const ok = await expectOkUnchanged(dir, [
+    "verdict-path",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-ok",
+  ]);
+  assertEquals(ok.path, `${dir}/runs/t-ok/verdicts/report-0.json`);
+});
+
+Deno.test("T-V-verdict-path-6: usage errors and no lock is taken", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    runningItem("t-1", { gate: "full", phase: "research" }),
+  ]);
+  for (
+    const args of [
+      ["verdict-path", "--state-dir", dir], // --id が無い
+      [
+        "verdict-path",
+        "--state-dir",
+        dir,
+        "--id",
+        "t-1",
+        "--lock-retry-ms",
+        "10",
+      ],
+      [
+        "verdict-path",
+        "--state-dir",
+        dir,
+        "--id",
+        "t-1",
+        "--lock-max-retries",
+        "1",
+      ],
+      ["verdict-path", "--state-dir", dir, "--id", "t-1", "--session", "s1"],
+    ]
+  ) {
+    const res = await runVerb(dir, args);
+    assertEquals(res.code, EXIT_CODES.usage, `usage for ${args.join(" ")}`);
+  }
+
+  // 他プロセスが lock を握っていても読み取り専用 verb は待たされない。
+  await Deno.mkdir(`${dir}/lock`);
+  const out = await expectOkUnchanged(dir, [
+    "verdict-path",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+  ]);
+  assertEquals(out.file, "research-0.json");
+  await Deno.remove(`${dir}/lock`);
+});
+
+Deno.test("T-V-verdict-path-7: a missing state.json is `missing`", async () => {
+  const dir = await tempDir();
+  const res = await runVerb(dir, [
+    "verdict-path",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+  ]);
+  assertEquals(res.code, EXIT_CODES.missing);
+  assertEquals(parseJson(res.stdout).error, "missing");
+});
+
 Deno.test("T-V-set-worktree: records worktree/base and can drop the withdrawn branch record", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [queueItem({ progress: "running", run: runOf() })], {
@@ -3734,7 +4177,7 @@ Deno.test("T-D2: verb headings match ALLOWED_FLAGS keys", async () => {
     [],
     `documented but unimplemented: ${missingInImpl}`,
   );
-  assertEquals(implVerbs.size, 46, "the dispatch set is 46 verbs");
+  assertEquals(implVerbs.size, 47, "the dispatch set is 47 verbs");
 });
 
 Deno.test("T-D3: the node tables match the v2 declarations", async () => {
@@ -3893,7 +4336,7 @@ Deno.test("T-D6: every dispatch verb is either a transition or a ledger verb", (
     [],
     "declared ledger verbs with no dispatch entry",
   );
-  assertEquals(transition.size + ledger.size, dispatch.size, "46 = 32 + 14");
+  assertEquals(transition.size + ledger.size, dispatch.size, "47 = 32 + 15");
 });
 
 // 受け入れ条件4 (gh-39): 「lock を取らない読み取り専用 verb」の一覧が、契約文書と

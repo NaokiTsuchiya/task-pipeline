@@ -2,7 +2,7 @@
 //
 // state CLI の **層 4 — verb 名から実装への表**。受理するフラグの一覧 (ALLOWED_FLAGS) と
 // cmd 実装への割り当て (HANDLERS) の 2 つだけを持ち、**この 2 つのキー集合が
-// ディスパッチ集合そのもの**である (46 verb = VERB_SPEC 32 + LEDGER_VERBS 14)。
+// ディスパッチ集合そのもの**である (47 verb = VERB_SPEC 32 + LEDGER_VERBS 15)。
 //
 // 分けてある理由: verb を 1 つ足す/消すときに触るのがこのファイルだけになり、
 // 「フラグ表には有るのに実装が無い」「実装は有るのに契約文書に無い」というずれが
@@ -25,6 +25,7 @@ import {
   cmdSessionTouch,
   cmdStalledSet,
   cmdValidate,
+  cmdVerdictPath,
 } from "./state-verbs-ledger.ts";
 import {
   cmdAdvance,
@@ -168,6 +169,8 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
   "validate": new Set(["state-dir"]),
   // 読み取り専用なので lock フラグを持たない (get / validate / sessions-alive と同じ)。
   "next": new Set(["state-dir", "session", "alive", "now", "config"]),
+  // 同じく読み取り専用 (検証ゲートの直前に判定 JSON の書き込み先を問う)。
+  "verdict-path": new Set(["state-dir", "id"]),
   "session-touch": new Set(["state-dir", "id", "cleanup-stale-min"]),
   "sessions-alive": new Set(["state-dir", "alive-max-min"]),
   "history-append": new Set([
@@ -288,7 +291,7 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
 // dispatch
 //
 // ディスパッチ表のキー集合は ALLOWED_FLAGS と一致し、その内訳は VERB_SPEC (遷移 32) と
-// LEDGER_VERBS (帳簿 14) で尽きる。どちらにも属さない verb を足すと state.test.ts の
+// LEDGER_VERBS (帳簿 15) で尽きる。どちらにも属さない verb を足すと state.test.ts の
 // 分類ネットが落ちる。
 // ---------------------------------------------------------------------------
 
@@ -303,6 +306,7 @@ export const HANDLERS: Record<Verb, CmdHandler> = {
   "get": (stateDir) => cmdGet(stateDir),
   "validate": (stateDir) => cmdValidate(stateDir),
   "next": cmdNext,
+  "verdict-path": cmdVerdictPath,
   "session-touch": cmdSessionTouch,
   "sessions-alive": cmdSessionsAlive,
   "history-append": cmdHistoryAppend,

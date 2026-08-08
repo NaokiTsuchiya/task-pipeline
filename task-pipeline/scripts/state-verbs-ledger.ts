@@ -1,10 +1,10 @@
 // task-pipeline/scripts/state-verbs-ledger.ts
 //
-// state CLI の **層 3 — 帳簿系 14 verb の cmd 実装**:
+// state CLI の **層 3 — 帳簿系 15 verb の cmd 実装**:
 //
-//   init / get / validate / next / session-touch / sessions-alive /
-//   history-append / candidates-set / candidates-drop / promoted-add /
-//   promoted-drop / relisted-add / relisted-drop / stalled-set
+//   init / get / validate / next / verdict-path / session-touch /
+//   sessions-alive / history-append / candidates-set / candidates-drop /
+//   promoted-add / promoted-drop / relisted-add / relisted-drop / stalled-set
 //
 // queue エントリの座標 (領域 P × 領域 A) を持たない verb だけがここに居る
 // (対応する純関数は state-ledger-v2.ts の LEDGER_VERBS)。**queue エントリを対象にする
@@ -13,8 +13,9 @@
 // 各 cmd は「flag 抽出・usage 検証 → lock 越しに純関数へ委譲 → 成功 JSON 組み立て」の
 // 薄い形で、判断そのものは持たない。
 
-import { STALLED_VALUES } from "./state-model-v2.ts";
+import { STALLED_VALUES, VERIFIED_PHASE_VALUES } from "./state-model-v2.ts";
 import { countTaskLines, deriveNext, parseNextConfig } from "./state-next.ts";
+import { deriveVerdictPath, runDirOf } from "./state-verdict-path.ts";
 import { checkStateV2 } from "./state-schema-v2.ts";
 import {
   applyCandidatesDropV2,
@@ -34,7 +35,7 @@ import {
   type StalledArg,
   validateV2,
 } from "./state-ledger-v2.ts";
-import { CliErrorV2 } from "./state-transitions-v2.ts";
+import { CliErrorV2, followOf } from "./state-transitions-v2.ts";
 import {
   acquireLock,
   atomicWriteText,
@@ -209,6 +210,82 @@ export async function cmdNext(
     config,
     tasksStarted: await readTasksStarted(stateDir, session),
   }) as unknown as Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// verdict-path 専用: run dir 直下のファイル名の列挙
+//
+// `runs/<id>/` は state dir 配下なので、既存の `--allow-read=<state dir>` の範囲で読める
+// (権限の拡張は不要)。ディレクトリが無ければ空 — 連番の材料が無いだけで、エラーではない
+// (最初のサイクルでは executor が成果物を書く前にここへ来ることもある)。
+// **ファイルだけを数える** — `verdicts/` `watch/` `rebase/` といったサブディレクトリを
+// 成果物と取り違えないため。
+// ---------------------------------------------------------------------------
+
+async function readRunDirEntries(
+  stateDir: string,
+  id: string,
+): Promise<string[]> {
+  const entries: string[] = [];
+  try {
+    for await (const entry of Deno.readDir(runDirOf(stateDir, id))) {
+      if (entry.isFile) entries.push(entry.name);
+    }
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return [];
+    throw e;
+  }
+  return entries;
+}
+
+/**
+ * 検証ゲートを起動する直前に、判定 JSON の書き込み先を返す (読み取り専用)。
+ *
+ * 前提は 3 つで、どれも `conflict`: そのタスクが飛行中であること (`progress == running`
+ * かつ `run != null`)、その `run.phase` が検証ゲートを持つフェーズであること
+ * (= `finalize` でない)。id が queue に無ければ `missing`。
+ */
+export async function cmdVerdictPath(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+
+  const parsed = await readState(stateDir);
+  const check = checkStateV2(parsed);
+  if (!check.ok) {
+    throw new CliErrorV2("schema", `${check.path}: ${check.message}`);
+  }
+  const state = normalizeStateV2(parsed as Record<string, unknown>);
+
+  const item = state.queue.find((entry) => entry.id === id);
+  if (item === undefined) {
+    throw new CliErrorV2("missing", `id not found in queue: ${id}`);
+  }
+  const run = item.run;
+  if (item.progress !== "running" || run === null) {
+    throw new CliErrorV2(
+      "conflict",
+      `verdict-path requires progress==running with a run: ${id} is ${item.progress}`,
+    );
+  }
+  if (!(VERIFIED_PHASE_VALUES as readonly string[]).includes(run.phase)) {
+    throw new CliErrorV2(
+      "conflict",
+      `phase has no verification gate: ${run.phase}`,
+    );
+  }
+
+  const derivation = deriveVerdictPath({
+    stateDir,
+    id,
+    phase: run.phase,
+    attempt: run.attempts,
+    findings: followOf(item)?.asks.fix?.findings ?? null,
+    runDirEntries: await readRunDirEntries(stateDir, id),
+  });
+
+  return { ok: true, id, ...derivation };
 }
 
 export async function cmdSessionTouch(

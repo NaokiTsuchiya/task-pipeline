@@ -1,6 +1,6 @@
 // task-pipeline/scripts/state-ledger-v2.test.ts
 //
-// state-ledger-v2.ts (帳簿系 13 verb の純関数群) の in-process テスト。
+// state-ledger-v2.ts (帳簿系 15 verb の純関数群) の in-process テスト。
 //
 //   L-INIT   init の 4 分岐 (新規作成 / 移行 / no-op / 読めないバージョン)
 //   L-NORM   読み込み時の正規化と finalizeStateV2
@@ -312,7 +312,7 @@ Deno.test("L-SESS-1: alive is strict (< max), stale is strict (> cleanup)", () =
 // L-DECL
 // ---------------------------------------------------------------------------
 
-Deno.test("L-DECL-1: LEDGER_VERBS lists exactly the 14 bookkeeping verbs", () => {
+Deno.test("L-DECL-1: LEDGER_VERBS lists exactly the 15 bookkeeping verbs", () => {
   assertEquals([...LEDGER_VERBS].sort(), [
     "candidates-drop",
     "candidates-set",
@@ -328,5 +328,6 @@ Deno.test("L-DECL-1: LEDGER_VERBS lists exactly the 14 bookkeeping verbs", () =>
     "sessions-alive",
     "stalled-set",
     "validate",
+    "verdict-path",
   ]);
 });

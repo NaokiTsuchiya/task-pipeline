@@ -2,7 +2,7 @@
 //
 // state CLI の **層 3 — queue エントリを対象にする 32 verb の cmd 実装**。
 // 領域 P × 領域 A の座標を持つ verb で、対応する純関数は state-transitions-v2.ts の
-// VERB_SPEC に from/to が宣言されている (**帳簿系 13 verb は state-verbs-ledger.ts**)。
+// VERB_SPEC に from/to が宣言されている (**帳簿系 15 verb は state-verbs-ledger.ts**)。
 // 設計 2.1 の分類そのままの順に並べる: 進行系 / 完了系 / 要求系 / 仕上げ開始系 /
 // 追従系 / 実行帳簿。層の一覧は state-io.ts の冒頭。
 //
