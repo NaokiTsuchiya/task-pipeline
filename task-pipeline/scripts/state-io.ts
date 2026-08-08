@@ -8,7 +8,7 @@
 //   層 0  state-io.ts       … このファイル。Deno API を触る唯一の場所 (+ verb 実装のファイル操作)
 //   層 1  state-flags.ts    … 引数パース (純粋)
 //   層 2  state-store.ts    … lock 越しの読み直し・検証・書き込みの glue
-//   層 3  state-verbs-*.ts  … 45 verb の cmd 実装 (帳簿系 / queue エントリ系)
+//   層 3  state-verbs-*.ts  … 46 verb の cmd 実装 (帳簿系 / queue エントリ系)
 //   層 4  state-dispatch.ts … ALLOWED_FLAGS と HANDLERS (verb 名 → 実装の表)
 //   層 5  state.ts          … エントリポイント (終了コード・エラー分類・main)
 //

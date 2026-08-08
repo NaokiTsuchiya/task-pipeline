@@ -28,6 +28,9 @@ $repo_dir/task-pipeline/scripts/state-dispatch.ts"
 # 別ファイルに切り出してあるので、こちらも fmt/lint/check/test の対象に含める。
 state_ownership_ts=$repo_dir/task-pipeline/scripts/state-ownership.ts
 state_ownership_test_ts=$repo_dir/task-pipeline/scripts/state-ownership.test.ts
+# next の導出本体も Deno API を呼ばない純関数の別ファイルなので、fmt/lint/check の対象に
+# 含める (単体テストの実行は tests/state-next.test.sh が担うので deno test には渡さない)。
+state_next_ts=$repo_dir/task-pipeline/scripts/state-next.ts
 
 if ! command -v deno >/dev/null 2>&1; then
     printf 'SKIP  state-cli tests — deno not found\n'
@@ -41,6 +44,7 @@ done
 [ -f "$state_test_ts" ] || { printf 'state.test.ts not found: %s\n' "$state_test_ts" >&2; exit 1; }
 [ -f "$state_ownership_ts" ] || { printf 'state-ownership.ts not found: %s\n' "$state_ownership_ts" >&2; exit 1; }
 [ -f "$state_ownership_test_ts" ] || { printf 'state-ownership.test.ts not found: %s\n' "$state_ownership_test_ts" >&2; exit 1; }
+[ -f "$state_next_ts" ] || { printf 'state-next.ts not found: %s\n' "$state_next_ts" >&2; exit 1; }
 
 fail=0
 
@@ -56,9 +60,9 @@ run_step() {
     fi
 }
 
-run_step "deno fmt --check" deno fmt --check "$state_ts" $state_layer_ts "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
-run_step "deno lint" deno lint "$state_ts" $state_layer_ts "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
-run_step "deno check" deno check "$state_ts" $state_layer_ts "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts"
+run_step "deno fmt --check" deno fmt --check "$state_ts" $state_layer_ts "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts" "$state_next_ts"
+run_step "deno lint" deno lint "$state_ts" $state_layer_ts "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts" "$state_next_ts"
+run_step "deno check" deno check "$state_ts" $state_layer_ts "$state_test_ts" "$state_ownership_ts" "$state_ownership_test_ts" "$state_next_ts"
 run_step "deno test" deno test --allow-read --allow-write --allow-env --allow-run "$state_test_ts" "$state_ownership_test_ts"
 
 printf '\n%s\n' "----------------------------------------"

@@ -1,10 +1,10 @@
 // task-pipeline/scripts/state-verbs-ledger.ts
 //
-// state CLI の **層 3 — 帳簿系 13 verb の cmd 実装**:
+// state CLI の **層 3 — 帳簿系 14 verb の cmd 実装**:
 //
-//   init / get / validate / session-touch / sessions-alive / history-append /
-//   candidates-set / candidates-drop / promoted-add / promoted-drop /
-//   relisted-add / relisted-drop / stalled-set
+//   init / get / validate / next / session-touch / sessions-alive /
+//   history-append / candidates-set / candidates-drop / promoted-add /
+//   promoted-drop / relisted-add / relisted-drop / stalled-set
 //
 // queue エントリの座標 (領域 P × 領域 A) を持たない verb だけがここに居る
 // (対応する純関数は state-ledger-v2.ts の LEDGER_VERBS)。**queue エントリを対象にする
@@ -14,6 +14,8 @@
 // 薄い形で、判断そのものは持たない。
 
 import { STALLED_VALUES } from "./state-model-v2.ts";
+import { countTaskLines, deriveNext, parseNextConfig } from "./state-next.ts";
+import { checkStateV2 } from "./state-schema-v2.ts";
 import {
   applyCandidatesDropV2,
   applyCandidatesSetV2,
@@ -28,6 +30,7 @@ import {
   isRecord,
   isSessionAlive,
   isSessionStale,
+  normalizeStateV2,
   type StalledArg,
   validateV2,
 } from "./state-ledger-v2.ts";
@@ -155,6 +158,57 @@ export async function cmdValidate(
   stateDir: string,
 ): Promise<Record<string, unknown>> {
   return validateV2(await readState(stateDir));
+}
+
+// ---------------------------------------------------------------------------
+// next — 読み取り専用の導出 (設計5節)
+//
+// **lock を取らない** (get / validate / sessions-alive と同じ扱い)。state.json は
+// スキーマ検証してから読み、`task_counts/<session>` の行数だけを追加で読む
+// (設計5.1 の「state.json と state ディレクトリ内で読めるもの」)。判断そのものは
+// state-next.ts の純関数 deriveNext が持ち、ここは flag 抽出とファイル読みだけを行う。
+// ---------------------------------------------------------------------------
+
+// task_counts/<session> の行数。ファイルもディレクトリも無ければ 0 (SKILL.md の
+// 「無ければ0件」)。数え方は wc -l と同じ (countTaskLines のコメント)。
+async function readTasksStarted(
+  stateDir: string,
+  session: string,
+): Promise<number> {
+  if (session === "") return 0;
+  const path = joinPath(joinPath(stateDir, "task_counts"), session);
+  try {
+    return countTaskLines(await Deno.readTextFile(path));
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return 0;
+    throw e;
+  }
+}
+
+export async function cmdNext(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const session = flags.get("session") ?? "";
+  if (session !== "") validateSessionId(session);
+  const alive = flags.has("alive") ? parseCsv(flags.get("alive")!) : [];
+  const now = flags.get("now") ?? nowIso();
+  const config = parseNextConfig(flags.get("config"));
+
+  const parsed = await readState(stateDir);
+  const check = checkStateV2(parsed);
+  if (!check.ok) {
+    throw new CliErrorV2("schema", `${check.path}: ${check.message}`);
+  }
+  const state = normalizeStateV2(parsed as Record<string, unknown>);
+
+  return deriveNext(state, {
+    session,
+    alive,
+    now,
+    config,
+    tasksStarted: await readTasksStarted(stateDir, session),
+  }) as unknown as Record<string, unknown>;
 }
 
 export async function cmdSessionTouch(

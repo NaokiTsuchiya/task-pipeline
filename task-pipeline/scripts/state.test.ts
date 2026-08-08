@@ -2890,6 +2890,192 @@ Deno.test("T-V-answered-set: writes the answered ledger, not review_only", async
   assertEquals(ledger.review_only, []);
 });
 
+// ---------------------------------------------------------------------------
+// T-V-next — 読み取り専用 verb `next` の CLI 固有の観測
+//
+// 導出そのもの (8 分類 × 入力クラス) は state-next.test.ts が直 import で網羅する。
+// ここが持つのは CLI 経路でしか見えないものだけ: exit code、state.json のバイト列不変、
+// lock を取らないこと、task_counts の読み取り、フラグ省略時の既定。
+// ---------------------------------------------------------------------------
+
+// 成功しても state.json が 1 バイトも変わらないことを固定する (受け入れ条件3)。
+async function expectOkUnchanged(
+  dir: string,
+  args: string[],
+): Promise<Record<string, unknown>> {
+  const before = await Deno.readTextFile(`${dir}/state.json`);
+  const out = await expectOk(dir, args);
+  const after = await Deno.readTextFile(`${dir}/state.json`);
+  assertEquals(
+    after,
+    before,
+    "state.json must be byte-identical after a read-only verb",
+  );
+  return out;
+}
+
+Deno.test("T-V-next-1: derives the due actions and leaves state.json byte-identical", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    queueItem({ id: "t-q", progress: "queued" }),
+    restingOpen({}, { id: "t-open", session: null }),
+  ]);
+  const out = await expectOkUnchanged(dir, [
+    "next",
+    "--state-dir",
+    dir,
+    "--session",
+    "s1",
+    "--alive",
+    "s1",
+    "--now",
+    "2026-08-08T00:00:00.000Z",
+    "--config",
+    "finish=pr,max_open=2",
+  ]);
+  assertEquals(out.ok, true);
+  assertEquals(out.now, "2026-08-08T00:00:00.000Z");
+  assertEquals(out.session, "s1");
+  assertEquals((out.config as Record<string, unknown>).finish, "pr");
+  const counts = out.counts as Record<string, number>;
+  assertEquals(counts.queued, 1);
+  assertEquals(counts.open_prs, 1);
+  const start = out.start as Record<string, unknown>;
+  assertEquals(start.allowed, true);
+  assertEquals(start.next_id, "t-q");
+  const tasks = out.tasks as Record<string, unknown>[];
+  const queued = tasks.find((t) => t.id === "t-q")!;
+  assertEquals(
+    (queued.actions as Record<string, unknown>[]).map((a) => a.kind),
+    ["claim"],
+  );
+  const open = tasks.find((t) => t.id === "t-open")!;
+  assertEquals(open.follow_target, true);
+  assertEquals(
+    (open.actions as Record<string, unknown>[]).map((a) => a.kind),
+    ["probe-run"],
+  );
+});
+
+Deno.test("T-V-next-2: takes no lock (an existing lock does not block it, and none is created)", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem()]);
+  // 他プロセスが lock を握っている状況を作る。書き込み系ならここで待たされるが、
+  // 読み取り専用 verb は lock を見ないので即座に成功する。
+  await Deno.mkdir(`${dir}/lock`);
+  const out = await expectOkUnchanged(dir, [
+    "next",
+    "--state-dir",
+    dir,
+    "--now",
+    "2026-08-08T00:00:00.000Z",
+  ]);
+  assertEquals(out.ok, true);
+
+  // 自分では lock を作らない
+  await Deno.remove(`${dir}/lock`, { recursive: true });
+  await expectOkUnchanged(dir, [
+    "next",
+    "--state-dir",
+    dir,
+    "--now",
+    "2026-08-08T00:00:00.000Z",
+  ]);
+  let lockExists = true;
+  try {
+    await Deno.stat(`${dir}/lock`);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) lockExists = false;
+    else throw e;
+  }
+  assertEquals(lockExists, false, "next must not create the lock directory");
+});
+
+Deno.test("T-V-next-3: usage errors (lock flags, unknown flag, bad --config, bad --now)", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem()]);
+  const cases: string[][] = [
+    ["next", "--state-dir", dir, "--lock-retry-ms", "10"],
+    ["next", "--state-dir", dir, "--lock-max-retries", "1"],
+    ["next", "--state-dir", dir, "--id", "t-1"],
+    ["next", "--state-dir", dir, "--config", "foo=1"],
+    ["next", "--state-dir", dir, "--config", "finish=x"],
+    ["next", "--state-dir", dir, "--config", "max_open=-1"],
+    ["next", "--state-dir", dir, "--config", "finish"],
+    ["next", "--state-dir", dir, "--now", "not-a-time"],
+    // --session は task_counts/<session> のパスに入るので、形状を検査する
+    // (state dir の外へ出る値を受け付けない)。
+    ["next", "--state-dir", dir, "--session", "../evil"],
+    ["next", "--state-dir", dir, "--session", "."],
+    ["next", "--state-dir", dir, "--session", ".."],
+  ];
+  for (const args of cases) {
+    const out = await expectFailureUnchanged(dir, args, EXIT_CODES.usage);
+    assertEquals(out.error, "usage", args.join(" "));
+  }
+});
+
+Deno.test("T-V-next-4: a missing state.json is `missing`", async () => {
+  const dir = await tempDir();
+  const res = await runVerb(dir, ["next", "--state-dir", dir]);
+  assertEquals(res.code, EXIT_CODES.missing);
+  assertEquals(parseJson(res.stdout).error, "missing");
+});
+
+Deno.test("T-V-next-5: tasks_started counts task_counts lines exactly like wc -l", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem()]);
+  await Deno.mkdir(`${dir}/task_counts`);
+
+  const wcLines = async (path: string): Promise<number> => {
+    const { stdout } = await new Deno.Command("wc", {
+      args: ["-l", path],
+      stdout: "piped",
+    }).output();
+    return Number(new TextDecoder().decode(stdout).trim().split(/\s+/)[0]);
+  };
+
+  // ディレクトリはあるがファイルが無い / 空 / 末尾改行あり / 末尾改行なし
+  const cases: Array<[string, string | null]> = [
+    ["s-absent", null],
+    ["s-empty", ""],
+    ["s-nl", "a\nb\n"],
+    ["s-nonl", "a\nb"],
+  ];
+  for (const [session, content] of cases) {
+    const path = `${dir}/task_counts/${session}`;
+    if (content !== null) await Deno.writeTextFile(path, content);
+    const out = await expectOkUnchanged(dir, [
+      "next",
+      "--state-dir",
+      dir,
+      "--session",
+      session,
+      "--now",
+      "2026-08-08T00:00:00.000Z",
+    ]);
+    const got = (out.counts as Record<string, number>).tasks_started;
+    const want = content === null ? 0 : await wcLines(path);
+    assertEquals(got, want, `tasks_started for ${session}`);
+  }
+});
+
+Deno.test("T-V-next-6: --session/--alive/--now/--config are all optional", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem()]);
+  const out = await expectOkUnchanged(dir, ["next", "--state-dir", dir]);
+  assertEquals(out.session, null);
+  assertEquals(out.config, {
+    finish: "none",
+    approve: "ask",
+    rebase: "auto",
+    max_open: 2,
+    max_tasks: null,
+  });
+  assert(typeof out.now === "string", "now must default to the CLI clock");
+  assertEquals((out.counts as Record<string, number>).tasks_started, 0);
+});
+
 Deno.test("T-V-set-worktree: records worktree/base and can drop the withdrawn branch record", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [queueItem({ progress: "running", run: runOf() })], {
@@ -3548,7 +3734,7 @@ Deno.test("T-D2: verb headings match ALLOWED_FLAGS keys", async () => {
     [],
     `documented but unimplemented: ${missingInImpl}`,
   );
-  assertEquals(implVerbs.size, 45, "the dispatch set is 45 verbs");
+  assertEquals(implVerbs.size, 46, "the dispatch set is 46 verbs");
 });
 
 Deno.test("T-D3: the node tables match the v2 declarations", async () => {
@@ -3707,5 +3893,37 @@ Deno.test("T-D6: every dispatch verb is either a transition or a ledger verb", (
     [],
     "declared ledger verbs with no dispatch entry",
   );
-  assertEquals(transition.size + ledger.size, dispatch.size, "45 = 32 + 13");
+  assertEquals(transition.size + ledger.size, dispatch.size, "46 = 32 + 14");
+});
+
+// 受け入れ条件4 (gh-39): 「lock を取らない読み取り専用 verb」の一覧が、契約文書と
+// ALLOWED_FLAGS で一致する。**lock を取らないことは、lock フラグを 1 つも受理しないこと
+// として観測できる** — 実装側で lock を取り始めれば LOCK_FLAGS を足すことになり、
+// 文書側の一覧とずれてここが落ちる。
+Deno.test("T-D8: the lock-free verb list matches the verbs that accept no lock flags", async () => {
+  const doc = await Deno.readTextFile(CONTRACT_DOC);
+  const section = sectionOf(doc, "## lock (排他) の契約");
+  // 一覧はこの 1 行に閉じている (行末の「。」までが verb の列挙)。
+  const line =
+    section.split("\n").find((l) => l.includes("**lock を取らない verb**:")) ??
+      "";
+  assert(line !== "", "the lock contract must name the lock-free verbs");
+  const listPart = line.slice(0, line.indexOf("。"));
+  const docVerbs = [...listPart.matchAll(/`([a-z][a-z0-9-]*)`/g)]
+    .map((m) => m[1])
+    .sort();
+
+  const implVerbs = Object.entries(ALLOWED_FLAGS)
+    .filter(([, flags]) => {
+      const names = flags as ReadonlySet<string>;
+      return !names.has("lock-retry-ms") && !names.has("lock-max-retries");
+    })
+    .map(([verb]) => verb)
+    .sort();
+
+  assertEquals(
+    docVerbs,
+    implVerbs,
+    "docs/state-cli-contract.md の lock 節と ALLOWED_FLAGS のずれ",
+  );
 });

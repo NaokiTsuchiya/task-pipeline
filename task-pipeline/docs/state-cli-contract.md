@@ -188,10 +188,10 @@ light は research+plan → implement → report。どちらもその後 `finali
 
 ## verb 一覧
 
-45 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
+46 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
 
 - **遷移 32** — `VERB_SPEC` のキー。上の遷移表に載る。
-- **帳簿 13** — `state-ledger-v2.ts` の `LEDGER_VERBS`。queue エントリの座標を持たない。
+- **帳簿 14** — `state-ledger-v2.ts` の `LEDGER_VERBS`。queue エントリの座標を持たない。
 
 ### 帳簿系
 
@@ -232,6 +232,87 @@ state.ts validate --state-dir <dir>
 前提: state.json が存在する (`missing`)。
 効果: 無し。`checkStateV2` を掛け、違反なら `schema`。
 成功: `{"ok": true}`。
+
+### `next`
+
+```
+state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
+  [--config <k=v,...>]
+```
+
+前提: state.json が存在し (`missing`)、`checkStateV2` を満たす (`schema`)。
+効果: **無し (読み取り専用)。lock を取らず、state.json をバイト単位で変更しない。**
+読むのは state.json と `<state dir>/task_counts/<session>` の行数だけで、git もトラッカーも
+触らない — それらが要る判断は**アクションではなく観測依頼**として返し、結果はイベント
+(verb) として戻る (設計5.1・5.2)。
+
+- `--session` 省略/空 = セッション id を主張できない環境。所有権判定で「自分」に一致する
+  タスクが無くなる。
+- `--alive` 省略 = 生存セッション 0 件 (`sessions-alive` の返り値をカンマ区切りで渡す)。
+- `--now` 省略 = CLI の現在時刻。パースできなければ `usage`。
+- `--config` は `key=value` のカンマ区切り。キーは
+  `finish` (`none`\|`commit`\|`pr`、既定 `none`) / `approve` (`ask`\|`auto`、既定 `ask`) /
+  `rebase` (`auto`\|`off`、既定 `auto`) / `max_open` (非負整数、既定 2) /
+  `max_tasks` (非負整数、既定は無制限 = `null`)。未知キー・enum 外の値・整数でない値・
+  `=` の無い断片は `usage`。同じキーが 2 度現れたら後勝ち。
+- `task_counts/<session>` の行数は **`wc -l` と同じ意味論** (改行文字の数。末尾改行の無い
+  最終行は数えない) — SKILL.md 側の記述と食い違わせないため。
+
+**閾値** (実装は `state-next.ts` の定数。**SKILL.md には数値を置かない**):
+
+| 判定 | 値 | 不等号 |
+|---|---|---|
+| 実行エージェントの沈黙 | 90 分 | これ**より**古いと `status-check` (ちょうどは稼働中) |
+| 引き継ぎ待ちの打ち切り | 30 分 | 以上で `takeover` |
+| probe リースの失効 | 7 時間 | 以上で `probe-run` (`reason: expired`) |
+| 停滞の打ち切り | 24 時間 | 以上で `stalled.cutoff` が真 |
+| 押し直しの上限 | 3 | 以上で `fix-start` が上限ラッチになる (`at_limit`) |
+| 飛行中の上限 | 2 | 以上で `start.blocked_by` に `inflight_limit` |
+
+成功 (1 行の JSON):
+
+```json
+{"ok": true, "now": "<iso>", "session": "<id>|null",
+ "config": {"finish":"pr","approve":"ask","rebase":"auto","max_open":2,"max_tasks":null},
+ "counts": {"queued":1,"running":1,"resting":2,"blocked":0,"excluded":1,"open_prs":2,
+            "running_attendable_initial":1,"running_excluded_initial":1,
+            "running_mine_finishing":0,"tasks_started":3},
+ "tasks": [{"id":"gh-42","ownership":"self","excluded":false,"status":"in_review",
+            "progress":"resting","artifact":"open","follow_target":true,
+            "actions":[],"observations":[],"finalize":null}],
+ "start": {"allowed":false,"blocked_by":["max_open"],"next_id":null,"detail":{}},
+ "stalled": {"current":"max_open","since":"<iso>|null","elapsed_min":123,
+             "set_to":"max_open","defer":null,"cutoff":false},
+ "observations": [{"kind":"tracker-list","why":"..."}]}
+```
+
+- `counts.queued`/`running`/`resting`/`blocked` は**非除外**のタスクだけを数える
+  (除外分は `excluded`)。
+- `counts.open_prs` = 非除外 ∧ `resting` ∧ `artifact.state == open` ∧ `follow != null`。
+  `follow` が生まれるのは `ref` が PR URL のときだけなので (設計1.3)、これが
+  「マージ待ちの自分の PR」の集合そのものである。**`ref` の文字列は検査しない。**
+- `counts.running_attendable_initial` = 非除外 ∧ `running` ∧ `run.kind == initial`
+  (新規着手を塞ぐ集合)。`counts.running_excluded_initial` は除外側の同型 (飛行中の上限の
+  分母)。**仕上げ (`pr_fix`/`rebase_fix`) はどちらにも入らない** — 新規着手とは別枠だから
+  である。`counts.running_mine_finishing` は `session` が自分の仕上げの件数。
+- `tasks[].actions` は**その時点で due なアクションの列挙**であって「次の 1 手」ではない。
+  `kind` は `claim` / `probe-run` / `fix-start` / `rebase-start` / `release` / `retire` /
+  `clear-takeover` / `takeover` / `status-check` / `set-takeover` / `wait`。
+  **`excluded` が真のタスクでは `actions` も `observations` も必ず空**である
+  (生きている他セッションのタスクには一切触らない)。
+- `tasks[].observations` の `merge-proof` は `resting × open ∧ tip != null` に付く
+  (git でマージ証明を確認せよ)。トップレベルの `observations` の `tracker-list` は
+  非除外の `queued` も `running` も無いときに付く (アダプタの `list` を呼べ)。
+- `tasks[].finalize` は `running` かつ `run.phase == "finalize"` のときだけ非 null。
+  `ship` の引数構成 (`ref_kind` は `finish` 由来、`group_flags` は `--commits` が 1 以上の
+  ときに 4 つまとめて付ける対象) と、finalize 指示に `, rebase: off` を足すかどうかの
+  `rebase_off` (**出所は `config.rebase` だけ**) を返す。
+- `start.blocked_by` は `["max_tasks","own_initial","inflight_limit","max_open"]` の
+  優先順で、該当するものを**全部**列挙する。`allowed` が真のときだけ `next_id` に
+  非除外の先頭 `queued` の id が入る。
+- `stalled.set_to` は `stalled-set --value` に渡す値。`"null"` / `"max_open"` /
+  `"defer"` (= `tracker-list` の結果次第。`defer` オブジェクトの `if_empty` /
+  `otherwise` がその分岐) / `"keep"` (停滞の 2 種類のどちらでもないので書き換えない)。
 
 ### `session-touch`
 
@@ -724,9 +805,13 @@ state.ts set-takeover --state-dir <dir> --id <id> (--at <iso> | --clear true) [l
   rename → 削除で行い、同時に複数のプロセスが回収を試みても 1 つだけが成功する。
 - 書き込みは tmp ファイル + rename で原子的に行う。途中で落ちても state.json は前の内容の
   まま残る。
-- `get` / `validate` / `sessions-alive` は lock を取らない (読み取り専用)。
-- `session-touch` も lock を取らない — 対象が state.json ではなく `sessions/*` の個別ファイル
-  であり、列挙中に他セッションが要素を消す TOCTOU は「消えている == 目的達成」として飛ばす。
+- **lock を取らない verb**: `get` / `validate` / `next` / `sessions-alive` / `session-touch`。
+  内訳は 2 種類で、前の 4 つは**読み取り専用** (state.json を読むだけで書き換えない)、
+  `session-touch` は対象が state.json ではなく `sessions/*` の個別ファイルであり、列挙中に
+  他セッションが要素を消す TOCTOU は「消えている == 目的達成」として飛ばす。
+  この 5 つは lock フラグ (`--lock-retry-ms` / `--lock-max-retries`) も受け付けず、渡すと
+  usage になる — 「lock を取らない」が `ALLOWED_FLAGS` の形として観測でき、
+  `state.test.ts` の T-D8 が上の一覧と突き合わせる。
 
 ## heartbeat の契約
 
