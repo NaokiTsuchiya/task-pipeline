@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 
 pass_count = 0
 fail_count = 0
@@ -70,6 +71,27 @@ def write_verdict(vdir, filename, phase, verdict, required_fixes=None):
             "reasons": ["dummy reason"],
             "required_fixes": required_fixes or [],
         }, fh)
+
+
+def write_verdict_at(vdir, filename, phase, verdict, mtime_iso, required_fixes=None):
+    """write_verdict と同じだが、書き込み後に os.utime で mtime を mtime_iso
+    (例 '2026-08-04T04:24:00Z') に固定する。窓の帰属判定は verdict ファイルの mtime を見るため、
+    テストでは実行時の壁時計時刻ではなく任意の過去時刻を指定できる必要がある。
+    """
+    write_verdict(vdir, filename, phase, verdict, required_fixes)
+    path = os.path.join(vdir, filename)
+    ts = datetime.strptime(mtime_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+    os.utime(path, (ts, ts))
+
+
+def fr(phase, attempt, required_fixes=None):
+    """fail_reasons の1要素を組み立てる (アサーション記述の簡略化用)。"""
+    return {"phase": phase, "attempt": attempt, "required_fixes": required_fixes or []}
+
+
+def unattributed_count(stdout):
+    m = re.search(r"fail_reasons: (\d+) verdict\(s\)", stdout)
+    return int(m.group(1)) if m else None
 
 
 def run(script, args, env_extra=None):
@@ -139,6 +161,13 @@ def main():
             ng("0: collect 実行が exit 0 で完走する (壊れた JSON が混ざっていても)",
                f"exit={proc.returncode} stderr={proc.stderr!r}")
 
+        # 各 slug が単一レコードのみのケースでは unattributed は出ない (受け入れ条件4、0件側)
+        if unattributed_count(proc.stdout) == 0:
+            ok("0b: 単一レコードの slug のみの収集では fail_reasons の unattributed 件数が 0 と出る")
+        else:
+            ng("0b: 単一レコードの slug のみの収集では fail_reasons の unattributed 件数が 0 と出る",
+               f"stdout={proc.stdout!r}")
+
         rows = {}
         if os.path.exists(out):
             with open(out) as fh:
@@ -200,13 +229,294 @@ def main():
                f"slug-fail={rows.get('slug-fail', {}).get('fail_reasons')!r} "
                f"slug-allpass={rows.get('slug-allpass', {}).get('fail_reasons')!r}")
 
+        # --- ケース「窓分割」(受け入れ条件1・2): 同じ slug に2つの run、境界ちょうどを含む ------------
+        # t-win-1 の notif ts (lower) = 04:08:00Z、t-win-2 の notif ts (t-win-1 の upper) = 09:44:00Z。
+        # issue 本文 (gh-12 実測) を模した配置に加え、下限/上限ちょうどの境界verdictを追加する。
+        vdir_win = os.path.join(runs_dir, "slug-windowed", "verdicts")
+        write_verdict_at(vdir_win, "research+plan-0.json", "research+plan", "FAIL",
+                          "2026-08-04T04:24:00Z", ["fix A"])
+        write_verdict_at(vdir_win, "research+plan-1.json", "research+plan", "FAIL",
+                          "2026-08-04T04:36:00Z", ["fix B"])
+        write_verdict_at(vdir_win, "research+plan-2.json", "research+plan", "FAIL",
+                          "2026-08-04T04:45:00Z", ["fix C"])
+        write_verdict_at(vdir_win, "research+plan-9.json", "research+plan", "FAIL",
+                          "2026-08-04T04:08:00Z", ["fix at lower boundary"])
+        write_verdict_at(vdir_win, "research-0.json", "research", "PASS", "2026-08-04T09:53:00Z")
+        write_verdict_at(vdir_win, "plan-0.json", "plan", "FAIL", "2026-08-04T10:09:00Z", ["fix D"])
+        write_verdict_at(vdir_win, "plan-1.json", "plan", "FAIL", "2026-08-04T10:22:00Z", ["fix E"])
+        write_verdict_at(vdir_win, "plan-2.json", "plan", "PASS", "2026-08-04T10:35:00Z")
+        write_verdict_at(vdir_win, "plan-9.json", "plan", "FAIL",
+                          "2026-08-04T09:44:00Z", ["fix at upper boundary"])
+
+        session_win = os.path.join(tmp, "session-windowed.jsonl")
+        with open(session_win, "w") as fh:
+            fh.write(assistant_cwd_line(repo_root) + "\n")
+            fh.write(notif_line("t-win-1", "slug-windowed", ts="2026-08-04T04:08:00Z") + "\n")
+            fh.write(notif_line("t-win-2", "slug-windowed", ts="2026-08-04T09:44:00Z") + "\n")
+
+        out_win = os.path.join(tmp, "metrics-windowed.jsonl")
+        proc_win = run(script, [session_win, "--out", out_win, "--no-diff-stats"])
+
+        rows_win = {}
+        if os.path.exists(out_win):
+            with open(out_win) as fh:
+                rows_win = {json.loads(line)["task_id"]: json.loads(line) for line in fh if line.strip()}
+
+        expected_win1 = [fr("research+plan", 0, ["fix A"]), fr("research+plan", 1, ["fix B"]),
+                          fr("research+plan", 2, ["fix C"]), fr("research+plan", 9, ["fix at lower boundary"])]
+        got_win1 = rows_win.get("t-win-1", {}).get("fail_reasons")
+        if got_win1 == expected_win1:
+            ok("9: t-win-1 の fail_reasons が自分の run の4件のみ (下限ちょうどの verdict を含み、"
+               "end_ts より後・次レコードの start_ts より前の FAIL も含む = 受け入れ条件1・2)")
+        else:
+            ng("9: t-win-1 の fail_reasons が自分の run の4件のみ (下限ちょうどの verdict を含み、"
+               "end_ts より後・次レコードの start_ts より前の FAIL も含む = 受け入れ条件1・2)",
+               f"got={got_win1!r}")
+
+        expected_win2 = [fr("plan", 0, ["fix D"]), fr("plan", 1, ["fix E"]),
+                          fr("plan", 9, ["fix at upper boundary"])]
+        got_win2 = rows_win.get("t-win-2", {}).get("fail_reasons")
+        if got_win2 == expected_win2:
+            ok("10: t-win-2 の fail_reasons が自分の run の3件のみ (上限ちょうどの verdict は"
+               "t-win-1 ではなくこちらに帰属する = 上限は排他・次レコードの下限は包含)")
+        else:
+            ng("10: t-win-2 の fail_reasons が自分の run の3件のみ (上限ちょうどの verdict は"
+               "t-win-1 ではなくこちらに帰属する = 上限は排他・次レコードの下限は包含)",
+               f"got={got_win2!r}")
+
+        if unattributed_count(proc_win.stdout) == 0:
+            ok("11: 窓分割ケースでは全 verdict がどちらかの窓に収まり unattributed は0")
+        else:
+            ng("11: 窓分割ケースでは全 verdict がどちらかの窓に収まり unattributed は0",
+               f"stdout={proc_win.stdout!r}")
+
+        # --- ケース「unattributed」(受け入れ条件4): レコードの start_ts より前の FAIL は帰属先が無い ---
+        vdir_pre = os.path.join(runs_dir, "slug-preexisting", "verdicts")
+        write_verdict_at(vdir_pre, "research-0.json", "research", "FAIL",
+                          "2026-08-05T09:00:00Z", ["stale fix"])
+
+        session_pre = os.path.join(tmp, "session-preexisting.jsonl")
+        with open(session_pre, "w") as fh:
+            fh.write(assistant_cwd_line(repo_root) + "\n")
+            fh.write(notif_line("t-pre-1", "slug-preexisting", ts="2026-08-05T10:00:00Z") + "\n")
+
+        out_pre = os.path.join(tmp, "metrics-preexisting.jsonl")
+        proc_pre = run(script, [session_pre, "--out", out_pre, "--no-diff-stats"])
+
+        rows_pre = {}
+        if os.path.exists(out_pre):
+            with open(out_pre) as fh:
+                rows_pre = {json.loads(line)["task_id"]: json.loads(line) for line in fh if line.strip()}
+
+        if rows_pre.get("t-pre-1", {}).get("fail_reasons") == []:
+            ok("12: レコードの start_ts より前に書かれた FAIL は、その行の fail_reasons に含まれない")
+        else:
+            ng("12: レコードの start_ts より前に書かれた FAIL は、その行の fail_reasons に含まれない",
+               f"got={rows_pre.get('t-pre-1', {}).get('fail_reasons')!r}")
+
+        if unattributed_count(proc_pre.stdout) == 1:
+            ok("13: 帰属先の無かった verdict の件数 (1件) が収集の stdout に現れる (黙って落とさない)")
+        else:
+            ng("13: 帰属先の無かった verdict の件数 (1件) が収集の stdout に現れる (黙って落とさない)",
+               f"stdout={proc_pre.stdout!r}")
+
+        # --- ケース「増分収集をまたぐ merge」(受け入れ条件1・2を existing_rows 経由の経路で再確認) ----
+        vdir_inc = os.path.join(runs_dir, "slug-incremental", "verdicts")
+        write_verdict_at(vdir_inc, "research+plan-0.json", "research+plan", "FAIL",
+                          "2026-08-06T04:24:00Z", ["inc fix A"])
+        write_verdict_at(vdir_inc, "research+plan-1.json", "research+plan", "FAIL",
+                          "2026-08-06T04:36:00Z", ["inc fix B"])
+        write_verdict_at(vdir_inc, "research+plan-2.json", "research+plan", "FAIL",
+                          "2026-08-06T04:45:00Z", ["inc fix C"])
+        write_verdict_at(vdir_inc, "research-0.json", "research", "PASS", "2026-08-06T09:53:00Z")
+        write_verdict_at(vdir_inc, "plan-0.json", "plan", "FAIL", "2026-08-06T10:09:00Z", ["inc fix D"])
+        write_verdict_at(vdir_inc, "plan-1.json", "plan", "FAIL", "2026-08-06T10:22:00Z", ["inc fix E"])
+        write_verdict_at(vdir_inc, "plan-2.json", "plan", "PASS", "2026-08-06T10:35:00Z")
+
+        session_inc_later = os.path.join(tmp, "session-incremental-later.jsonl")
+        with open(session_inc_later, "w") as fh:
+            fh.write(assistant_cwd_line(repo_root) + "\n")
+            fh.write(notif_line("t-inc-2", "slug-incremental", ts="2026-08-06T09:44:00Z") + "\n")
+
+        session_inc_earlier = os.path.join(tmp, "session-incremental-earlier.jsonl")
+        with open(session_inc_earlier, "w") as fh:
+            fh.write(assistant_cwd_line(repo_root) + "\n")
+            fh.write(notif_line("t-inc-1", "slug-incremental", ts="2026-08-06T04:08:00Z") + "\n")
+
+        out_inc = os.path.join(tmp, "metrics-incremental.jsonl")
+
+        # 1回目: 時系列で後の run (t-inc-2) だけを新規収集する。この時点でグループのレコードは
+        # これ1件だけなので window は [09:44, +inf) — 04:xx台の3件はこの回では帰属先が無い。
+        proc_inc1 = run(script, [session_inc_later, "--out", out_inc, "--no-diff-stats"])
+        if "1 new task-run(s) collected from 1 session file(s)" in proc_inc1.stdout:
+            ok("14: 増分収集1回目 (t-inc-2 のみ) が新規1件として収集される")
+        else:
+            ng("14: 増分収集1回目 (t-inc-2 のみ) が新規1件として収集される", f"stdout={proc_inc1.stdout!r}")
+
+        if unattributed_count(proc_inc1.stdout) == 3:
+            ok("15: 増分収集1回目の時点では、まだ収集されていない前の run の3件の FAIL が"
+               " unattributed として数えられる (黙って落とさない)")
+        else:
+            ng("15: 増分収集1回目の時点では、まだ収集されていない前の run の3件の FAIL が"
+               " unattributed として数えられる (黙って落とさない)", f"stdout={proc_inc1.stdout!r}")
+
+        rows_inc = {}
+        with open(out_inc) as fh:
+            rows_inc = {json.loads(line)["task_id"]: json.loads(line) for line in fh if line.strip()}
+        expected_inc2 = [fr("plan", 0, ["inc fix D"]), fr("plan", 1, ["inc fix E"])]
+        if rows_inc.get("t-inc-2", {}).get("fail_reasons") == expected_inc2:
+            ok("16: 増分収集1回目時点の t-inc-2 の fail_reasons は自分の2件のみ")
+        else:
+            ng("16: 増分収集1回目時点の t-inc-2 の fail_reasons は自分の2件のみ",
+               f"got={rows_inc.get('t-inc-2', {}).get('fail_reasons')!r}")
+
+        # 2回目 (別プロセス起動、同じ --out): 時系列で前の run (t-inc-1) を新規収集する。この時点で
+        # main() が読み込む existing_rows に1回目で書かれた t-inc-2 の行 (start_ts=09:44) が
+        # 含まれるはずで、existing_rows との merge が効いていれば t-inc-1 の window は
+        # [04:08, 09:44) になる (効いていなければ t-inc-1 が「最後のレコード」扱いになり
+        # window が open-ended になって t-inc-2 の2件まで巻き込んでしまう)。
+        proc_inc2 = run(script, [session_inc_earlier, "--out", out_inc, "--no-diff-stats"])
+        if "1 new task-run(s) collected from 1 session file(s)" in proc_inc2.stdout:
+            ok("17: 増分収集2回目 (t-inc-1 のみ) が新規1件として収集される")
+        else:
+            ng("17: 増分収集2回目 (t-inc-1 のみ) が新規1件として収集される", f"stdout={proc_inc2.stdout!r}")
+
+        if unattributed_count(proc_inc2.stdout) == 0:
+            ok("18: 増分収集2回目では、残っていた3件がすべて t-inc-1 の窓に収まり unattributed は0")
+        else:
+            ng("18: 増分収集2回目では、残っていた3件がすべて t-inc-1 の窓に収まり unattributed は0",
+               f"stdout={proc_inc2.stdout!r}")
+
+        rows_inc2 = {}
+        with open(out_inc) as fh:
+            rows_inc2 = {json.loads(line)["task_id"]: json.loads(line) for line in fh if line.strip()}
+
+        expected_inc1 = [fr("research+plan", 0, ["inc fix A"]), fr("research+plan", 1, ["inc fix B"]),
+                          fr("research+plan", 2, ["inc fix C"])]
+        got_inc1 = rows_inc2.get("t-inc-1", {}).get("fail_reasons")
+        if got_inc1 == expected_inc1:
+            ok("19: existing_rows との merge が効き、増分収集2回目でも t-inc-1 の fail_reasons が"
+               " 自分の3件のみ (existing_rows を無視する誤実装だと t-inc-2 の2件を巻き込んで5件になる)")
+        else:
+            ng("19: existing_rows との merge が効き、増分収集2回目でも t-inc-1 の fail_reasons が"
+               " 自分の3件のみ (existing_rows を無視する誤実装だと t-inc-2 の2件を巻き込んで5件になる)",
+               f"got={got_inc1!r}")
+
+        if len(rows_inc2) == 2 and rows_inc2.get("t-inc-2", {}).get("fail_reasons") == expected_inc2:
+            ok("20: 増分収集は既存行 (t-inc-2) を書き換えない (1回目に書いた値のまま)")
+        else:
+            ng("20: 増分収集は既存行 (t-inc-2) を書き換えない (1回目に書いた値のまま)",
+               f"len={len(rows_inc2)} t-inc-2={rows_inc2.get('t-inc-2', {}).get('fail_reasons')!r}")
+
+        # --- ケース「再計算」(受け入れ条件5): 既に書かれた行を --recompute-fail-reasons で確定させる ---
+        vdir_rc = os.path.join(runs_dir, "slug-recompute", "verdicts")
+        write_verdict_at(vdir_rc, "research+plan-0.json", "research+plan", "FAIL",
+                          "2026-08-07T04:24:00Z", ["rc fix A"])
+        write_verdict_at(vdir_rc, "research+plan-1.json", "research+plan", "FAIL",
+                          "2026-08-07T04:36:00Z", ["rc fix B"])
+        write_verdict_at(vdir_rc, "research+plan-2.json", "research+plan", "FAIL",
+                          "2026-08-07T04:45:00Z", ["rc fix C"])
+        write_verdict_at(vdir_rc, "plan-0.json", "plan", "FAIL", "2026-08-07T10:09:00Z", ["rc fix D"])
+        write_verdict_at(vdir_rc, "plan-1.json", "plan", "FAIL", "2026-08-07T10:22:00Z", ["rc fix E"])
+
+        vdir_rcs = os.path.join(runs_dir, "slug-recompute-single", "verdicts")
+        write_verdict_at(vdir_rcs, "research-0.json", "research", "FAIL",
+                          "2026-08-07T12:00:00Z", ["single fix"])
+
+        # 旧バグ挙動 (slug ディレクトリ丸ごと) を模して、両方の行に同じ5件を仮置きしておく —
+        # recompute 後にこれが正しく3件/2件へ分かれることを確認する。単一レコードの行
+        # (slug-recompute-single) は初期値を「正しい値」にしておき、recompute で変わらないことを見る。
+        buggy_all5 = [fr("research+plan", 0, ["rc fix A"]), fr("research+plan", 1, ["rc fix B"]),
+                      fr("research+plan", 2, ["rc fix C"]), fr("plan", 0, ["rc fix D"]),
+                      fr("plan", 1, ["rc fix E"])]
+        correct_single = [fr("research", 0, ["single fix"])]
+        other_repo_row = {
+            "repo": "other-repo", "session": "other-session.jsonl", "task_id": "t-other-1",
+            "task": "slug-recompute", "start_ts": "2026-08-07T00:00:00Z",
+            "fail_reasons": ["untouched-dummy-value"],
+        }
+        recompute_rows = [
+            {"repo": "test-repo", "session": "s.jsonl", "task_id": "t-rc-1",
+             "task": "slug-recompute", "start_ts": "2026-08-07T04:08:00Z", "fail_reasons": buggy_all5},
+            {"repo": "test-repo", "session": "s.jsonl", "task_id": "t-rc-2",
+             "task": "slug-recompute", "start_ts": "2026-08-07T09:44:00Z", "fail_reasons": buggy_all5},
+            {"repo": "test-repo", "session": "s.jsonl", "task_id": "t-rcs-1",
+             "task": "slug-recompute-single", "start_ts": "2026-08-07T11:00:00Z",
+             "fail_reasons": correct_single},
+            other_repo_row,
+        ]
+        recompute_out = os.path.join(tmp, "metrics-recompute.jsonl")
+        with open(recompute_out, "w") as fh:
+            for r in recompute_rows:
+                fh.write(json.dumps(r) + "\n")
+        before_bytes = open(recompute_out, "rb").read()
+
+        # --dry-run: ファイルは1バイトも変わらない
+        proc_rc_dry = run(script, ["--recompute-fail-reasons", repo_root, "--out", recompute_out, "--dry-run"])
+        after_dry_bytes = open(recompute_out, "rb").read()
+        if proc_rc_dry.returncode == 0 and after_dry_bytes == before_bytes:
+            ok("21: --recompute-fail-reasons --dry-run は --out ファイルを1バイトも変えない")
+        else:
+            ng("21: --recompute-fail-reasons --dry-run は --out ファイルを1バイトも変えない",
+               f"exit={proc_rc_dry.returncode} changed={after_dry_bytes != before_bytes}")
+        if "dry-run" in proc_rc_dry.stdout and "not writing" in proc_rc_dry.stdout:
+            ok("22: --recompute-fail-reasons --dry-run は dry-run メッセージを出す")
+        else:
+            ng("22: --recompute-fail-reasons --dry-run は dry-run メッセージを出す",
+               f"stdout={proc_rc_dry.stdout!r}")
+
+        # 実行 (書き戻す)
+        proc_rc = run(script, ["--recompute-fail-reasons", repo_root, "--out", recompute_out])
+        rows_rc = {}
+        with open(recompute_out) as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                r = json.loads(line)
+                rows_rc[r["task_id"]] = r
+
+        expected_rc1 = [fr("research+plan", 0, ["rc fix A"]), fr("research+plan", 1, ["rc fix B"]),
+                         fr("research+plan", 2, ["rc fix C"])]
+        expected_rc2 = [fr("plan", 0, ["rc fix D"]), fr("plan", 1, ["rc fix E"])]
+        if (rows_rc.get("t-rc-1", {}).get("fail_reasons") == expected_rc1
+                and rows_rc.get("t-rc-2", {}).get("fail_reasons") == expected_rc2):
+            ok("23: 再計算後、slug-recompute の2行が正しく3件/2件に分かれる (旧バグの5件重複が解消)")
+        else:
+            ng("23: 再計算後、slug-recompute の2行が正しく3件/2件に分かれる (旧バグの5件重複が解消)",
+               f"t-rc-1={rows_rc.get('t-rc-1', {}).get('fail_reasons')!r} "
+               f"t-rc-2={rows_rc.get('t-rc-2', {}).get('fail_reasons')!r}")
+
+        if rows_rc.get("t-rcs-1", {}).get("fail_reasons") == correct_single:
+            ok("24: 単一レコードの slug (slug-recompute-single) は再計算しても値が変わらない")
+        else:
+            ng("24: 単一レコードの slug (slug-recompute-single) は再計算しても値が変わらない",
+               f"got={rows_rc.get('t-rcs-1', {}).get('fail_reasons')!r}")
+
+        if rows_rc.get("t-other-1") == other_repo_row:
+            ok("25: repo_root のフィルタと一致しない repo (other-repo) の行は完全に不変")
+        else:
+            ng("25: repo_root のフィルタと一致しない repo (other-repo) の行は完全に不変",
+               f"got={rows_rc.get('t-other-1')!r}")
+
+        rc_changed_m = re.search(r"(\d+) row\(s\) changed", proc_rc.stdout)
+        if rc_changed_m and int(rc_changed_m.group(1)) == 2:
+            ok("26: 再計算の変更行数 (2行: t-rc-1, t-rc-2) が stdout に出る")
+        else:
+            ng("26: 再計算の変更行数 (2行: t-rc-1, t-rc-2) が stdout に出る", f"stdout={proc_rc.stdout!r}")
+
+        if unattributed_count(proc_rc.stdout) == 0:
+            ok("27: 再計算ケースでは全 verdict がどちらかの窓に収まり unattributed は0")
+        else:
+            ng("27: 再計算ケースでは全 verdict がどちらかの窓に収まり unattributed は0",
+               f"stdout={proc_rc.stdout!r}")
+
         # --- py_compile --------------------------------------------------------------------
         procH = subprocess.run([sys.executable, "-m", "py_compile", script],
                                 capture_output=True, text=True)
         if procH.returncode == 0:
-            ok("8 py_compile: collect-task-metrics.py はコンパイル可能")
+            ok("28 py_compile: collect-task-metrics.py はコンパイル可能")
         else:
-            ng("8 py_compile: collect-task-metrics.py はコンパイル可能",
+            ng("28 py_compile: collect-task-metrics.py はコンパイル可能",
                f"exit={procH.returncode} stderr={procH.stderr!r}")
 
     print()
