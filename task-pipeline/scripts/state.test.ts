@@ -4544,6 +4544,326 @@ Deno.test("T-SEQ-7: phase-fail --verifier → advance/block/set-executor each re
   }
 });
 
+// gh-26: 停止・取り下げ・繰り延べの多段列。
+Deno.test("T-SEQ-8: a deferred fix-request crosses a release/re-claim boundary into a different session", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [restingOpen({}, { session: "s1" })]);
+  await expectOk(dir, [
+    "fix-request",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--ids",
+    "rc-1,rc-2",
+    "--findings",
+    "/tmp/f.md",
+  ]);
+  // 別の仕上げが飛行中で、この周回は今は始めない: release で揮発資源を手放す
+  await expectOk(dir, ["release", "--state-dir", dir, "--id", "t-1"]);
+  const deferred = await readItem(dir);
+  assertEquals(deferred.session, null);
+  const deferredFix = (follow(deferred).asks as Record<string, unknown>)
+    .fix as Record<string, unknown>;
+  assertEquals(deferredFix.ids, ["rc-1", "rc-2"], "the ask survives release");
+  assertEquals(deferredFix.taken, false);
+  assertEquals(
+    (follow(deferred).ledger as Record<string, unknown>).fix_attempts,
+    0,
+  );
+
+  // 次イテレーション、別セッション id が着手する
+  const start = await expectOk(dir, [
+    "fix-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s2",
+  ]);
+  assertEquals(start.started, true);
+  assertEquals(start.fix_attempts, 1);
+  const started = await readItem(dir);
+  assertEquals(started.session, "s2");
+  assertEquals(started.progress, "running");
+  assertEquals((started.run as Record<string, unknown>).kind, "pr_fix");
+
+  await expectOk(dir, [
+    "advance",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--from",
+    "pr_fix",
+    "--to",
+    "finalize",
+  ]);
+  const ship = await expectOk(dir, [
+    "ship",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--commits",
+    "1",
+    "--ref",
+    "https://example.com/o/r/pull/1",
+    "--branch",
+    "b",
+    "--tip",
+    "sha-deferred",
+    "--base",
+    "main",
+  ]);
+  assertEquals(ship.notify, "update");
+  assertEquals(ship.mark, false);
+  const after = await readItem(dir);
+  assertEquals(
+    after.session,
+    "s2",
+    "ship keeps the session that started the cycle",
+  );
+  const ledger = follow(after).ledger as Record<string, unknown>;
+  assertEquals(ledger.handled, ["rc-1", "rc-2"]);
+  assertEquals(ledger.fix_attempts, 1);
+});
+
+Deno.test("T-SEQ-9: three observed errors latch attention, and attention-set --auto does not re-latch immediately", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    restingOpen({
+      probe: probeOf({
+        proc: "p1",
+        proc_started_at: "2026-08-07T00:00:00.000Z",
+      }),
+    }, { session: "s" }),
+  ]);
+  for (let round = 1; round <= 2; round++) {
+    const out = await expectOk(dir, [
+      "observe",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--errors-inc",
+      "true",
+    ]);
+    assertEquals(out.errors, round);
+    assertEquals(out.latched, false, `round ${round} must not latch`);
+  }
+  const beforeLatch = await readItem(dir);
+  assertEquals(beforeLatch.session, "s", "not yet latched");
+  assertEquals(
+    (follow(beforeLatch).probe as Record<string, unknown>).proc,
+    "p1",
+  );
+
+  const third = await expectOk(dir, [
+    "observe",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--errors-inc",
+    "true",
+  ]);
+  assertEquals(third.errors, 3);
+  assertEquals(third.latched, true);
+  const latched = await readItem(dir);
+  assertEquals(latched.session, null);
+  const f = follow(latched);
+  assertEquals(f.attention, { human: "errors" });
+  assertEquals((f.probe as Record<string, unknown>).proc, null);
+
+  // 人が auto に戻す
+  await expectOk(dir, [
+    "attention-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--auto",
+    "true",
+  ]);
+  const resumed = await readItem(dir);
+  assertEquals(follow(resumed).attention, "auto");
+  assertEquals((follow(resumed).probe as Record<string, unknown>).errors, 0);
+
+  // 再ラッチしない: 1 回目のエラーは errors=1・latched=false から再開する
+  const again = await expectOk(dir, [
+    "observe",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--errors-inc",
+    "true",
+  ]);
+  assertEquals(again.errors, 1);
+  assertEquals(
+    again.latched,
+    false,
+    "attention-set --auto must reset errors, not just attention",
+  );
+});
+
+Deno.test("T-SEQ-10: withdraw removes the queue entry into withdrawn_branches, and a fresh claim recovers it via set-worktree", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    restingOpen({}, { session: "s", worktree: "/tmp/wt", base: "main" }),
+  ], { withdrawn_branches: [] });
+
+  await expectOk(dir, [
+    "withdraw",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--note",
+    "closed by hand",
+  ]);
+  const withdrawn = await readItem(dir);
+  const withdrawnArtifact = withdrawn.artifact as Record<string, unknown>;
+  assertEquals(withdrawnArtifact.state, "withdrawn");
+  assertEquals(withdrawnArtifact.asked, false);
+  assertEquals(withdrawn.session, null);
+
+  await expectOk(dir, ["withdraw-asked", "--state-dir", dir, "--id", "t-1"]);
+  assertEquals(
+    ((await readItem(dir)).artifact as Record<string, unknown>).asked,
+    true,
+  );
+
+  await expectOk(dir, [
+    "withdraw-remove",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--reason",
+    "obsolete",
+  ]);
+  const afterRemove = await readState(dir);
+  assertEquals((afterRemove.queue as unknown[]).length, 0);
+  const wb = afterRemove.withdrawn_branches as Record<string, unknown>[];
+  assertEquals(wb.length, 1);
+  assertEquals(wb[0].id, "t-1");
+  assertEquals(wb[0].branch, "task-pipeline/t-1");
+  assertEquals(wb[0].base, "main");
+  assertEquals(wb[0].worktree, "/tmp/wt");
+  assertEquals(wb[0].reason, "obsolete");
+  assert(typeof wb[0].at === "string", "at must be stamped");
+
+  // 次に候補として戻ってきて再承認される
+  await expectOk(dir, [
+    "approve",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--title",
+    "T",
+  ]);
+  await expectOk(dir, [
+    "claim",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s2",
+  ]);
+  await expectOk(dir, [
+    "set-worktree",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--worktree",
+    "/wt2",
+    "--base",
+    "main",
+    "--drop-withdrawn-branch",
+    "true",
+  ]);
+  const recovered = await readState(dir);
+  assertEquals(
+    (recovered.withdrawn_branches as unknown[]).length,
+    0,
+    "the branch record is reclaimed",
+  );
+  const item = (recovered.queue as Record<string, unknown>[]).find((it) =>
+    it.id === "t-1"
+  )!;
+  assertEquals(item.worktree, "/wt2");
+  assertEquals(item.base, "main");
+});
+
+Deno.test("T-SEQ-11: attention-set --auto followed by fix-start --reset-attempts restarts the count at 1", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    restingOpen({
+      asks: { fix: fixAsk(), rebase: null },
+      ledger: ledgerOf({ fix_attempts: 3 }),
+    }, { session: "s" }),
+  ]);
+  const atLimit = await expectOk(dir, [
+    "fix-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s",
+  ]);
+  assertEquals(atLimit.started, false);
+  assertEquals(atLimit.fix_attempts, 4);
+  const latched = await readItem(dir);
+  assertEquals(follow(latched).attention, { human: "fix_limit" });
+  assertEquals(latched.session, null);
+
+  await expectOk(dir, [
+    "attention-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--auto",
+    "true",
+  ]);
+  const resumed = await readItem(dir);
+  assertEquals(follow(resumed).attention, "auto");
+  assertEquals(
+    (follow(resumed).ledger as Record<string, unknown>).fix_attempts,
+    4,
+    "attention-set --auto does not touch the attempt count by itself",
+  );
+
+  const restarted = await expectOk(dir, [
+    "fix-start",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--session",
+    "s3",
+    "--reset-attempts",
+    "true",
+  ]);
+  assertEquals(restarted.started, true);
+  assertEquals(restarted.fix_attempts, 1);
+  const item = await readItem(dir);
+  assertEquals(item.progress, "running");
+  assertEquals((item.run as Record<string, unknown>).kind, "pr_fix");
+  assertEquals(item.session, "s3");
+  assertEquals(
+    (follow(item).ledger as Record<string, unknown>).fix_attempts,
+    1,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // D: 契約文書との機械照合
 // ---------------------------------------------------------------------------
