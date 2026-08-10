@@ -84,24 +84,37 @@ Deno.test("T4b クラスB (未到達) — 上限未満なら通常どおり進�
   );
 });
 
-Deno.test("T5a 判定は自分の running がゼロの地点でのみ発火する旨がある", () => {
-  assertOk(
-    containsFixed(
-      skillMd,
-      "この判定に到達するのは `running` のタスクが1件も無いときだけ",
-    ),
-    "見つからない",
-  );
+const T5A_NEEDLE =
+  "`own_initial` 不在 ∧ `running_mine_finishing == 0` の両方で明示的に確かめられている";
+const T5B_NEEDLE =
+  "`counts.running_mine_finishing` が 1 以上の間 (自分の仕上げ run が飛行中) は、`start.blocked_by` に `max_tasks` が含まれていてもこの節の手順に進まない";
+
+Deno.test("T5a 判定は own_initial 不在 ∧ running_mine_finishing==0 の両方で明示的に発火する旨がある", () => {
+  assertOk(containsFixed(skillMd, T5A_NEEDLE), "見つからない");
 });
 
-Deno.test("T5b 仕上げ (pr_fix/rebase_fix) 飛行中は止めない旨がある", () => {
-  assertOk(
-    containsFixed(
-      skillMd,
-      "仕上げ (`pr_fix`/`rebase_fix`) が飛行中のタスクも `progress: running` なので同じく「飛行中の扱い」に分岐し、この判定へは来ない",
-    ),
-    "見つからない",
-  );
+Deno.test("T5b 仕上げが飛行中の間は running_mine_finishing を見て停止を保留する旨がある", () => {
+  assertOk(containsFixed(skillMd, T5B_NEEDLE), "見つからない");
+});
+
+Deno.test("T11 T5a への回帰注入 (メモリ上の複製から該当記述を除去) が効いている", () => {
+  const injected = skillMd.replace(T5A_NEEDLE, "");
+  assertOk(injected !== skillMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("T12 T5a の退行 (説明の消失) を T5a 相当のチェックで検知できる", () => {
+  const injected = skillMd.replace(T5A_NEEDLE, "");
+  assertOk(!containsFixed(injected, T5A_NEEDLE), "除去後も見つかってしまった");
+});
+
+Deno.test("T13 T5b への回帰注入 (メモリ上の複製から該当記述を除去) が効いている", () => {
+  const injected = skillMd.replace(T5B_NEEDLE, "");
+  assertOk(injected !== skillMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("T14 T5b の退行 (説明の消失) を T5b 相当のチェックで検知できる", () => {
+  const injected = skillMd.replace(T5B_NEEDLE, "");
+  assertOk(!containsFixed(injected, T5B_NEEDLE), "除去後も見つかってしまった");
 });
 
 Deno.test("T6a 枯渇時フロー手順2の再利用を明記している", () => {
