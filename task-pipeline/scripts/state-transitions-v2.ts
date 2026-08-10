@@ -312,6 +312,8 @@ export function applyClaim(
       executor: null,
       executor_last_event_at: null,
       takeover_at: null,
+      verifier: null,
+      verifier_session: null,
     },
     blocked_reason: null,
     artifact: cycleResetArtifact(item.artifact),
@@ -356,7 +358,16 @@ export function applyAdvance(
     isAdvanceEdge(axisKeyOfRun(run), from, to),
     `not an advance edge for ${axisKeyOfRun(run)}: ${from} -> ${to}`,
   );
-  const next: V2Item = { ...item, run: { ...run, phase: to, attempts: 0 } };
+  const next: V2Item = {
+    ...item,
+    run: {
+      ...run,
+      phase: to,
+      attempts: 0,
+      verifier: null,
+      verifier_session: null,
+    },
+  };
   return withReplacedItem(state, index, next);
 }
 
@@ -370,6 +381,8 @@ export function applyPhaseFail(
   index: number,
   state: V2State,
   phase: string,
+  verifier: string | null = null,
+  verifierSession: string | null = null,
 ): PhaseFailResult {
   requireVerbAxes(item, "phase-fail");
   const run = item.run as V2Run;
@@ -378,7 +391,16 @@ export function applyPhaseFail(
     `phase must be ${phase}, got ${String(run.phase)}`,
   );
   const attempts = run.attempts + 1;
-  const next: V2Item = { ...item, run: { ...run, attempts } };
+  const next: V2Item = {
+    ...item,
+    run: {
+      ...run,
+      attempts,
+      verifier,
+      // verifier が無ければ session だけが残る組を作らせない (呼び出し側のバグ避け)。
+      verifier_session: verifier !== null ? verifierSession : null,
+    },
+  };
   return { state: withReplacedItem(state, index, next), attempts };
 }
 
@@ -874,6 +896,8 @@ export function applyFixStart(
         executor: null,
         executor_last_event_at: null,
         takeover_at: null,
+        verifier: null,
+        verifier_session: null,
       },
       artifact: withFollow(open, {
         ...follow,
@@ -928,6 +952,8 @@ export function applyRebaseStart(
         executor: null,
         executor_last_event_at: null,
         takeover_at: null,
+        verifier: null,
+        verifier_session: null,
       },
       artifact: withFollow(open, {
         ...follow,
@@ -1313,7 +1339,13 @@ export function applySetExecutor(
   const run = item.run as V2Run;
   const next: V2Item = {
     ...item,
-    run: { ...run, executor, executor_last_event_at: nowIso },
+    run: {
+      ...run,
+      executor,
+      executor_last_event_at: nowIso,
+      verifier: null,
+      verifier_session: null,
+    },
     session,
   };
   return withReplacedItem(state, index, next);

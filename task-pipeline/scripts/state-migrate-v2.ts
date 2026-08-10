@@ -148,6 +148,8 @@ interface RunV2 {
   executor: string | null;
   executor_last_event_at: string | null;
   takeover_at: string | null;
+  verifier: string | null;
+  verifier_session: string | null;
 }
 
 function buildRun(
@@ -174,6 +176,10 @@ function buildRun(
     executor: str(item.executor),
     executor_last_event_at: str(item.executor_last_event_at),
     takeover_at: str(item.takeover_at),
+    // gh-70: v1 に verifier という概念が無いので、移行後は常に null
+    // (フレッシュ起動へ自然にフォールバックする)。
+    verifier: null,
+    verifier_session: null,
   };
 }
 

@@ -55,6 +55,7 @@ import {
   followOf,
   type V2Follow,
   type V2Item,
+  type V2Run,
   type V2State,
 } from "./state-transitions-v2.ts";
 
@@ -81,6 +82,8 @@ export const PROBE_LEASE_MIN = 7 * 60;
 export const STALLED_CUTOFF_MIN = 24 * 60;
 /** 1 engagement あたりの押し直し上限 (これ以上で fix-start が上限ラッチになる)。 */
 export const FIX_ATTEMPTS_LIMIT = 3;
+/** gh-70: reuse_verifier を有効とみなす run.attempts の上限 (これ以上で無効=null)。 */
+export const VERIFIER_REUSE_ATTEMPTS_LIMIT = 3;
 /** プロジェクト全体で許す飛行中の新規タスク数 (これ以上なら着手しない)。 */
 export const INFLIGHT_LIMIT = 2;
 /** `max_open` の既定値。 */
@@ -301,6 +304,12 @@ export interface NextFinalize {
   readonly ship: NextShipHint;
 }
 
+/** gh-70: FAIL 後の再検証を同じ verifier の再開にできるかの判定結果。 */
+export interface NextGate {
+  /** 再開先の agentId。再開できないとき (null / 別セッション / attempts 上限) は null。 */
+  readonly reuse_verifier: string | null;
+}
+
 export interface NextTask {
   readonly id: string;
   readonly ownership: OwnershipVerdict;
@@ -310,6 +319,7 @@ export interface NextTask {
   readonly progress: Progress;
   readonly artifact: ArtifactState;
   readonly follow_target: boolean;
+  readonly gate: NextGate;
   readonly actions: readonly NextAction[];
   readonly observations: readonly NextObservation[];
   readonly finalize: NextFinalize | null;
@@ -711,6 +721,17 @@ function cycleAction(
   return null;
 }
 
+// gh-70: FAIL 後の再検証を同じ verifier の再開にできるか。`run.verifier` を作れたのは
+// それを控えた session だけなので (別セッションからは SendMessage で再開できない、
+// research.md 参照)、セッション不一致は無条件で null に落とす。
+function reuseVerifierOf(run: V2Run | null, session: string): string | null {
+  if (run === null) return null;
+  if (run.verifier === null) return null;
+  if (run.verifier_session !== session) return null;
+  if (run.attempts >= VERIFIER_REUSE_ATTEMPTS_LIMIT) return null;
+  return run.verifier;
+}
+
 function deriveTask(
   c: Classified,
   classified: readonly Classified[],
@@ -735,6 +756,7 @@ function deriveTask(
     progress: item.progress,
     artifact: item.artifact.state,
     follow_target: followTarget,
+    gate: { reuse_verifier: reuseVerifierOf(item.run, input.session) },
   };
 
   // **生きている他セッションが所有するタスクには一切触らない** — 座標だけを報告し、

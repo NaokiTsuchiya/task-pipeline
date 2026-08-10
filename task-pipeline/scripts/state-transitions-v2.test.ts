@@ -102,6 +102,7 @@ import {
   type V2Ledger,
   type V2Probe,
   type V2RebaseAsk,
+  type V2Run,
   type V2State,
   VERB_SPEC,
   type VerbName,
@@ -320,6 +321,8 @@ function buildItem(
         executor: "agent-0",
         executor_last_event_at: NOW0,
         takeover_at: null,
+        verifier: null,
+        verifier_session: null,
       }
       : null,
     blocked_reason: pKey === P_BLOCKED ? "reason" : null,
@@ -1373,6 +1376,87 @@ Deno.test("T-V2T-MX-3: advance rejects non-adjacent, backward, cross-axis and de
     "finalize",
   );
   assertEquals(pNodeKeyOf(itemOf(out) as V2Item), P_FULL_FINALIZE);
+});
+
+// ---------------------------------------------------------------------------
+// T-V2T-VERIFIER — gh-70: run.verifier/run.verifier_session の書き込みとリセット
+// ---------------------------------------------------------------------------
+
+Deno.test("T-V2T-VERIFIER-1: phase-fail writes verifier/verifier_session when given, leaves both null when omitted", () => {
+  const item = buildItem(P_FULL_IMPLEMENT, A_NODE_NONE);
+  const state = buildState(item);
+
+  // --verifier 省略 (デフォルト引数) → 両方 null のまま
+  const omitted = itemOf(
+    applyPhaseFail(item, 0, state, "implement").state,
+  ) as V2Item;
+  assertEquals(omitted.run!.verifier, null, "omitted: verifier");
+  assertEquals(
+    omitted.run!.verifier_session,
+    null,
+    "omitted: verifier_session",
+  );
+  assertEquals(
+    omitted.run!.attempts,
+    item.run!.attempts + 1,
+    "omitted: attempts still increments",
+  );
+
+  // --verifier + --session 相当 (直接引数で渡す) → 両方書かれる
+  const given = itemOf(
+    applyPhaseFail(item, 0, state, "implement", "agent-1", "s1").state,
+  ) as V2Item;
+  assertEquals(given.run!.verifier, "agent-1", "given: verifier");
+  assertEquals(given.run!.verifier_session, "s1", "given: verifier_session");
+});
+
+Deno.test("T-V2T-VERIFIER-2: advance resets verifier/verifier_session to null", () => {
+  const withVerifier = buildItem(P_FULL_IMPLEMENT, A_NODE_NONE, {
+    run: {
+      ...(buildItem(P_FULL_IMPLEMENT, A_NODE_NONE).run as V2Run),
+      verifier: "agent-1",
+      verifier_session: "s1",
+    },
+  });
+  const state = buildState(withVerifier);
+  const target = advanceTargetsOf(withVerifier.run!)[0];
+  const out = itemOf(
+    applyAdvance(withVerifier, 0, state, "implement", target),
+  ) as V2Item;
+  assertEquals(out.run!.verifier, null, "verifier reset");
+  assertEquals(out.run!.verifier_session, null, "verifier_session reset");
+});
+
+Deno.test("T-V2T-VERIFIER-3: block drops verifier/verifier_session along with the whole run", () => {
+  const withVerifier = buildItem(P_FULL_IMPLEMENT, A_NODE_NONE, {
+    run: {
+      ...(buildItem(P_FULL_IMPLEMENT, A_NODE_NONE).run as V2Run),
+      verifier: "agent-1",
+      verifier_session: "s1",
+    },
+  });
+  const state = buildState(withVerifier);
+  const out = itemOf(
+    applyBlock(withVerifier, 0, state, "reason"),
+  ) as V2Item;
+  assertEquals(out.run, null, "run (and therefore verifier) is gone");
+});
+
+Deno.test("T-V2T-VERIFIER-4: set-executor resets verifier/verifier_session to null", () => {
+  const withVerifier = buildItem(P_FULL_IMPLEMENT, A_NODE_NONE, {
+    run: {
+      ...(buildItem(P_FULL_IMPLEMENT, A_NODE_NONE).run as V2Run),
+      verifier: "agent-1",
+      verifier_session: "s1",
+    },
+  });
+  const state = buildState(withVerifier);
+  const out = itemOf(
+    applySetExecutor(withVerifier, 0, state, "agent-2", "s2", NOW),
+  ) as V2Item;
+  assertEquals(out.run!.verifier, null, "verifier reset");
+  assertEquals(out.run!.verifier_session, null, "verifier_session reset");
+  assertEquals(out.run!.executor, "agent-2", "executor still updates");
 });
 
 Deno.test("T-V2T-MX-4: fix-start branches on the attempt cap", () => {

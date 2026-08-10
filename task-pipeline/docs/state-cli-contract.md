@@ -282,6 +282,7 @@ state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
             "running_mine_finishing":0,"tasks_started":3},
  "tasks": [{"id":"gh-42","ownership":"self","excluded":false,"status":"in_review",
             "progress":"resting","artifact":"open","follow_target":true,
+            "gate":{"reuse_verifier":null},
             "actions":[],"observations":[],"finalize":null}],
  "start": {"allowed":false,"blocked_by":["max_open"],"next_id":null,"detail":{}},
  "stalled": {"current":"max_open","since":"<iso>|null","elapsed_min":123,
@@ -317,6 +318,10 @@ state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
 - `stalled.set_to` は `stalled-set --value` に渡す値。`"null"` / `"max_open"` /
   `"defer"` (= `tracker-list` の結果次第。`defer` オブジェクトの `if_empty` /
   `otherwise` がその分岐) / `"keep"` (停滞の 2 種類のどちらでもないので書き換えない)。
+- `tasks[].gate.reuse_verifier` (gh-70) は、直前の FAIL 検証エージェントを `phase-fail`
+  再検証として再開してよいときだけその agentId、それ以外 (`run.verifier` が null /
+  `run.verifier_session` が呼び出し側の `--session` と不一致 / `run.attempts` が上限3に
+  達している) は null。
 
 ### `verdict-path`
 
@@ -509,19 +514,25 @@ state.ts advance --state-dir <dir> --id <id> --from <phase> --to <phase> [lock f
 
 前提: P が `P_VERIFIED` のいずれか、`run.phase == <from>`、`<from> → <to>` が現在の列の
 隣接辺 (上のフェーズ列表)。`--from`/`--to` は全フェーズ名 (finalize を含む) を受ける。
-効果: `phase → <to>`、`attempts → 0`。
+効果: `phase → <to>`、`attempts → 0`、`verifier`/`verifier_session → null` (gh-70。
+フェーズが進めば前回の verifier の判断は別フェーズのものになるため)。
 成功: `{"ok": true, "id": "<id>", "phase": "<to>"}`。
 
 ### `phase-fail`
 
 ```
-state.ts phase-fail --state-dir <dir> --id <id> --phase <phase> [lock flags]
+state.ts phase-fail --state-dir <dir> --id <id> --phase <phase> \
+  [--verifier <agentId> --session <id>] [lock flags]
 ```
 
 前提: P が `P_VERIFIED` のいずれかで `run.phase == <phase>`。`--phase` は**検証ゲートを持つ
-フェーズだけ**を受ける (`finalize` は `usage`)。
-効果: `attempts` を 1 増やす (ノードは動かない)。
-成功: `{"ok": true, "id": "<id>", "attempts": <n>}`。
+フェーズだけ**を受ける (`finalize` は `usage`)。`--verifier` を渡すときは `--session` も
+必須 (`usage`)。
+効果: `attempts` を 1 増やす (ノードは動かない)。`--verifier` を渡すと `run.verifier`/
+`run.verifier_session` (呼び出し側の `--session`) を書く (gh-70。次の `next` が
+`gate.reuse_verifier` としてこれを返せるようにするため)。省略時は両方 null のまま。
+成功: `{"ok": true, "id": "<id>", "attempts": <n>, "verifier": "<s>"|null,
+"verifier_session": "<s>"|null}`。
 
 ### `block`
 
@@ -839,6 +850,8 @@ state.ts set-executor --state-dir <dir> --id <id> --executor <s> --session <s> [
 
 前提: P が `P_RUNNING` のいずれか。
 効果: `run.executor` と `run.executor_last_event_at` を設定し、`session` を立てる。
+`verifier`/`verifier_session` は null に戻す (gh-70。executor が差し替わったら、前回の
+FAIL は引き継ぎ前の実行エージェントの成果物に対する判断なので安全側に倒す)。
 成功: `{"ok": true, "id": "<id>", "executor": "<s>", "session": "<s>"}`。
 
 ### `touch-executor`
