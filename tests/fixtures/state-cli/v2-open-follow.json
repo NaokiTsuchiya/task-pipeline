@@ -25,7 +25,9 @@
             "handled": ["c1", "c2"],
             "fix_attempts": 1,
             "review_only": [],
-            "answered": []
+            "answered": [],
+            "fix_cycle_tip": null,
+            "fix_rerun_tip": null
           },
           "probe": {
             "proc": null,

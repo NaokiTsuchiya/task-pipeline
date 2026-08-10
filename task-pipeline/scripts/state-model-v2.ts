@@ -334,6 +334,7 @@ export const HUMAN_ATTENTION_REASON_VALUES = [
   "fix_limit",
   "errors",
   "manual",
+  "fix_stagnant",
 ] as const;
 export type HumanAttentionReason =
   (typeof HUMAN_ATTENTION_REASON_VALUES)[number];

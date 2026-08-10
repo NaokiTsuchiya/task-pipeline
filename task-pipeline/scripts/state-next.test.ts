@@ -149,7 +149,14 @@ function follow(overrides: Partial<V2Follow> = {}): V2Follow {
   return {
     attention: "auto",
     asks: { fix: null, rebase: null },
-    ledger: { handled: [], fix_attempts: 0, review_only: [], answered: [] },
+    ledger: {
+      handled: [],
+      fix_attempts: 0,
+      review_only: [],
+      answered: [],
+      fix_cycle_tip: null,
+      fix_rerun_tip: null,
+    },
     probe: probe(),
     ...overrides,
   };
@@ -700,6 +707,8 @@ nextTest("next/cycle: fix-start の at_limit と reset_attempts の境界", () =
               fix_attempts: attempts,
               review_only: [],
               answered: [],
+              fix_cycle_tip: null,
+              fix_rerun_tip: null,
             },
           }),
         }),
@@ -725,6 +734,77 @@ nextTest("next/cycle: fix-start の at_limit と reset_attempts の境界", () =
   const humanResult = deriveNext(mk(4, { human: "fix_limit" }), input());
   assertEquals(actionKinds(taskOf(humanResult, "t-1")), []);
 });
+
+// gh-18: pr_fix を1周して tip が変わらなければ次の周を始めない (空回りの検出)。
+// artifact.tip は openArtifact() の既定値 "abc123" を使う。
+nextTest(
+  "next/cycle: gh-18 tip 不変 × CI failing で fix-start より先に fix-ci-rerun を返す",
+  () => {
+    const mk = (
+      cycleTip: string | null,
+      ci: V2Probe["ci"],
+      rerunTip: string | null,
+    ) =>
+      state([
+        item("t-1", {
+          artifact: openArtifact({
+            tip: "abc123",
+            follow: follow({
+              asks: { fix: fixAsk({ ids: ["c1"] }), rebase: null },
+              ledger: {
+                handled: [],
+                fix_attempts: 1,
+                review_only: [],
+                answered: [],
+                fix_cycle_tip: cycleTip,
+                fix_rerun_tip: rerunTip,
+              },
+              probe: probe({ ci }),
+            }),
+          }),
+        }),
+      ]);
+
+    const kindsOf = (
+      cycleTip: string | null,
+      ci: V2Probe["ci"],
+      rerunTip: string | null,
+    ) =>
+      actionKinds(
+        taskOf(deriveNext(mk(cycleTip, ci, rerunTip), input()), "t-1"),
+      );
+
+    // クラス A: 直前の周回の tip が現在の tip と違う (=前回 push があった) → 通常続行。
+    assertEquals(kindsOf("old-tip", "failing", null), ["fix-start"]);
+    // クラス B: tip は不変だが CI は failing でない (レビュー指摘だけの周回、または既に
+    // 回復している) → CI 起因の空回りではないので通常続行。
+    assertEquals(kindsOf("abc123", "passing", null), ["fix-start"]);
+    assertEquals(kindsOf("abc123", "pending", null), ["fix-start"]);
+    assertEquals(kindsOf("abc123", null, null), ["fix-start"]);
+    // 境界: まだ一度も fix-start していない (fix_cycle_tip が null) → 不一致として扱う。
+    assertEquals(kindsOf(null, "failing", null), ["fix-start"]);
+
+    // クラス C: tip 不変 × CI failing × まだこの tip で再実行していない → 再実行 action。
+    const rerun = actionOf(
+      taskOf(deriveNext(mk("abc123", "failing", null), input()), "t-1"),
+      "fix-ci-rerun",
+    );
+    assertEquals(rerun.tip, "abc123");
+    assertEquals(kindsOf("abc123", "failing", null), ["fix-ci-rerun"]);
+    // 別の tip で再実行済みなだけでは防げない (tip ごとの記録であることの確認)。
+    assertEquals(kindsOf("abc123", "failing", "some-other-tip"), [
+      "fix-ci-rerun",
+    ]);
+
+    // クラス D: 再実行後も CI が failing のまま tip 不変 → 人へ委ねる (fix-start は返さない)。
+    const giveUp = actionOf(
+      taskOf(deriveNext(mk("abc123", "failing", "abc123"), input()), "t-1"),
+      "fix-give-up",
+    );
+    assertEquals(giveUp.reason, "fix_stagnant");
+    assertEquals(kindsOf("abc123", "failing", "abc123"), ["fix-give-up"]);
+  },
+);
 
 nextTest("next/cycle: 自分の仕上げが走っているときは release に落ちる", () => {
   const mkQueue = (finishingSession: string | null) => [

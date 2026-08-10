@@ -50,6 +50,7 @@ import {
   applyClaim,
   applyDequeue,
   applyFixRequest,
+  applyFixRerunMark,
   applyFixStart,
   applyMerged,
   applyObserve,
@@ -207,6 +208,8 @@ function ledgerFixture(): V2Ledger {
     fix_attempts: 1,
     review_only: [{ id: "r1", updated_at: "t1" }],
     answered: [{ id: "q1", updated_at: "t1" }],
+    fix_cycle_tip: null,
+    fix_rerun_tip: null,
   };
 }
 
@@ -554,6 +557,13 @@ const VERB_CASES: readonly VerbCase[] = [
     frame: ["artifact.follow.asks.fix"],
   },
   {
+    name: "fix-rerun-mark",
+    verb: "fix-rerun-mark",
+    invoke: (i, x, s) => applyFixRerunMark(i, x, s).state,
+    frameNode: [P_RESTING, A_OPEN_IDLE],
+    frame: ["artifact.follow.ledger.fix_rerun_tip"],
+  },
+  {
     name: "rebase-request",
     verb: "rebase-request",
     invoke: (i, x, s) =>
@@ -590,6 +600,7 @@ const VERB_CASES: readonly VerbCase[] = [
       "artifact.follow.attention",
       "artifact.follow.asks.fix.taken",
       "artifact.follow.ledger.fix_attempts",
+      "artifact.follow.ledger.fix_cycle_tip",
       "artifact.follow.probe.proc",
       "artifact.follow.probe.proc_started_at",
     ],
@@ -815,7 +826,7 @@ Deno.test("T-V2T-ALIGN-1: VERB_SPEC keys and verb cases agree", () => {
   // approve は from ノードを持たない新規追加なので行列/フレームの対象外 (v1 と同じ扱い)。
   const specVerbs = Object.keys(VERB_SPEC).filter((v) => v !== "approve");
   assertSameSet(caseVerbs, specVerbs, "verb cases vs VERB_SPEC keys");
-  assertEquals(Object.keys(VERB_SPEC).length, 32, "verb count");
+  assertEquals(Object.keys(VERB_SPEC).length, 33, "verb count");
   assertEquals(
     new Set(VERB_CASES.map((c) => c.name)).size,
     VERB_CASES.length,
@@ -1282,7 +1293,7 @@ Deno.test("T-V2T-MX-1: every verb fires exactly on its declared from-product and
   }
   // 走査件数を固定して縮退 (フィクスチャの取りこぼしで行列が痩せること) を防ぐ。
   assertEquals(checked, COHERENT_PRODUCT_NODES.length * VERB_CASES.length);
-  assertEquals(checked, 233 * 33);
+  assertEquals(checked, 233 * 34);
 });
 
 Deno.test("T-V2T-MX-2: advance walks every run axis main sequence end to end", () => {

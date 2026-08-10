@@ -262,6 +262,10 @@ function buildFollow(
       fix_attempts: nonNegativeInt(watch?.fix_attempts, 0),
       review_only: reviewOnlyEntries(watch?.review_only),
       answered: reviewOnlyEntries(watch?.answered),
+      // gh-18: v1 にこの概念は無いので常に null (移行直後は「まだ空回りを検出していない」
+      // 状態になる)。
+      fix_cycle_tip: null,
+      fix_rerun_tip: null,
     },
     probe: {
       proc: holdsLease ? str(watch?.proc) : null,

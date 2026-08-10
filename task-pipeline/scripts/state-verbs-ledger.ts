@@ -8,7 +8,7 @@
 //
 // queue エントリの座標 (領域 P × 領域 A) を持たない verb だけがここに居る
 // (対応する純関数は state-ledger-v2.ts の LEDGER_VERBS)。**queue エントリを対象にする
-// 32 verb は state-verbs-queue.ts** にある。層の一覧は state-io.ts の冒頭。
+// 33 verb は state-verbs-queue.ts** にある。層の一覧は state-io.ts の冒頭。
 //
 // 各 cmd は「flag 抽出・usage 検証 → lock 越しに純関数へ委譲 → 成功 JSON 組み立て」の
 // 薄い形で、判断そのものは持たない。

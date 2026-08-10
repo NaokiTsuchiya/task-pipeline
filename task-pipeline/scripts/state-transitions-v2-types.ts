@@ -92,6 +92,11 @@ export interface V2Ledger {
   readonly fix_attempts: number;
   readonly review_only: readonly LedgerEntry[];
   readonly answered: readonly LedgerEntry[];
+  // gh-18: 直前に着手した pr_fix サイクルが向き合った tip (`fix-start` が記録する) と、
+  // その tip に対して CI 再実行を既に行ったか (`fix-rerun-mark` が記録する)。次の周回の
+  // 「tip が動かないまま同じ CI 失敗を繰り返していないか」の判定に使う。
+  readonly fix_cycle_tip: string | null;
+  readonly fix_rerun_tip: string | null;
 }
 
 export interface V2Probe {
@@ -281,6 +286,8 @@ export const LEDGER_SHAPE = [
   "fix_attempts",
   "review_only",
   "answered",
+  "fix_cycle_tip",
+  "fix_rerun_tip",
 ] as const satisfies ShapeOf<V2Ledger>;
 export const PROBE_SHAPE = [
   "proc",

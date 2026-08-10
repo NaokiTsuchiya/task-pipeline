@@ -102,6 +102,7 @@ follow はさらに 3 つのサブ軸を持ち、追従対象かどうかはこ�
 | `human(fix_limit)` | 押し直しの上限に達して人待ち |
 | `human(errors)` | 観測エラーが上限に達して人待ち |
 | `human(manual)` | 人が明示的に止めた |
+| `human(fix_stagnant)` | 再実行後もCIが落ちたままtipが動かず人待ち |
 | `fix:null` | 修正要求が無い |
 | `fix:pending` | 修正要求が未消費 |
 | `fix:taken` | 修正要求を run が消費済み |
@@ -146,6 +147,7 @@ follow はさらに 3 つのサブ軸を持ち、追従対象かどうかはこ�
 | `withdraw-asked` | `resting` | `unchanged` | `withdrawn(asked=true)` |
 | `withdraw-remove` | `resting` | `removed` | `untouched` |
 | `fix-request` | `resting` | `unchanged` | `fix-pending` |
+| `fix-rerun-mark` | `resting` | `unchanged` | `unchanged` |
 | `rebase-request` | `resting` | `unchanged` | `dynamic` |
 | `rebase-applied` | `resting` | `unchanged` | `rebase-quiet` |
 | `fix-start` | `resting` | `dynamic` | `dynamic` |
@@ -188,9 +190,9 @@ light は research+plan → implement → report。どちらもその後 `finali
 
 ## verb 一覧
 
-47 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
+48 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
 
-- **遷移 32** — `VERB_SPEC` のキー。上の遷移表に載る。
+- **遷移 33** — `VERB_SPEC` のキー。上の遷移表に載る。
 - **帳簿 15** — `state-ledger-v2.ts` の `LEDGER_VERBS`。queue エントリの座標を持たない。
 
 ### 帳簿系
@@ -267,6 +269,7 @@ state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
 | probe リースの失効 | 7 時間 | 以上で `probe-run` (`reason: expired`) |
 | 停滞の打ち切り | 24 時間 | 以上で `stalled.cutoff` が真 |
 | 押し直しの上限 | 3 | 以上で `fix-start` が上限ラッチになる (`at_limit`) |
+| CI 再実行の上限 (gh-18) | 1 (tip ごと) | 以上で次の `fix-ci-rerun` を返さず `fix-give-up` に進む (`fix-rerun-mark` で記録) |
 | 飛行中の上限 | 2 | 以上で `start.blocked_by` に `inflight_limit` |
 
 成功 (1 行の JSON):
@@ -296,8 +299,9 @@ state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
   分母)。**仕上げ (`pr_fix`/`rebase_fix`) はどちらにも入らない** — 新規着手とは別枠だから
   である。`counts.running_mine_finishing` は `session` が自分の仕上げの件数。
 - `tasks[].actions` は**その時点で due なアクションの列挙**であって「次の 1 手」ではない。
-  `kind` は `claim` / `probe-run` / `fix-start` / `rebase-start` / `release` / `retire` /
-  `clear-takeover` / `takeover` / `status-check` / `set-takeover` / `wait`。
+  `kind` は `claim` / `probe-run` / `fix-start` / `fix-ci-rerun` / `fix-give-up` /
+  `rebase-start` / `release` / `retire` / `clear-takeover` / `takeover` / `status-check` /
+  `set-takeover` / `wait`。
   **`excluded` が真のタスクでは `actions` も `observations` も必ず空**である
   (生きている他セッションのタスクには一切触らない)。
 - `tasks[].observations` の `merge-proof` は `resting × open ∧ tip != null` に付く
@@ -483,7 +487,8 @@ state.ts claim --state-dir <dir> --id <id> --session <s> [lock flags]
 前提: P が `queued`。
 効果: `running(initial, full, research)` にし、`session` を立てる。**follow があれば周回リセット**
 (設計2.3): `attention → auto`、`asks` 両方 null、`ledger.fix_attempts → 0`、
-`review_only`/`answered → []`、`probe.sig → null`。`ledger.handled` は保持する。
+`review_only`/`answered → []`、`ledger.fix_cycle_tip`/`fix_rerun_tip → null` (gh-18)、
+`probe.sig → null`。`ledger.handled` は保持する。
 成功: `{"ok": true, "id": "<id>", "kind": "initial", "gate": "full", "phase": "research", "session": "<s>"}`。
 
 ### `set-gate`
@@ -637,6 +642,19 @@ state.ts fix-request --state-dir <dir> --id <id> --ids <csv> --findings <path> [
 指摘 id が無い周回)。
 成功: `{"ok": true, "id": "<id>", "ids": [...]}`。
 
+### `fix-rerun-mark`
+
+```
+state.ts fix-rerun-mark --state-dir <dir> --id <id> [lock flags]
+```
+
+前提: P が `resting`、A が `open` で follow を持つ。
+効果: `ledger.fix_rerun_tip` に現在の `artifact.tip` を記録する (他の座標には触れない)。
+同じ tip に対して `next` が `fix-ci-rerun` action を2回返さないための記録専用 verb
+(gh-18)。`--tip` は取らない — 呼び出し側が渡した値と実際の tip がずれるリスクを構造的に
+無くすため、常に現在の `tip` を読んで記録する。
+成功: `{"ok": true, "id": "<id>", "tip": "<sha>|null"}`。
+
 ### `rebase-request`
 
 ```
@@ -672,9 +690,11 @@ state.ts fix-start --state-dir <dir> --id <id> --session <s> [--reset-attempts t
 
 前提: P が `resting`、A が `open` ∧ `auto` ∧ `fix:pending`。
 効果: `ledger.fix_attempts` を 1 増やし、上限 3 以内なら `running(pr_fix,-,pr_fix)` にして
-ask を `taken` にし `session` を立てる。上限超なら **P は `resting` のまま**
-`attention → human(fix_limit)`、`session → null`、リース解除だけを行い、**ask には触れない**
-(pending のまま人の再開を待つ)。どちらの分岐でも `probe.proc → null`。
+ask を `taken` にし `session` を立てる (同じ書き込みで `ledger.fix_cycle_tip` に着手時点の
+`tip` を記録する — gh-18。次の周回で `next` が「tip が動いたか」を判定する材料になる)。
+上限超なら **P は `resting` のまま** `attention → human(fix_limit)`、`session → null`、
+リース解除だけを行い、**ask には触れない** (pending のまま人の再開を待つ。この分岐では
+`fix_cycle_tip` は更新しない)。どちらの分岐でも `probe.proc → null`。
 成功: `{"ok": true, "id": "<id>", "started": <bool>, "fix_attempts": <n>}`。
 
 ### `rebase-start`
@@ -765,7 +785,7 @@ state.ts observe --state-dir <dir> --id <id> \
 ### `attention-set`
 
 ```
-state.ts attention-set --state-dir <dir> --id <id> (--auto true | --human fix_limit|errors|manual) [lock flags]
+state.ts attention-set --state-dir <dir> --id <id> (--auto true | --human fix_limit|errors|manual|fix_stagnant) [lock flags]
 ```
 
 前提: P が `resting`、A が `open` で follow を持つ。`--auto` と `--human` は**ちょうど一方**
