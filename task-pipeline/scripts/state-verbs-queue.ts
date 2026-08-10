@@ -155,13 +155,23 @@ export async function cmdPhaseFail(
   const id = requireFlag(flags, "id");
   // 検証ゲートを持つフェーズだけを受ける (finalize は検証対象外なので usage)。
   const phase = requireEnumFlag(flags, "phase", VERIFIED_PHASE_VALUES);
+  // gh-70: --verifier は省略可 (段階導入)。渡すときは、再開を要求できるセッションを
+  // run.verifier_session に残すため --session も必須にする。
+  const verifier = flags.get("verifier") ?? null;
+  if (verifier !== null && !flags.has("session")) {
+    throw new CliErrorV2(
+      "usage",
+      "--session is required when --verifier is given",
+    );
+  }
+  const session = flags.get("session") ?? null;
   let attempts = 0;
   await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const result = applyPhaseFail(item, index, state, phase);
+    const result = applyPhaseFail(item, index, state, phase, verifier, session);
     attempts = result.attempts;
     return result.state;
   });
-  return { ok: true, id, attempts };
+  return { ok: true, id, attempts, verifier, verifier_session: session };
 }
 
 export async function cmdBlock(

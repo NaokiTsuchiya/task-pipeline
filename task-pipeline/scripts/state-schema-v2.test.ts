@@ -150,6 +150,8 @@ function run(over: Rec = {}): Rec {
     executor: null,
     executor_last_event_at: null,
     takeover_at: null,
+    verifier: null,
+    verifier_session: null,
     ...over,
   };
 }
@@ -346,6 +348,13 @@ const VALID_CASES: { label: string; value: unknown }[] = [
     }),
   },
   {
+    label: "gh-70: running + run.verifier/verifier_session が非null の文字列",
+    value: oneItem({
+      progress: "running",
+      run: run({ verifier: "agent-1", verifier_session: "s1" }),
+    }),
+  },
+  {
     label: "トップレベルの任意キーと completed",
     value: stateOf([], {
       stalled: "depleted",
@@ -400,6 +409,28 @@ const INVALID_CASES: { label: string; value: unknown }[] = [
       delete i.session;
       return i;
     })()]),
+  },
+  {
+    label: "gh-70: run の verifier キー欠落",
+    value: oneItem({
+      progress: "running",
+      run: (() => {
+        const r = run();
+        delete r.verifier;
+        return r;
+      })(),
+    }),
+  },
+  {
+    label: "gh-70: run の verifier_session キー欠落",
+    value: oneItem({
+      progress: "running",
+      run: (() => {
+        const r = run();
+        delete r.verifier_session;
+        return r;
+      })(),
+    }),
   },
   // --- run タグ (受け入れ条件4: gate 非 null かつ kind が initial 以外) ---
   {

@@ -73,9 +73,11 @@
         "attempts": { "type": "integer", "minimum": 0 },
         "executor": { "type": ["string", "null"] },
         "executor_last_event_at": { "type": ["string", "null"] },
-        "takeover_at": { "type": ["string", "null"] }
+        "takeover_at": { "type": ["string", "null"] },
+        "verifier": { "type": ["string", "null"] },
+        "verifier_session": { "type": ["string", "null"] }
       },
-      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at"],
+      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at", "verifier", "verifier_session"],
       "additionalProperties": false
     },
     "runInitialLight": {
@@ -87,9 +89,11 @@
         "attempts": { "type": "integer", "minimum": 0 },
         "executor": { "type": ["string", "null"] },
         "executor_last_event_at": { "type": ["string", "null"] },
-        "takeover_at": { "type": ["string", "null"] }
+        "takeover_at": { "type": ["string", "null"] },
+        "verifier": { "type": ["string", "null"] },
+        "verifier_session": { "type": ["string", "null"] }
       },
-      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at"],
+      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at", "verifier", "verifier_session"],
       "additionalProperties": false
     },
     "runPrFix": {
@@ -101,9 +105,11 @@
         "attempts": { "type": "integer", "minimum": 0 },
         "executor": { "type": ["string", "null"] },
         "executor_last_event_at": { "type": ["string", "null"] },
-        "takeover_at": { "type": ["string", "null"] }
+        "takeover_at": { "type": ["string", "null"] },
+        "verifier": { "type": ["string", "null"] },
+        "verifier_session": { "type": ["string", "null"] }
       },
-      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at"],
+      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at", "verifier", "verifier_session"],
       "additionalProperties": false
     },
     "runRebaseFix": {
@@ -115,9 +121,11 @@
         "attempts": { "type": "integer", "minimum": 0 },
         "executor": { "type": ["string", "null"] },
         "executor_last_event_at": { "type": ["string", "null"] },
-        "takeover_at": { "type": ["string", "null"] }
+        "takeover_at": { "type": ["string", "null"] },
+        "verifier": { "type": ["string", "null"] },
+        "verifier_session": { "type": ["string", "null"] }
       },
-      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at"],
+      "required": ["kind", "gate", "phase", "attempts", "executor", "executor_last_event_at", "takeover_at", "verifier", "verifier_session"],
       "additionalProperties": false
     },
     "artifact": {

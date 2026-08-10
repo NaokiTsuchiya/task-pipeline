@@ -208,6 +208,8 @@ function run(overrides: Partial<V2Run> = {}): V2Run {
     executor: "agent-1",
     executor_last_event_at: isoMinutesAgo(1),
     takeover_at: null,
+    verifier: null,
+    verifier_session: null,
     ...overrides,
   };
 }
@@ -1762,6 +1764,62 @@ nextTest(
     assertEquals(taskOf(result, "t-open").status, "in_review");
   },
 );
+
+// ---------------------------------------------------------------------------
+// N-GATE — gh-70: tasks[].gate.reuse_verifier の4分岐
+// ---------------------------------------------------------------------------
+
+Deno.test("N-GATE-1: run.verifier が null → reuse_verifier は null", () => {
+  const result = deriveNext(
+    state([
+      item("t-1", {
+        progress: "running",
+        run: run({ verifier: null, verifier_session: null }),
+      }),
+    ]),
+    input(),
+  );
+  assertEquals(taskOf(result, "t-1").gate.reuse_verifier, null);
+});
+
+Deno.test("N-GATE-2: verifier 非null・session 一致・attempts<3 → agentId を返す", () => {
+  const result = deriveNext(
+    state([
+      item("t-1", {
+        progress: "running",
+        run: run({ verifier: "agent-1", verifier_session: SELF, attempts: 1 }),
+      }),
+    ]),
+    input({ session: SELF }),
+  );
+  assertEquals(taskOf(result, "t-1").gate.reuse_verifier, "agent-1");
+});
+
+Deno.test("N-GATE-3: verifier 非null・session 不一致 → reuse_verifier は null", () => {
+  const result = deriveNext(
+    state([
+      item("t-1", {
+        progress: "running",
+        run: run({ verifier: "agent-1", verifier_session: OTHER, attempts: 1 }),
+      }),
+    ]),
+    input({ session: SELF }),
+  );
+  assertEquals(taskOf(result, "t-1").gate.reuse_verifier, null);
+});
+
+Deno.test("N-GATE-4: verifier 非null・session 一致・attempts>=3 → reuse_verifier は null", () => {
+  const result = deriveNext(
+    state([
+      item("t-1", {
+        progress: "running",
+        run: run({ verifier: "agent-1", verifier_session: SELF, attempts: 3 }),
+      }),
+    ]),
+    input({ session: SELF }),
+  );
+  assertEquals(taskOf(result, "t-1").gate.reuse_verifier, null);
+});
 
 // ---------------------------------------------------------------------------
 // 導出 8 分類の網羅 (モジュール読み込み時の不変条件。冒頭の nextTest を参照)

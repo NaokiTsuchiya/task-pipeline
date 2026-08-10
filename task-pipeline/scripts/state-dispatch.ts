@@ -141,6 +141,7 @@ export const FLAG_NAMES = [
   "to",
   "tracker",
   "value",
+  "verifier",
   "worktree",
 ] as const;
 export type FlagName = (typeof FLAG_NAMES)[number];
@@ -192,7 +193,14 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
   "claim": new Set(["state-dir", "id", "session", ...LOCK_FLAGS]),
   "set-gate": new Set(["state-dir", "id", ...LOCK_FLAGS]),
   "advance": new Set(["state-dir", "id", "from", "to", ...LOCK_FLAGS]),
-  "phase-fail": new Set(["state-dir", "id", "phase", ...LOCK_FLAGS]),
+  "phase-fail": new Set([
+    "state-dir",
+    "id",
+    "phase",
+    "verifier",
+    "session",
+    ...LOCK_FLAGS,
+  ]),
   "block": new Set(["state-dir", "id", "reason", ...LOCK_FLAGS]),
   "dequeue": new Set(["state-dir", "id", ...LOCK_FLAGS]),
   "restore": new Set(["state-dir", "id", ...LOCK_FLAGS]),

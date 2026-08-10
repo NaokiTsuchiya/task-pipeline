@@ -288,6 +288,8 @@ Deno.test("M-RUN-1: (gate full, phase research) → initial/full/research", () =
       executor: "agent-1",
       executor_last_event_at: "2026-08-06T00:00:00Z",
       takeover_at: null,
+      verifier: null,
+      verifier_session: null,
     },
     "run",
   );

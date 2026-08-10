@@ -62,6 +62,8 @@ export interface V2Run {
   readonly executor: string | null;
   readonly executor_last_event_at: string | null;
   readonly takeover_at: string | null;
+  readonly verifier: string | null;
+  readonly verifier_session: string | null;
 }
 
 export interface V2FixAsk {
@@ -241,6 +243,8 @@ export const RUN_SHAPE = [
   "executor",
   "executor_last_event_at",
   "takeover_at",
+  "verifier",
+  "verifier_session",
 ] as const satisfies ShapeOf<V2Run>;
 
 export const ARTIFACT_SHAPES = {

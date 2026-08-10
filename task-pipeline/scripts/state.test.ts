@@ -219,6 +219,8 @@ function runOf(
     executor: null,
     executor_last_event_at: null,
     takeover_at: null,
+    verifier: null,
+    verifier_session: null,
     ...overrides,
   };
 }
@@ -1897,6 +1899,70 @@ Deno.test("T-V-phase-fail: attempts increments; a phase mismatch is conflict", a
   );
 });
 
+Deno.test("T-V-phase-fail-verifier-1: --verifier + --session writes run.verifier/run.verifier_session", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem({ progress: "running", run: runOf() })]);
+  const out = await expectOk(dir, [
+    "phase-fail",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--phase",
+    "research",
+    "--verifier",
+    "agent-1",
+    "--session",
+    "s1",
+  ]);
+  assertEquals(out.verifier, "agent-1");
+  assertEquals(out.verifier_session, "s1");
+  const item = await readItem(dir);
+  const run = item.run as Record<string, unknown>;
+  assertEquals(run.verifier, "agent-1");
+  assertEquals(run.verifier_session, "s1");
+});
+
+Deno.test("T-V-phase-fail-verifier-2: omitting --verifier leaves both null", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem({ progress: "running", run: runOf() })]);
+  const out = await expectOk(dir, [
+    "phase-fail",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--phase",
+    "research",
+  ]);
+  assertEquals(out.verifier, null);
+  assertEquals(out.verifier_session, null);
+  const item = await readItem(dir);
+  const run = item.run as Record<string, unknown>;
+  assertEquals(run.verifier, null);
+  assertEquals(run.verifier_session, null);
+});
+
+Deno.test("T-V-phase-fail-verifier-3: --verifier without --session is usage", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem({ progress: "running", run: runOf() })]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "phase-fail",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--phase",
+      "research",
+      "--verifier",
+      "agent-1",
+    ],
+    EXIT_CODES.usage,
+  );
+});
+
 Deno.test("T-V-block: running → blocked; blocking twice is conflict", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [
@@ -2151,6 +2217,8 @@ Deno.test("T-V-ship-4: a pr_fix ship reports update/mark=false and merges handle
         executor: null,
         executor_last_event_at: null,
         takeover_at: null,
+        verifier: null,
+        verifier_session: null,
       },
       artifact: openArtifact({
         follow: followOf({
@@ -2584,6 +2652,8 @@ Deno.test("T-V-rebase-start-2: entry (b) from finalize only moves the phase (kin
         executor: null,
         executor_last_event_at: null,
         takeover_at: null,
+        verifier: null,
+        verifier_session: null,
       },
       artifact: openArtifact({
         follow: followOf({
@@ -2629,6 +2699,8 @@ Deno.test("T-V-rebase-give-up/forgo: the two exits are mutually exclusive by kin
     executor: null,
     executor_last_event_at: null,
     takeover_at: null,
+    verifier: null,
+    verifier_session: null,
   };
   const detourRun = {
     kind: "pr_fix",
@@ -2638,6 +2710,8 @@ Deno.test("T-V-rebase-give-up/forgo: the two exits are mutually exclusive by kin
     executor: null,
     executor_last_event_at: null,
     takeover_at: null,
+    verifier: null,
+    verifier_session: null,
   };
   await setupQueue(dir, [
     queueItem({
@@ -4300,6 +4374,74 @@ Deno.test("T-SEQ-6: restore → claim resets the cycle but keeps handled", async
     ["c1"],
     "handled survives the whole re-run",
   );
+});
+
+// gh-70: phase-fail --verifier で書いた run.verifier/run.verifier_session が、
+// advance/block/set-executor のいずれを挟んでも null に戻ることを確認する列テスト。
+Deno.test("T-SEQ-7: phase-fail --verifier → advance/block/set-executor each reset run.verifier/verifier_session to null", async () => {
+  const cases: {
+    label: string;
+    args: string[];
+    check: (item: Record<string, unknown>) => void;
+  }[] = [
+    {
+      label: "advance",
+      args: ["advance", "--from", "research", "--to", "plan"],
+      check: (item) => {
+        const run = item.run as Record<string, unknown>;
+        assertEquals(run.verifier, null, "advance: verifier");
+        assertEquals(run.verifier_session, null, "advance: verifier_session");
+      },
+    },
+    {
+      label: "block",
+      args: ["block", "--reason", "why"],
+      check: (item) => {
+        assertEquals(item.run, null, "block: run (and verifier) is gone");
+      },
+    },
+    {
+      label: "set-executor",
+      args: ["set-executor", "--executor", "agent-2", "--session", "s2"],
+      check: (item) => {
+        const run = item.run as Record<string, unknown>;
+        assertEquals(run.verifier, null, "set-executor: verifier");
+        assertEquals(
+          run.verifier_session,
+          null,
+          "set-executor: verifier_session",
+        );
+      },
+    },
+  ];
+  for (const c of cases) {
+    const dir = await tempDir();
+    await setupQueue(dir, [queueItem({ progress: "running", run: runOf() })]);
+    await expectOk(dir, [
+      "phase-fail",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--phase",
+      "research",
+      "--verifier",
+      "agent-1",
+      "--session",
+      "s1",
+    ]);
+    const withVerifier = (await readItem(dir)).run as Record<string, unknown>;
+    assertEquals(withVerifier.verifier, "agent-1", `${c.label}: precondition`);
+    await expectOk(dir, [
+      c.args[0],
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      ...c.args.slice(1),
+    ]);
+    c.check(await readItem(dir));
+  }
 });
 
 // ---------------------------------------------------------------------------
