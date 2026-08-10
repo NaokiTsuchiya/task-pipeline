@@ -12,21 +12,26 @@
 #
 # - ケース A: 変更後の SKILL.md が新契約で揃っていることを検証する。
 #   A0-A2 は 3 つのファイル名パターンが全域から消えていること (**変更前はそれぞれ 2 / 1 / 2 件
-#   ヒットしていた**ので、0 件のままの grep を PASS と読む空振りではない)。
+#   ヒットしていた**ので、0 件のままの grep を PASS と読む空振りではない)。gh-57 で手順の一部が
+#   task-pipeline/playbooks/ へ移ったため、「全域」は SKILL.md + playbooks/*.md である。
 #   A3 は手順 6 の節から「組み立て」の語が消えていること (変更前は 227/231 行の 2 件)。
 #   A4 は全域から「組み立てたパス」が消えていること (変更前は 231 行の 1 件)。
 #   A5-A8 は 4 箇所 (CLI 節 / フェーズ列の説明 / 手順 6 / 解決サイクル) が `verdict-path` を
 #   参照していること。A9 は verifier 起動プロンプト行の verdict path が CLI の返り値を指すこと。
 #   A10 は「残す」と決めた記述 (verdict の受け渡し契約) が巻き込まれて消えていないこと。
 # - ケース B: 退行検知 — サンドボックスコピーに旧散文を戻すと A0-A4 相当が検知できること。
+#   B0-B2 は SKILL.md 側、B3-B4 は playbooks 側 (走査対象に playbooks を含め忘れた実装を落とす)。
 # - 依存ゼロ・ネットワーク不要・POSIX sh のみ。実ファイルは変更しない。
 set -u
 
 tests_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 repo_dir=$(CDPATH='' cd -- "$tests_dir/.." && pwd -P) || exit 1
 skill_md=$repo_dir/task-pipeline/SKILL.md
+playbooks_dir=$repo_dir/task-pipeline/playbooks
+merge_recovery_md=$playbooks_dir/merge-recovery.md
 
 [ -f "$skill_md" ] || { printf 'SKILL.md not found: %s\n' "$skill_md" >&2; exit 1; }
+[ -f "$merge_recovery_md" ] || { printf 'not found: %s\n' "$merge_recovery_md" >&2; exit 1; }
 
 work=$(mktemp -d) || exit 1
 trap 'if [ "${KEEP_SANDBOX:-0}" = 1 ]; then printf "sandbox kept: %s\n" "$work"; else rm -rf "$work"; fi' EXIT
@@ -43,13 +48,16 @@ gate_section() {
     sed -n '/^6\. \*\*検証ゲート\*\*/,/^### /p' "$1"
 }
 
-# $1 = ラベル / $2 = 対象ファイル / $3 = 固定文字列 → 全域で 0 件であること
+# $1 = ラベル / $2 = 固定文字列 / $3 = SKILL.md / $4 = 手順書ディレクトリ
+#   → SKILL.md + そのディレクトリの全 .md で 0 件であること
+# **複数ファイルを grep へ直接渡さない**: `grep -cF x f1 f2` は "f1:0" のようなファイル名付きの
+# 行を返すので、単一の整数を前提にした比較が壊れて空振りする。cat で 1 本に束ねてから数える。
 absent_global() {
-    _n=$(grep -cF -- "$3" "$2")
+    _n=$(cat "$3" "$4"/*.md | grep -cF -- "$2")
     if [ "$_n" -eq 0 ]; then
         ok "$1"
     else
-        ng "$1" "まだ $_n 件残っている: $3"
+        ng "$1" "まだ $_n 件残っている: $2"
     fi
 }
 
@@ -63,12 +71,12 @@ present_global() {
 }
 
 # --- A0-A2: ファイル名の組み立て規則が全域から消えている -------------------------------
-absent_global "A0 SKILL.md に verdicts/<phase>-<attempt>.json が無い (変更前 2 件)" \
-    "$skill_md" 'verdicts/<phase>-<attempt>.json'
-absent_global "A1 SKILL.md に pr_fix-<n>-<attempt>.json が無い (変更前 1 件)" \
-    "$skill_md" 'pr_fix-<n>-<attempt>.json'
-absent_global "A2 SKILL.md に rebase_fix-<n>-<attempt>.json が無い (変更前 2 件)" \
-    "$skill_md" 'rebase_fix-<n>-<attempt>.json'
+absent_global "A0 SKILL.md+playbooks に verdicts/<phase>-<attempt>.json が無い (変更前 2 件)" \
+    'verdicts/<phase>-<attempt>.json' "$skill_md" "$playbooks_dir"
+absent_global "A1 SKILL.md+playbooks に pr_fix-<n>-<attempt>.json が無い (変更前 1 件)" \
+    'pr_fix-<n>-<attempt>.json' "$skill_md" "$playbooks_dir"
+absent_global "A2 SKILL.md+playbooks に rebase_fix-<n>-<attempt>.json が無い (変更前 2 件)" \
+    'rebase_fix-<n>-<attempt>.json' "$skill_md" "$playbooks_dir"
 
 # --- A3: 手順 6 の節に「組み立て」が残っていない (変更前 2 件: 規則本体と起動プロンプト) ---
 gate_hits=$(gate_section "$skill_md" | grep -cF '組み立て')
@@ -83,8 +91,8 @@ fi
 
 # --- A4: 「組み立てたパス」が全域から消えている (変更前 1 件: 起動プロンプトの宙吊り参照) ---
 # 全域の素の「組み立て」は使わない — 再開コマンドの節に無関係で正当なヒットが 1 件ある。
-absent_global "A4 SKILL.md に「組み立てたパス」が無い (変更前 1 件)" \
-    "$skill_md" '組み立てたパス'
+absent_global "A4 SKILL.md+playbooks に「組み立てたパス」が無い (変更前 1 件)" \
+    '組み立てたパス' "$skill_md" "$playbooks_dir"
 
 # --- A5-A8: 4 箇所が verdict-path を参照している ---------------------------------------
 present_global "A5 CLI 節に verdict-path の起動形がある" \
@@ -98,9 +106,9 @@ else
     ng "A7 手順 6 が verdict-path を呼んでいる" "見つからない"
 fi
 
-resolution_section=$(sed -n '/^#### 解決サイクル (rebase_fix)$/,/^### /p' "$skill_md")
+resolution_section=$(sed -n '/^#### 解決サイクル (rebase_fix)$/,/^### /p' "$merge_recovery_md")
 if [ -z "$resolution_section" ]; then
-    ng "A8 解決サイクルが verdict-path を指している" "節が切り出せていない"
+    ng "A8 解決サイクルが verdict-path を指している" "節が切り出せていない ($merge_recovery_md)"
 elif printf '%s' "$resolution_section" | grep -qF 'verdict-path'; then
     ok "A8 解決サイクルが verdict-path を指している"
 else
@@ -165,6 +173,28 @@ if [ "$b_gate_hits" -gt 0 ]; then
 else
     ng "B2 退行 (手順 6 に組み立ての語が戻る) を A3 相当のチェックで検知できる" \
         "退行注入後も 0 件だった"
+fi
+
+# 既存の B0-B2 は SKILL.md にしか注入しないので、走査対象に playbooks を含め忘れた実装
+# (glob の書き忘れ、複数ファイルを grep へ直接渡して件数解析が壊れた実装) を素通ししてしまう。
+# playbooks の複製に禁止文字列を 1 件戻し、拡張後の走査がそれを数えられることを見る。
+pb_regressed=$work/playbooks
+mkdir -p "$pb_regressed"
+cp "$playbooks_dir"/*.md "$pb_regressed/"
+printf '\n<!-- regression: rebase_fix-<n>-<attempt>.json -->\n' >> "$pb_regressed/merge-recovery.md"
+
+if grep -qF -- 'rebase_fix-<n>-<attempt>.json' "$pb_regressed/merge-recovery.md"; then
+    ok "B3 playbooks への回帰注入が効いている"
+else
+    ng "B3 playbooks への回帰注入が効いている" "注入した行が見つからない"
+fi
+
+b3_hits=$(cat "$skill_md" "$pb_regressed"/*.md | grep -cF -- 'rebase_fix-<n>-<attempt>.json')
+if [ "$b3_hits" -gt 0 ]; then
+    ok "B4 退行 (playbooks 側での組み立て規則の復活) を A0-A2 相当の走査で検知できる ($b3_hits 件)"
+else
+    ng "B4 退行 (playbooks 側での組み立て規則の復活) を A0-A2 相当の走査で検知できる" \
+        "注入後も 0 件だった — 走査対象に playbooks が入っていない"
 fi
 
 printf '\n%s\n' "----------------------------------------"

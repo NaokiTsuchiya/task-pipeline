@@ -170,8 +170,8 @@ export async function cmdValidate(
 // state-next.ts の純関数 deriveNext が持ち、ここは flag 抽出とファイル読みだけを行う。
 // ---------------------------------------------------------------------------
 
-// task_counts/<session> の行数。ファイルもディレクトリも無ければ 0 (SKILL.md の
-// 「無ければ0件」)。数え方は wc -l と同じ (countTaskLines のコメント)。
+// task_counts/<session> の行数。ファイルもディレクトリも無ければ 0 (playbooks/max-tasks.md
+// の「無ければ0件」)。数え方は wc -l と同じ (countTaskLines のコメント)。
 async function readTasksStarted(
   stateDir: string,
   session: string,

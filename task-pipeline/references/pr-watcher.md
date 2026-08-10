@@ -74,7 +74,7 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
      確定してしまうと、載せ直し後にまだ残っている指摘を見失う。ここでは指摘の収集そのものをしない
      (`comment_ids: []`) ことでこの心配を構造的に無くす: 集めていないので、オーケストレータ側で
      `handled` へ入れる対象がそもそも無い。載せ直し後は force push で head sha が変わり `watch.sig`
-     が null に戻る (`SKILL.md` 「変化を待つ」) ので、そのとき走る catch-up 観測が、ここで見送った
+     が null に戻る (`playbooks/pr-follow.md` の「変化を待つ」) ので、そのとき走る catch-up 観測が、ここで見送った
      指摘を改めて actionable として拾う。
    - `mergeable` が `UNKNOWN`、または `mergeStateStatus` が `UNKNOWN` (GitHub がまだ非同期計算中。
      push 直後や新規 PR で起きる) は、確定していないので **`rebase` とは判定せず手順 3 へ進む**。

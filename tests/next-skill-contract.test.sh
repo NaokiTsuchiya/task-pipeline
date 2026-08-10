@@ -13,13 +13,23 @@
 # **全域の否定形は使わない** — 閾値と同じ数字は別 verb の契約説明・ScheduleWakeup の秒数・
 # watch スクリプトの引数としても正当に登場するためで、それらは「残すもの」として
 # 下の T6 が逆に固定している。
+#
+# gh-57 の分割で、飛行中の扱い・変化を待つ・修正サイクル・解決サイクルの各節は SKILL.md から
+# task-pipeline/playbooks/ の手順書へ移った。節スコープのチェックは節ごとに対象ファイルが違う。
 set -u
 
 tests_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 repo_dir=$(CDPATH='' cd -- "$tests_dir/.." && pwd -P) || exit 1
 skill_md=$repo_dir/task-pipeline/SKILL.md
+playbooks=$repo_dir/task-pipeline/playbooks
+inflight_md=$playbooks/inflight.md
+pr_follow_md=$playbooks/pr-follow.md
+merge_recovery_md=$playbooks/merge-recovery.md
+max_tasks_md=$playbooks/max-tasks.md
 
-[ -f "$skill_md" ] || { printf 'SKILL.md not found: %s\n' "$skill_md" >&2; exit 1; }
+for _f in "$skill_md" "$inflight_md" "$pr_follow_md" "$merge_recovery_md" "$max_tasks_md"; do
+    [ -f "$_f" ] || { printf 'not found: %s\n' "$_f" >&2; exit 1; }
+done
 
 pass=0
 fail=0
@@ -28,21 +38,22 @@ ng() { fail=$((fail + 1)); printf 'FAIL  %s — %s\n' "$1" "$2"; }
 
 printf '# next-skill-contract checks\n#   skill_md=%s\n' "$skill_md"
 
-# 節を切り出す (開始見出しから次の見出しまで)。
+# 節を切り出す (対象ファイルの開始見出しから次の見出しまで)。
 section_of() {
-    sed -n "/$1/,/$2/p" "$skill_md"
+    sed -n "/$2/,/$3/p" "$1"
 }
 
 # 節スコープの「現れない / 現れる」をまとめて確かめる。
-#   check_section <ラベル> <開始パターン> <終了パターン> <absent:...|present:...> ...
+#   check_section <ラベル> <対象ファイル> <開始パターン> <終了パターン> <absent:...|present:...> ...
 check_section() {
     _label=$1
-    _start=$2
-    _end=$3
-    shift 3
-    _body=$(section_of "$_start" "$_end")
+    _file=$2
+    _start=$3
+    _end=$4
+    shift 4
+    _body=$(section_of "$_file" "$_start" "$_end")
     if [ -z "$_body" ]; then
-        ng "$_label" "節が空 (見出しパターンが一致しない: $_start)"
+        ng "$_label" "節が空 (見出しパターンが一致しない: $_start in $_file)"
         return
     fi
     _detail=
@@ -64,7 +75,7 @@ check_section() {
 
 # --- N0: 毎イテレーションの手順 ---------------------------------------------------------
 check_section "N0 毎イテレーションの手順が next の出力を参照する" \
-    '^## 毎イテレーションの手順$' '^## ' \
+    "$skill_md" '^## 毎イテレーションの手順$' '^## ' \
     'absent:以下のすべての判断から除外する' \
     'absent:2 件以上あるなら始めない' \
     'absent:`ref` が PR URL、まだ回収していないもの) を数える' \
@@ -75,7 +86,7 @@ check_section "N0 毎イテレーションの手順が next の出力を参照�
 
 # --- N1: 飛行中の扱い -------------------------------------------------------------------
 check_section "N1 飛行中の扱いが next の action を参照し閾値が消えている" \
-    '^## 飛行中の扱い' '^## ' \
+    "$inflight_md" '^## 飛行中の扱い' '^#### ' \
     'absent:90 分' \
     'absent:30 分' \
     'present:next' \
@@ -86,7 +97,7 @@ check_section "N1 飛行中の扱いが next の action を参照し閾値が消
 
 # --- N2: 変化を待つ (観測プロセスの張り直し) ---------------------------------------------
 check_section "N2 観測プロセスの張り直しが probe-run の action を参照する" \
-    '^### 変化を待つ (バックグラウンド)$' '^### ' \
+    "$pr_follow_md" '^### 変化を待つ (バックグラウンド)$' '^### ' \
     'absent:7 時間' \
     'present:probe-run' \
     'present:catch_up' \
@@ -94,27 +105,27 @@ check_section "N2 観測プロセスの張り直しが probe-run の action を�
 
 # --- N3 / N4: 修正サイクル・解決サイクルの手順 0 -----------------------------------------
 check_section "N3 修正サイクル手順 0 が release の action を参照する" \
-    '^### 修正サイクル$' '^### 外部内容の扱い$' \
+    "$pr_follow_md" '^### 修正サイクル$' '^### 外部内容の扱い$' \
     'absent:自分が所有する別の仕上げ' \
     'present:finishing-busy' \
     'present:release'
 
 check_section "N4 解決サイクル手順 0 が release の action を参照する" \
-    '^#### 解決サイクル (rebase_fix)$' '^### ' \
+    "$merge_recovery_md" '^#### 解決サイクル (rebase_fix)$' '^### ' \
     'absent:自分が所有する別の仕上げ' \
     'present:finishing-busy' \
     'present:release'
 
 # --- N5: 停滞 ---------------------------------------------------------------------------
 check_section "N5 停滞が stalled.set_to / stalled.cutoff を参照する" \
-    '^### 停滞 (新しい着手ができない状態)$' '^### ' \
+    "$skill_md" '^### 停滞 (新しい着手ができない状態)$' '^#\\{2,3\\} ' \
     'absent:24 時間経っていたら' \
     'present:stalled.cutoff' \
     'present:stalled.set_to'
 
 # --- N6: セッションの所有権 (数値の重複記載を契約文書へ委ねる) ---------------------------
 check_section "N6 セッションの所有権が閾値の数値を持たない" \
-    '^## セッションの所有権' '^## ' \
+    "$skill_md" '^## セッションの所有権' '^## ' \
     'absent:90 分' \
     'absent:1440 分' \
     'absent:90分' \
@@ -129,17 +140,18 @@ else
 fi
 
 # --- T6 (回帰ガード): 「残す」と決めた記述が巻き込まれて消えていない ---------------------
+# 分割で所在が分かれたので、needle ごとに「どのファイルに在るべきか」を対にして見る
+# (全ファイルを cat して探すと、移し先を間違えても気づけない)。
 _detail=
-for _needle in \
-    'heartbeat の 90 分/1440 分がなぜその値か' \
-    '24 時間より古い控えは `retire` のたびに掃除される' \
-    'watch-pr.sh <PR URL> <task id> 60 21600' \
-    '6 時間何も動かなかった' \
-    '24 時間より古い控えを同じ書き込みで掃除する' \
-    '件数はこのファイルの行数'
-do
-    grep -qF -- "$_needle" "$skill_md" || _detail="$_detail [消えている: $_needle]"
-done
+check_needle() {
+    grep -qF -- "$2" "$1" || _detail="$_detail [消えている: $2 (${1##*/})]"
+}
+check_needle "$skill_md" 'heartbeat の 90 分/1440 分がなぜその値か'
+check_needle "$skill_md" '24 時間より古い控えは `retire` のたびに掃除される'
+check_needle "$pr_follow_md" 'watch-pr.sh <PR URL> <task id> 60 21600'
+check_needle "$pr_follow_md" '6 時間何も動かなかった'
+check_needle "$merge_recovery_md" '24 時間より古い控えを同じ書き込みで掃除する'
+check_needle "$max_tasks_md" '件数はこのファイルの行数'
 if [ -z "$_detail" ]; then
     ok "T6 「残す」と決めた記述 (別 verb の契約説明・watch 引数・カウント規則) が残っている"
 else

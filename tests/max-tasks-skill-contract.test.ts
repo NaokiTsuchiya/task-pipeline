@@ -13,6 +13,8 @@
 // カウント方法とコンテキスト非依存性、最終報告の必須項目、既存呼び出し形の非破壊を固定する。
 //
 // - 外部依存ゼロ・ネットワーク不要。対象ファイルは CWD ではなく `import.meta.url` 起点で解決する。
+// - gh-57 の分割で、安全停止節は SKILL.md から task-pipeline/playbooks/max-tasks.md へ移った。
+//   引数の宣言・呼び出し例・手順1の分岐順は SKILL.md に残るので、対象ファイルはチェックごとに分かれる。
 
 import {
   assertOk,
@@ -23,14 +25,16 @@ import {
 
 const REPO_ROOT = new URL("../", import.meta.url);
 const SKILL_MD = new URL("task-pipeline/SKILL.md", REPO_ROOT);
+const PLAYBOOK_MD = new URL("task-pipeline/playbooks/max-tasks.md", REPO_ROOT);
 
 const skillMd = Deno.readTextFileSync(SKILL_MD);
+const playbookMd = Deno.readTextFileSync(PLAYBOOK_MD);
 
-/** `sed -n '/^### \`max_tasks\` による安全停止$/,/^## /p'` — 安全停止節だけを切り出す。 */
+/** 手順書から安全停止節だけを切り出す (終端見出しが無いので EOF まで)。 */
 const section = sedRange(
-  skillMd,
+  playbookMd,
   /^### `max_tasks` による安全停止$/,
-  /^## /,
+  /^#### /,
 );
 
 /** 節スコープ / 全文スコープの複数 needle を確認し、不足を `.sh` と同じ詳細文字列に積む。 */
@@ -60,7 +64,7 @@ Deno.test("T3a 引数説明の箇条書きに「省略時は現行の挙動を�
 Deno.test("T3b 安全停止節の冒頭に「省略時は無制限」の明記がある", () => {
   assertOk(
     containsFixed(
-      skillMd,
+      playbookMd,
       "省略時は無制限で、以下は一切発火せず現行の挙動を変えない",
     ),
     "見つからない",
@@ -70,7 +74,7 @@ Deno.test("T3b 安全停止節の冒頭に「省略時は無制限」の明記�
 Deno.test("T4a クラスC (到達) — 上限以上なら止める旨がある", () => {
   assertOk(
     containsFixed(
-      skillMd,
+      playbookMd,
       "以上なら、新しい着手にも承認にも進まず、この節の手順で止める",
     ),
     "見つからない",
@@ -79,7 +83,7 @@ Deno.test("T4a クラスC (到達) — 上限以上なら止める旨がある",
 
 Deno.test("T4b クラスB (未到達) — 上限未満なら通常どおり進む旨がある", () => {
   assertOk(
-    containsFixed(skillMd, "未満なら、この節は何もせず通常どおり以下の判定"),
+    containsFixed(playbookMd, "未満なら、この節は何もせず通常どおり以下の判定"),
     "見つからない",
   );
 });
@@ -90,36 +94,36 @@ const T5B_NEEDLE =
   "`counts.running_mine_finishing` が 1 以上の間 (自分の仕上げ run が飛行中) は、`start.blocked_by` に `max_tasks` が含まれていてもこの節の手順に進まない";
 
 Deno.test("T5a 判定は own_initial 不在 ∧ running_mine_finishing==0 の両方で明示的に発火する旨がある", () => {
-  assertOk(containsFixed(skillMd, T5A_NEEDLE), "見つからない");
+  assertOk(containsFixed(playbookMd, T5A_NEEDLE), "見つからない");
 });
 
 Deno.test("T5b 仕上げが飛行中の間は running_mine_finishing を見て停止を保留する旨がある", () => {
-  assertOk(containsFixed(skillMd, T5B_NEEDLE), "見つからない");
+  assertOk(containsFixed(playbookMd, T5B_NEEDLE), "見つからない");
 });
 
 Deno.test("T11 T5a への回帰注入 (メモリ上の複製から該当記述を除去) が効いている", () => {
-  const injected = skillMd.replace(T5A_NEEDLE, "");
-  assertOk(injected !== skillMd, "置換が効かず元テキストと同一になった");
+  const injected = playbookMd.replace(T5A_NEEDLE, "");
+  assertOk(injected !== playbookMd, "置換が効かず元テキストと同一になった");
 });
 
 Deno.test("T12 T5a の退行 (説明の消失) を T5a 相当のチェックで検知できる", () => {
-  const injected = skillMd.replace(T5A_NEEDLE, "");
+  const injected = playbookMd.replace(T5A_NEEDLE, "");
   assertOk(!containsFixed(injected, T5A_NEEDLE), "除去後も見つかってしまった");
 });
 
 Deno.test("T13 T5b への回帰注入 (メモリ上の複製から該当記述を除去) が効いている", () => {
-  const injected = skillMd.replace(T5B_NEEDLE, "");
-  assertOk(injected !== skillMd, "置換が効かず元テキストと同一になった");
+  const injected = playbookMd.replace(T5B_NEEDLE, "");
+  assertOk(injected !== playbookMd, "置換が効かず元テキストと同一になった");
 });
 
 Deno.test("T14 T5b の退行 (説明の消失) を T5b 相当のチェックで検知できる", () => {
-  const injected = skillMd.replace(T5B_NEEDLE, "");
+  const injected = playbookMd.replace(T5B_NEEDLE, "");
   assertOk(!containsFixed(injected, T5B_NEEDLE), "除去後も見つかってしまった");
 });
 
 Deno.test("T6a 枯渇時フロー手順2の再利用を明記している", () => {
   assertOk(
-    containsFixed(skillMd, "枯渇時フロー手順2と**全く同じ手順**を踏む"),
+    containsFixed(playbookMd, "枯渇時フロー手順2と**全く同じ手順**を踏む"),
     "見つからない",
   );
 });

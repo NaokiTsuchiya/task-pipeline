@@ -30,7 +30,7 @@ export type OwnershipVerdict = "self" | "unowned" | "dead" | "alive-other";
  * - `session` が `aliveSessionIds` に含まれない → "dead"
  *   (所有セッションの heartbeat が失効している。触ってよい — SKILL.md 「セッションの所有権」
  *   節: 所有者の不在は揮発資源が死んだことの証明にはならないが、所有権だけでは判断せず
- *   「飛行中の扱い」の追加判定と AND を取ることを呼び出し元に委ねる。ここが返すのはあくまで
+ *   playbooks/inflight.md の追加判定と AND を取ることを呼び出し元に委ねる。ここが返すのはあくまで
  *   所有権の分類であって、引き取ってよいかの最終判断ではない)
  * - それ以外 (`session` が `aliveSessionIds` に含まれる、かつ自分ではない) → "alive-other"
  *   (生きている他セッションが所有している。触らない)
