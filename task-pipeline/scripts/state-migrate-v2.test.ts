@@ -970,6 +970,21 @@ Deno.test("M-TOP-3: 他のトップレベルは内容が保存される", () => 
   assertEquals(state.history, ["2026-08-07T00:00Z done t-1"], "history");
 });
 
+Deno.test("M-TOP-4: history_archived is always 0 after migration, history is not trimmed (gh-58)", () => {
+  const bigHistory = Array.from({ length: 350 }, (_, i) => `synthetic-${i}`);
+  const state = migrateV1toV2(
+    v1State([], { history: bigHistory }),
+    NOW,
+  );
+  assertSchemaOk(state, "M-TOP-4");
+  assertEquals(state.history_archived, 0, "history_archived");
+  assertEquals(
+    (state.history as string[]).length,
+    350,
+    "migration must not trim history — the cap applies only at history-append time",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // M-PURE — 純関数であることの検査 (受け入れ条件 5)
 // ---------------------------------------------------------------------------

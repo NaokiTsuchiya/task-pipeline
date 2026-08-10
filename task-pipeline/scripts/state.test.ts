@@ -4023,6 +4023,106 @@ Deno.test("T-V-history-append: appends in order", async () => {
   assertEquals((await readState(dir)).history, ["a", "b"]);
 });
 
+// gh-58: history の上限と退避 (history-archive.ndjson)
+
+Deno.test("T-V-history-append-overflow: 上限ちょうどまでの追記では退避が起きない", async () => {
+  const dir = await tempDir();
+  const history = Array.from({ length: 99 }, (_, i) => `h-${i}`);
+  await setupQueue(dir, [], { history });
+  const out = await expectOk(dir, [
+    "history-append",
+    "--state-dir",
+    dir,
+    "--line",
+    "h-99",
+  ]);
+  assertEquals(out.history_length, 100);
+  assertEquals(out.archived, 0);
+  const state = await readState(dir);
+  assertEquals((state.history as string[]).length, 100);
+  assertEquals(state.history_archived, 0);
+  assertEquals(await pathExists(`${dir}/history-archive.ndjson`), false);
+});
+
+Deno.test("T-V-history-append-drops: 上限超過分が history-archive.ndjson に退避される", async () => {
+  const dir = await tempDir();
+  const history = Array.from({ length: 100 }, (_, i) => `h-${i}`);
+  await setupQueue(dir, [], { history });
+  const out = await expectOk(dir, [
+    "history-append",
+    "--state-dir",
+    dir,
+    "--line",
+    "new",
+  ]);
+  assertEquals(out.history_length, 100);
+  assertEquals(out.archived, 1);
+  const state = await readState(dir);
+  const nextHistory = state.history as string[];
+  assertEquals(nextHistory.length, 100);
+  assertEquals(
+    nextHistory[0],
+    "h-1",
+    "h-0 must have been dropped (oldest first)",
+  );
+  assertEquals(nextHistory[nextHistory.length - 1], "new");
+  assertEquals(state.history_archived, 1);
+  const archived = (await Deno.readTextFile(`${dir}/history-archive.ndjson`))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assertEquals(archived, ["h-0"]);
+});
+
+Deno.test("T-V-history-append-migration: 上限を大きく超える既存ファイル (300行超) でも history-append がエラーにならず行を失わない", async () => {
+  const dir = await tempDir();
+  const history = Array.from({ length: 350 }, (_, i) => `synthetic-${i}`);
+  await setupQueue(dir, [], { history });
+  const out = await expectOk(dir, [
+    "history-append",
+    "--state-dir",
+    dir,
+    "--line",
+    "new",
+  ]);
+  assertEquals(out.history_length, 100);
+  assertEquals(out.archived, 251, "350 + 1 (new) - 100 (cap) = 251 dropped");
+  const state = await readState(dir);
+  const nextHistory = state.history as string[];
+  assertEquals(nextHistory.length, 100);
+  assertEquals(nextHistory[0], "synthetic-251");
+  assertEquals(nextHistory[nextHistory.length - 1], "new");
+  assertEquals(state.history_archived, 251);
+  const archived = (await Deno.readTextFile(`${dir}/history-archive.ndjson`))
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assertEquals(archived.length, 251);
+  assertEquals(archived[0], "synthetic-0");
+  assertEquals(archived[archived.length - 1], "synthetic-250");
+});
+
+Deno.test("T-V-history-noop-verb-on-oversized-history: history に触れない書き込み系 verb は上限超過ファイルでもエラーにならない", async () => {
+  const dir = await tempDir();
+  const history = Array.from({ length: 350 }, (_, i) => `synthetic-${i}`);
+  await setupQueue(dir, [queueItem()], { history });
+  const out = await expectOk(dir, [
+    "candidates-set",
+    "--state-dir",
+    dir,
+    "--candidates-json",
+    JSON.stringify([{ id: "c1", title: "T" }]),
+  ]);
+  assertEquals(out.count, 1);
+  const state = await readState(dir);
+  assertEquals(
+    (state.history as string[]).length,
+    350,
+    "a verb that never touches history must leave it exactly as-is",
+  );
+  assertEquals(await pathExists(`${dir}/history-archive.ndjson`), false);
+});
+
 // ---------------------------------------------------------------------------
 // SEQ: 多段の列 (設計2.2〜2.5)
 // ---------------------------------------------------------------------------

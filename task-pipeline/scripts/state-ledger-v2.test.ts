@@ -25,6 +25,7 @@ import {
   buildFreshStateV2,
   finalizeStateV2,
   getV2,
+  HISTORY_MAX_LINES,
   isRecord,
   isSessionAlive,
   isSessionStale,
@@ -197,15 +198,58 @@ Deno.test("L-NORM-4: isRecord distinguishes objects from arrays and null", () =>
   assertEquals(isRecord("s"), false);
 });
 
+Deno.test("L-NORM-5: normalizeStateV2 fills a missing/non-number history_archived only", () => {
+  const raw = { ...buildFreshStateV2("gh", "o/r", NOW) };
+  delete raw.history_archived;
+  assertEquals(normalizeStateV2(raw).history_archived, 0);
+  const wrongType = { ...raw, history_archived: "3" };
+  assertEquals(normalizeStateV2(wrongType).history_archived, 0);
+  // 既に number のときは同一参照 (触らない)
+  const withCount = { ...raw, history_archived: 3 };
+  assert(
+    normalizeStateV2(withCount) as unknown === withCount,
+    "an existing numeric history_archived must be left untouched",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // L-ARR
 // ---------------------------------------------------------------------------
 
 Deno.test("L-ARR-1: history-append keeps order", () => {
   let state = freshState();
-  state = applyHistoryAppendV2(state, "a");
-  state = applyHistoryAppendV2(state, "b");
+  state = applyHistoryAppendV2(state, "a", HISTORY_MAX_LINES).state;
+  state = applyHistoryAppendV2(state, "b", HISTORY_MAX_LINES).state;
   assertEquals(state.history, ["a", "b"]);
+});
+
+// gh-58: history-append の上限クラス (空/上限未満/上限ちょうど/上限超え)。
+// cap を小さく (3) 取ることで境界ケースを直接再現する。
+Deno.test("L-ARR-1b: history-append の上限クラス", () => {
+  const cap = 3;
+
+  // 空 → 追記後1件、退避なし
+  const empty = applyHistoryAppendV2(freshState(), "a", cap);
+  assertEquals(empty.state.history, ["a"]);
+  assertEquals(empty.dropped, []);
+  assertEquals(empty.state.history_archived, 0);
+
+  // 上限未満 (追記前1件、cap=3) → 追記後2件、退避なし
+  const below = applyHistoryAppendV2(empty.state, "b", cap);
+  assertEquals(below.state.history, ["a", "b"]);
+  assertEquals(below.dropped, []);
+
+  // 上限ちょうど (追記前2件 → 追記後3件 = cap) → 退避なし (境界: 超えていないので落とさない)
+  const exact = applyHistoryAppendV2(below.state, "c", cap);
+  assertEquals(exact.state.history, ["a", "b", "c"]);
+  assertEquals(exact.dropped, []);
+  assertEquals(exact.state.history_archived, 0);
+
+  // 上限超え (追記前3件 = cap → 追記後4件) → 最も古い1件 ("a") を退避、history は cap 件のまま
+  const over = applyHistoryAppendV2(exact.state, "d", cap);
+  assertEquals(over.state.history, ["b", "c", "d"]);
+  assertEquals(over.dropped, ["a"]);
+  assertEquals(over.state.history_archived, 1);
 });
 
 Deno.test("L-ARR-2: candidates set replaces, drop removes, unknown id is missing", () => {
@@ -251,7 +295,7 @@ Deno.test("L-ARR-4: relisted-add rejects duplicates (conflict), drop rejects unk
 Deno.test("L-ARR-5: the input arrays are never mutated in place", () => {
   const state = freshState();
   const before = JSON.stringify(state);
-  applyHistoryAppendV2(state, "x");
+  applyHistoryAppendV2(state, "x", HISTORY_MAX_LINES);
   applyPromotedAddV2(state, ["p"]);
   applyRelistedAddV2(state, "t-1", NOW);
   applyCandidatesSetV2(state, [{ id: "c", title: "T" }]);

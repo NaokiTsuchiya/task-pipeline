@@ -461,5 +461,8 @@ export function migrateV1toV2(
     );
   }
   out.history = strArray(v1.history);
+  // gh-58 で新設されたフィールドなので v1 に存在しえない (withdrawn_branches と違い
+  // 「v1 にあれば写す」の条件分岐は不要)。移行時点では history の中身はトリムしない。
+  out.history_archived = 0;
   return out;
 }
