@@ -62,15 +62,18 @@ def notif_line(task_id, slug, ts="2026-08-04T00:01:00Z"):
     })
 
 
-def write_verdict(vdir, filename, phase, verdict, required_fixes=None):
+def write_verdict(vdir, filename, phase, verdict, required_fixes=None, carryover=None):
     os.makedirs(vdir, exist_ok=True)
+    obj = {
+        "phase": phase,
+        "verdict": verdict,
+        "reasons": ["dummy reason"],
+        "required_fixes": required_fixes or [],
+    }
+    if carryover is not None:
+        obj["carryover"] = carryover
     with open(os.path.join(vdir, filename), "w") as fh:
-        json.dump({
-            "phase": phase,
-            "verdict": verdict,
-            "reasons": ["dummy reason"],
-            "required_fixes": required_fixes or [],
-        }, fh)
+        json.dump(obj, fh)
 
 
 def write_verdict_at(vdir, filename, phase, verdict, mtime_iso, required_fixes=None):
@@ -509,6 +512,42 @@ def main():
         else:
             ng("27: 再計算ケースでは全 verdict がどちらかの窓に収まり unattributed は0",
                f"stdout={proc_rc.stdout!r}")
+
+        # --- ケース「carryover フィールドは fail_reasons を変えない」(gh-63 受け入れ条件7) ------
+        # 同じ required_fixes を持つ2つの slug を作り、片方の verdict にだけ carryover を付ける。
+        # collect-task-metrics.py は carryover を読まない (list_fail_verdicts が拾うキーは
+        # phase/verdict/required_fixes の3つだけ) ので、値の有無で fail_reasons が変わってはならない。
+        vdir_co_a = os.path.join(runs_dir, "slug-carryover-a", "verdicts")
+        write_verdict(vdir_co_a, "plan-1.json", "plan", "FAIL", ["fix X", "fix Y"])
+
+        vdir_co_b = os.path.join(runs_dir, "slug-carryover-b", "verdicts")
+        write_verdict(vdir_co_b, "plan-1.json", "plan", "FAIL", ["fix X", "fix Y"], carryover={
+            "status": "explained",
+            "items": [{"fix": "fix Y", "class": "new-branch", "why": "newly reachable"}],
+        })
+
+        session_co = os.path.join(tmp, "session-carryover.jsonl")
+        with open(session_co, "w") as fh:
+            fh.write(assistant_cwd_line(repo_root) + "\n")
+            fh.write(notif_line("t-co-a-1", "slug-carryover-a") + "\n")
+            fh.write(notif_line("t-co-b-1", "slug-carryover-b") + "\n")
+
+        out_co = os.path.join(tmp, "metrics-carryover.jsonl")
+        proc_co = run(script, [session_co, "--out", out_co, "--no-diff-stats"])
+
+        rows_co = {}
+        if os.path.exists(out_co):
+            with open(out_co) as fh:
+                rows_co = {json.loads(line)["task_id"]: json.loads(line) for line in fh if line.strip()}
+
+        got_co_a = rows_co.get("t-co-a-1", {}).get("fail_reasons")
+        got_co_b = rows_co.get("t-co-b-1", {}).get("fail_reasons")
+        expected_co = [fr("plan", 1, ["fix X", "fix Y"])]
+        if proc_co.returncode == 0 and got_co_a == expected_co and got_co_b == expected_co:
+            ok("29: carryover フィールドの有無は fail_reasons に影響しない (gh-63 受け入れ条件7)")
+        else:
+            ng("29: carryover フィールドの有無は fail_reasons に影響しない (gh-63 受け入れ条件7)",
+               f"exit={proc_co.returncode} a={got_co_a!r} b={got_co_b!r}")
 
         # --- py_compile --------------------------------------------------------------------
         procH = subprocess.run([sys.executable, "-m", "py_compile", script],

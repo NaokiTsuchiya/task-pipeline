@@ -26,12 +26,15 @@
 // - ケース B: 4 ファイルそれぞれについて、**メモリ上の複製** でそのファイルだけを旧契約の該当行に
 //   戻し、関連チェックが不一致を検知できることを確認する (`.sh` 版は mktemp サンドボックスへ
 //   書き出していたが、注入済みテキストを文字列のまま検査すれば検出力は同じで書き込み権限が要らない)。
+// - A9-A12 / B9-B11b (gh-63): 検証の持ち越しを記録する `carryover` フィールドが verifier.md と
+//   agent.md の双方に定義され、旧文言 (`reasons` に書けという指示) が残っていないことを見る。
 
 import {
   assertOk,
   containsFixed,
   grepFixedFirstLine,
   grepOnlyFirst,
+  sedRange,
   substituteFirstPerLine,
 } from "./contract-helpers.ts";
 
@@ -275,5 +278,124 @@ Deno.test("B8b verifier.md の退行 (declaration 文の消失) を A8 相当の
   assertOk(
     !containsFixed(b8Regressed, '返り値にも `"declaration"'),
     "退行後も declaration 言及が残っていた",
+  );
+});
+
+// --- A9-A12: 検証の持ち越しを記録する carryover フィールド (gh-63) --------------------
+
+// A9: verifier.md の full JSON 定義と agent.md の指示、双方に carryover が現れる。
+Deno.test("A9 verifier.md と agent.md の双方に carryover の定義が現れる", () => {
+  assertOk(
+    containsFixed(verifierMd, '"carryover": {') &&
+      containsFixed(
+        agentMd,
+        "record any newly-raised required_fixes in the `carryover` field",
+      ),
+    "見つからない",
+  );
+});
+
+// A10: verifier.md の「持ち越しの記録 (carryover)」節が、5つの status 値をすべて定義している。
+const CARRYOVER_SECTION = sedRange(
+  verifierMd,
+  /^## 持ち越しの記録 \(`carryover`\)$/,
+  /^## フェーズ別の合格条件$/,
+);
+
+Deno.test("A10 verifier.md の carryover 節が5つの status 値 (none/explained/missed/unexplained/unknown) をすべて定義している", () => {
+  assertOk(CARRYOVER_SECTION !== "", "carryover 節が見つからない");
+  for (
+    const v of [
+      '`"none"`',
+      '`"explained"`',
+      '`"missed"`',
+      '`"unexplained"`',
+      '`"unknown"`',
+    ]
+  ) {
+    assertOk(containsFixed(CARRYOVER_SECTION, v), `${v} が見つからない`);
+  }
+});
+
+// A11: 一括性の節が理由の置き場を carryover と書いており、旧文言 (reasons に書け) が残っていない。
+Deno.test("A11 verifier.md の一括性の節が理由の置き場を carryover と書いており、旧文言が残っていない", () => {
+  assertOk(
+    containsFixed(
+      verifierMd,
+      "下記「持ち越しの記録 (`carryover`)」の形で `carryover` フィールドに",
+    ),
+    "carryover への言及が見つからない",
+  );
+  assertOk(
+    !containsFixed(verifierMd, "判定 JSON の `reasons` に"),
+    "旧文言 (reasons に書け) が残っている",
+  );
+});
+
+// A12: 入力の列挙に、直前の attempt の判定ファイルを読む記述とその位置の求め方がある。
+Deno.test("A12 verifier.md の入力に、直前の attempt の判定ファイルを読む記述と位置の求め方がある", () => {
+  assertOk(
+    containsFixed(verifierMd, "直前の attempt の判定ファイルも読む") &&
+      containsFixed(verifierMd, "数字を 1 減らした同名ファイル"),
+    "見つからない",
+  );
+});
+
+// --- ケース B (続き): carryover 記述への回帰注入 -----------------------------------
+
+// B9: verifier.md の carryover 定義行だけを削る
+const b9Regressed = substituteFirstPerLine(
+  verifierMd,
+  /^"carryover": \{$/,
+  '"note": {',
+);
+
+Deno.test("B9a verifier.md (carryover 定義) への回帰注入が効いている", () => {
+  assertOk(b9Regressed !== verifierMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("B9b verifier.md の退行 (carryover 定義の消失) を A9 相当のチェックで検知できる", () => {
+  assertOk(
+    !containsFixed(b9Regressed, '"carryover": {'),
+    "退行後も carryover 定義が残っていた",
+  );
+});
+
+// B10: agent.md の carryover 記述だけを削る
+const b10Regressed = substituteFirstPerLine(
+  agentMd,
+  /record any newly-raised required_fixes in the `carryover` field per verifier\.md's "持ち越しの記録 \(carryover\)" section\./,
+  "record any newly-raised required_fixes.",
+);
+
+Deno.test("B10a agent.md (carryover 記述) への回帰注入が効いている", () => {
+  assertOk(b10Regressed !== agentMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("B10b agent.md の退行 (carryover 記述の消失) を A9 相当のチェックで検知できる", () => {
+  assertOk(
+    !containsFixed(
+      b10Regressed,
+      "record any newly-raised required_fixes in the `carryover` field",
+    ),
+    "退行後も carryover 記述が残っていた",
+  );
+});
+
+// B11: verifier.md の一括性の節を旧文言 (reasons に書け) に戻す
+const b11Regressed = substituteFirstPerLine(
+  verifierMd,
+  /下記「持ち越しの記録 \(`carryover`\)」の形で `carryover` フィールドに「なぜ今回の判定では出せなかったか」を記録する/,
+  "判定 JSON の `reasons` に「なぜ今回の判定では出せなかったか」を 1 行残す",
+);
+
+Deno.test("B11a verifier.md (一括性の理由の置き場) への回帰注入が効いている", () => {
+  assertOk(b11Regressed !== verifierMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("B11b verifier.md の退行 (reasons への逆戻り) を A11 相当のチェックで検知できる", () => {
+  assertOk(
+    containsFixed(b11Regressed, "判定 JSON の `reasons` に"),
+    "退行注入後も旧文言が見つからなかった",
   );
 });
