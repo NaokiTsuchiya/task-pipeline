@@ -2,7 +2,7 @@
 
 ## 背景
 
-`docs/metrics/2026-08-05.md` の retro 分析で、`fail_reasons` の phase 別内訳のうち 23 件中 13 件 (57%) が
+`docs/history/metrics/2026-08-05.md` の retro 分析で、`fail_reasons` の phase 別内訳のうち 23 件中 13 件 (57%) が
 plan フェーズで発生し、うち 6 タスク (readme-list-sync / readme-feature-sync / state-cli-verbs /
 sha-record-for-gate-light / gate-light-research-carryover / metrics-collect-scan-mode) の
 `required_fixes` 本文がいずれも「境界条件・拒否側ケースの網羅漏れ」を指摘している。
