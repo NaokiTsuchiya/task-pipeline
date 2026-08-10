@@ -195,7 +195,7 @@
     "attentionHuman": {
       "type": "object",
       "properties": {
-        "human": { "type": "string", "enum": ["fix_limit", "errors", "manual"] }
+        "human": { "type": "string", "enum": ["fix_limit", "errors", "manual", "fix_stagnant"] }
       },
       "required": ["human"],
       "additionalProperties": false
@@ -241,9 +241,11 @@
         "handled": { "type": "array", "items": { "type": "string" } },
         "fix_attempts": { "type": "integer", "minimum": 0 },
         "review_only": { "type": "array", "items": { "$ref": "#/$defs/reviewOnlyEntry" } },
-        "answered": { "type": "array", "items": { "$ref": "#/$defs/reviewOnlyEntry" } }
+        "answered": { "type": "array", "items": { "$ref": "#/$defs/reviewOnlyEntry" } },
+        "fix_cycle_tip": { "type": ["string", "null"] },
+        "fix_rerun_tip": { "type": ["string", "null"] }
       },
-      "required": ["handled", "fix_attempts", "review_only", "answered"],
+      "required": ["handled", "fix_attempts", "review_only", "answered", "fix_cycle_tip", "fix_rerun_tip"],
       "additionalProperties": false
     },
     "probe": {

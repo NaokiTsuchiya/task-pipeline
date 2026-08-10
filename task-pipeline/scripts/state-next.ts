@@ -224,6 +224,16 @@ export type NextAction =
     readonly at_limit: boolean;
     readonly reset_attempts: boolean;
   }
+  /**
+   * gh-18: 直前の周回で `artifact.tip` が動かず CI も落ちたままなので、`fix-start` の
+   * 前に CI の失敗ジョブを1回だけ再実行する (`fix-rerun-mark` で記録してから再観測する)。
+   */
+  | { readonly kind: "fix-ci-rerun"; readonly tip: string }
+  /**
+   * gh-18: 再実行後も CI が落ちたまま tip が動いていないので、次の周を始めずに人へ
+   * 委ねる (`state.ts attention-set --human <reason>` を呼ぶ)。
+   */
+  | { readonly kind: "fix-give-up"; readonly reason: "fix_stagnant" }
   /** 解決サイクルの着手 (`rebase-start` 入口 a)。 */
   | {
     readonly kind: "rebase-start";
@@ -652,6 +662,7 @@ function probeAction(
 function cycleAction(
   follow: V2Follow,
   finishingBusy: boolean,
+  tip: string | null,
 ): NextAction | null {
   if (follow.attention !== "auto") return null;
   const rebase = follow.asks.rebase;
@@ -671,6 +682,19 @@ function cycleAction(
   if (fix !== null && !fix.taken) {
     if (finishingBusy) {
       return { kind: "release", reason: "finishing-busy", defer: "fix-start" };
+    }
+    // gh-18: 直前に着手した周回が向き合った tip (`fix-start` が記録した
+    // `ledger.fix_cycle_tip`) が現在の tip とまだ同じなら、その周回は push を
+    // 生まなかった (空回り)。CI がまだ落ちているときだけこのガードの対象にする —
+    // レビュー指摘だけの周回や、再実行で CI が回復した後は通常どおり続行する
+    // (`rebase_fix` はこの分岐に来ない — `rebase-applied` は run を持たず
+    // `fix_cycle_tip` にも触れないので対象外)。
+    const stagnant = tip !== null && follow.ledger.fix_cycle_tip === tip;
+    if (stagnant && follow.probe.ci === "failing") {
+      if (follow.ledger.fix_rerun_tip !== tip) {
+        return { kind: "fix-ci-rerun", tip };
+      }
+      return { kind: "fix-give-up", reason: "fix_stagnant" };
     }
     const attempts = follow.ledger.fix_attempts;
     return {
@@ -735,7 +759,12 @@ function deriveTask(
       const probe = probeAction(item, input, nowMs);
       if (probe !== null) actions.push(probe);
     } else if (follow !== null) {
-      const cycle = cycleAction(follow, counts.running_mine_finishing >= 1);
+      const tip = item.artifact.state === "open" ? item.artifact.tip : null;
+      const cycle = cycleAction(
+        follow,
+        counts.running_mine_finishing >= 1,
+        tip,
+      );
       if (cycle !== null) actions.push(cycle);
     }
     if (item.artifact.state === "merged") {

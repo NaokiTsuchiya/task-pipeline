@@ -244,6 +244,11 @@ export const VERB_SPEC = {
     p: { from: ["resting"], to: "unchanged" },
     a: { from: A_OPEN_FOLLOW_KEYS, to: "fix-pending" },
   },
+  // gh-18: 「この tip では CI 再実行を既に行った」の記録専用。座標は変えない。
+  "fix-rerun-mark": {
+    p: { from: ["resting"], to: "unchanged" },
+    a: { from: A_OPEN_FOLLOW_KEYS, to: "unchanged" },
+  },
   "rebase-request": {
     p: { from: ["resting"], to: "unchanged" },
     a: { from: A_OPEN_FOLLOW_KEYS, to: "dynamic" },

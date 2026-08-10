@@ -1,7 +1,7 @@
 // task-pipeline/scripts/state-ledger-v2.ts
 //
 // 状態モデル v2 の **帳簿系** — queue エントリの領域座標 (領域 P × 領域 A) を持たない
-// verb の純関数群。state-transitions-v2.ts の apply 群 (VERB_SPEC を持つ 32 verb) と
+// verb の純関数群。state-transitions-v2.ts の apply 群 (VERB_SPEC を持つ 33 verb) と
 // 対になる、もう一方の書き換え口である。
 //
 // ここに居るのは「どのノードから発火するか」を宣言できない verb だけ:

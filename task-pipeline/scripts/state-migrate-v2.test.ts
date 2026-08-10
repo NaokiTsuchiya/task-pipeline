@@ -843,6 +843,8 @@ Deno.test("M-LEDGER-PROBE-1: watch.* が ledger.* / probe.* に写る", () => {
     fix_attempts: 1,
     review_only: [{ id: "rc-9", updated_at: "2026-08-02T08:10:00Z" }],
     answered: [{ id: "rc-8", updated_at: null }],
+    fix_cycle_tip: null,
+    fix_rerun_tip: null,
   }, "ledger");
   assertEquals(follow.probe, {
     proc: "bg-1",

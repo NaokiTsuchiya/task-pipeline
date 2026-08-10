@@ -115,6 +115,8 @@ const LEDGER: Rec = {
   fix_attempts: 0,
   review_only: [],
   answered: [],
+  fix_cycle_tip: null,
+  fix_rerun_tip: null,
 };
 
 function follow(over: Rec = {}): Rec {
@@ -231,6 +233,8 @@ const VALID_CASES: { label: string; value: unknown }[] = [
             fix_attempts: 2,
             review_only: [{ id: "rc-9", updated_at: null }],
             answered: [{ id: "rc-8", updated_at: "2026-08-07T00:00:00Z" }],
+            fix_cycle_tip: "abc123",
+            fix_rerun_tip: null,
           },
           probe: {
             ...PROBE,

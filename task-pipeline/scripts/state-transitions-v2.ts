@@ -287,6 +287,8 @@ function cycleResetArtifact(artifact: V2Artifact): V2Artifact {
       fix_attempts: 0,
       review_only: [],
       answered: [],
+      fix_cycle_tip: null,
+      fix_rerun_tip: null,
     },
     probe: { ...follow.probe, sig: null },
   });
@@ -490,7 +492,14 @@ export function freshFollow(): V2Follow {
   return {
     attention: "auto",
     asks: { fix: null, rebase: null },
-    ledger: { handled: [], fix_attempts: 0, review_only: [], answered: [] },
+    ledger: {
+      handled: [],
+      fix_attempts: 0,
+      review_only: [],
+      answered: [],
+      fix_cycle_tip: null,
+      fix_rerun_tip: null,
+    },
     probe: {
       proc: null,
       proc_started_at: null,
@@ -736,6 +745,30 @@ export function applyFixRequest(
   return withReplacedItem(state, index, next);
 }
 
+export interface FixRerunMarkResult {
+  state: V2State;
+  tip: string | null;
+}
+
+// gh-18: 「この tip では CI 再実行を既に行った」の記録専用 (座標は動かさない)。呼び出し側は
+// tip を渡さず、常に現在の `artifact.tip` を読んで記録する — 呼び出し側が渡した値と実際の
+// tip がずれるリスクを構造的に無くすため。
+export function applyFixRerunMark(
+  item: V2Item,
+  index: number,
+  state: V2State,
+): FixRerunMarkResult {
+  const { open, follow } = requireFollowFor(item, "fix-rerun-mark");
+  const next: V2Item = {
+    ...item,
+    artifact: withFollow(open, {
+      ...follow,
+      ledger: { ...follow.ledger, fix_rerun_tip: open.tip },
+    }),
+  };
+  return { state: withReplacedItem(state, index, next), tip: open.tip };
+}
+
 function requireFollowFor(
   item: V2Item,
   verb: VerbName,
@@ -845,7 +878,9 @@ export function applyFixStart(
       artifact: withFollow(open, {
         ...follow,
         asks: { ...follow.asks, fix: { ...fix, taken: true } },
-        ledger,
+        // gh-18: このサイクルが向き合う tip を控える (次の周回で tip が動いたかどうかの
+        // 判定に使う。`cycleAction` 参照)。
+        ledger: { ...ledger, fix_cycle_tip: open.tip },
         probe,
       }),
       session,

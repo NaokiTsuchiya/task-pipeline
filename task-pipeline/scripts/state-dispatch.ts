@@ -2,7 +2,7 @@
 //
 // state CLI の **層 4 — verb 名から実装への表**。受理するフラグの一覧 (ALLOWED_FLAGS) と
 // cmd 実装への割り当て (HANDLERS) の 2 つだけを持ち、**この 2 つのキー集合が
-// ディスパッチ集合そのもの**である (47 verb = VERB_SPEC 32 + LEDGER_VERBS 15)。
+// ディスパッチ集合そのもの**である (48 verb = VERB_SPEC 33 + LEDGER_VERBS 15)。
 //
 // 分けてある理由: verb を 1 つ足す/消すときに触るのがこのファイルだけになり、
 // 「フラグ表には有るのに実装が無い」「実装は有るのに契約文書に無い」というずれが
@@ -36,6 +36,7 @@ import {
   cmdClaim,
   cmdDequeue,
   cmdFixRequest,
+  cmdFixRerunMark,
   cmdFixStart,
   cmdMerged,
   cmdObserve,
@@ -68,7 +69,7 @@ import {
 // 語彙 — verb 名とフラグ名を string ではなく宣言から導いたリテラルユニオンで持つ
 //
 // **`Verb` は新しい語彙ではなく、既にある 2 つの宣言の和である**:
-// `VerbName` (= VERB_SPEC のキー 32 個) と `LedgerVerb` (= LEDGER_VERBS 13 個)。
+// `VerbName` (= VERB_SPEC のキー 33 個) と `LedgerVerb` (= LEDGER_VERBS 13 個)。
 // ディスパッチ集合の定義そのものを型にしているので、
 //
 //   - 下の 2 つの表を `Record<Verb, …>` で受けると、**verb の書き落としも綴り違いも
@@ -213,6 +214,7 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
   "withdraw-remove": new Set(["state-dir", "id", "reason", ...LOCK_FLAGS]),
   // --- 要求系 (設計2.1) ---
   "fix-request": new Set(["state-dir", "id", "ids", "findings", ...LOCK_FLAGS]),
+  "fix-rerun-mark": new Set(["state-dir", "id", ...LOCK_FLAGS]),
   "rebase-request": new Set([
     "state-dir",
     "id",
@@ -290,7 +292,7 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
 // ---------------------------------------------------------------------------
 // dispatch
 //
-// ディスパッチ表のキー集合は ALLOWED_FLAGS と一致し、その内訳は VERB_SPEC (遷移 32) と
+// ディスパッチ表のキー集合は ALLOWED_FLAGS と一致し、その内訳は VERB_SPEC (遷移 33) と
 // LEDGER_VERBS (帳簿 15) で尽きる。どちらにも属さない verb を足すと state.test.ts の
 // 分類ネットが落ちる。
 // ---------------------------------------------------------------------------
@@ -335,6 +337,7 @@ export const HANDLERS: Record<Verb, CmdHandler> = {
   "withdraw-remove": cmdWithdrawRemove,
   // 要求系
   "fix-request": cmdFixRequest,
+  "fix-rerun-mark": cmdFixRerunMark,
   "rebase-request": cmdRebaseRequest,
   "rebase-applied": cmdRebaseApplied,
   // 仕上げ開始系

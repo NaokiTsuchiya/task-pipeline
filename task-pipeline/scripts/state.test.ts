@@ -247,6 +247,8 @@ function ledgerOf(
     fix_attempts: 0,
     review_only: [],
     answered: [],
+    fix_cycle_tip: null,
+    fix_rerun_tip: null,
     ...overrides,
   };
 }
@@ -2343,6 +2345,53 @@ Deno.test("T-V-fix-request: writes the pending ask; an empty --ids is an empty l
   assertEquals((asks2.fix as Record<string, unknown>).ids, []);
 });
 
+Deno.test("T-V-fix-rerun-mark: records ledger.fix_rerun_tip from the current tip and is idempotent", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    restingOpen({ asks: { fix: fixAsk(), rebase: null } }),
+  ]);
+  const out = await expectOk(dir, [
+    "fix-rerun-mark",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+  ]);
+  assertEquals(out.tip, "sha-tip");
+  const ledger1 = follow(await readItem(dir)).ledger as Record<string, unknown>;
+  assertEquals(ledger1.fix_rerun_tip, "sha-tip");
+  // gh-18 受け入れ条件2: 同じ tip に対して2回呼んでも壊れない (conflict にならず、
+  // 記録された tip も変わらない — 同じ tip への再実行を重ねて記録しても実害が無いことの
+  // 確認であって、呼び出し回数そのものを防ぐのは next の action 側の仕事)。
+  const out2 = await expectOk(dir, [
+    "fix-rerun-mark",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+  ]);
+  assertEquals(out2.tip, "sha-tip");
+  const ledger2 = follow(await readItem(dir)).ledger as Record<string, unknown>;
+  assertEquals(ledger2.fix_rerun_tip, "sha-tip");
+  // 他のフィールドには触れない。
+  assertEquals(ledger2.fix_attempts, 0);
+  assertEquals(
+    ((follow(await readItem(dir)).asks as Record<string, unknown>)
+      .fix as Record<string, unknown>).taken,
+    false,
+  );
+});
+
+Deno.test("T-V-fix-rerun-mark-conflict: a task without follow is conflict", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem({ progress: "resting" })]);
+  await expectFailureUnchanged(
+    dir,
+    ["fix-rerun-mark", "--state-dir", dir, "--id", "t-1"],
+    EXIT_CODES.conflict,
+  );
+});
+
 Deno.test("T-V-fix-request-conflict: a task without follow cannot take a fix ask", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [queueItem({ progress: "resting" })]);
@@ -2902,6 +2951,56 @@ Deno.test("T-V-attention-set: --auto and --human are exclusive and both required
   item = await readItem(dir);
   assertEquals(follow(item).attention, "auto");
   assertEquals((follow(item).probe as Record<string, unknown>).errors, 0);
+});
+
+// gh-18 受け入れ条件4: 再実行後も CI が落ちたまま tip が動かないときの人手委譲は
+// 既存の attention-set をそのまま使う (fix-give-up 専用の verb は無い)。ask には触れず
+// pending のまま残ること、progress が resting のままであること、fix_limit とは別の
+// 理由値であることをここで確認する。
+Deno.test("T-V-attention-set-fix-stagnant: fix_stagnant leaves asks.fix pending and progress resting", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    restingOpen({
+      asks: { fix: fixAsk({ ids: ["c1"] }), rebase: null },
+      ledger: ledgerOf({
+        fix_attempts: 1,
+        fix_cycle_tip: "sha-tip",
+        fix_rerun_tip: "sha-tip",
+      }),
+      probe: probeOf({
+        ci: "failing",
+        proc: "p1",
+        proc_started_at: "2026-08-07T00:00:00.000Z",
+      }),
+    }, { session: "s" }),
+  ]);
+  await expectOk(dir, [
+    "attention-set",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--human",
+    "fix_stagnant",
+  ]);
+  const item = await readItem(dir);
+  const f = follow(item);
+  assertEquals(f.attention, { human: "fix_stagnant" });
+  // fix_limit とは機械的に区別できる別の理由値であること。
+  assert(
+    (f.attention as Record<string, unknown>).human !== "fix_limit",
+    "fix_stagnant must differ from fix_limit",
+  );
+  assertEquals(item.progress, "resting");
+  assertEquals(item.session, null);
+  assertEquals((f.probe as Record<string, unknown>).proc, null);
+  // asks.fix は pending のまま残る (対応済み扱いにしない)。
+  const fix = (f.asks as Record<string, unknown>).fix as Record<
+    string,
+    unknown
+  >;
+  assertEquals(fix.taken, false);
+  assertEquals(fix.ids, ["c1"]);
 });
 
 Deno.test("T-V-review-only: upserts and reports only new or changed ids", async () => {
@@ -4262,7 +4361,7 @@ Deno.test("T-D2: verb headings match ALLOWED_FLAGS keys", async () => {
     [],
     `documented but unimplemented: ${missingInImpl}`,
   );
-  assertEquals(implVerbs.size, 47, "the dispatch set is 47 verbs");
+  assertEquals(implVerbs.size, 48, "the dispatch set is 48 verbs");
 });
 
 Deno.test("T-D3: the node tables match the v2 declarations", async () => {
@@ -4421,7 +4520,7 @@ Deno.test("T-D6: every dispatch verb is either a transition or a ledger verb", (
     [],
     "declared ledger verbs with no dispatch entry",
   );
-  assertEquals(transition.size + ledger.size, dispatch.size, "47 = 32 + 15");
+  assertEquals(transition.size + ledger.size, dispatch.size, "48 = 33 + 15");
 });
 
 // 受け入れ条件4 (gh-39): 「lock を取らない読み取り専用 verb」の一覧が、契約文書と
