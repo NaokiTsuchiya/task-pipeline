@@ -21,7 +21,16 @@
                    verdict=="FAIL" の判定を集めた一覧: [{"phase":, "attempt":, "required_fixes":}, ...]
                    (ファイル名昇順)。分類はしない生の required_fixes をそのまま運ぶ。FAIL が無ければ []。
                    verdicts ディレクトリが無い・読めない・JSON が壊れているときは null
-                   (stderr に警告して収集は継続する)
+                   (stderr に警告して収集は継続する)。
+                   同じ (repo, task) に複数のタスク実行 (run) の行がありうるため、verdict ファイルの
+                   mtime (verifier が書いた 1 回きりの書き込み時刻) を使い、各行の start_ts を
+                   start_ts 昇順に並べた区間 [その行の start_ts, 次の行の start_ts) に verdict を
+                   振り分ける (最後の行は上限無し = [start_ts, +inf))。**この収集呼び出しの時点で
+                   「時系列で最後」に見える行の値は暫定である** — 後から更に後続の run が収集されると、
+                   その行が最後ではなくなり、正しい上限が付く。既存行は増分収集では書き換えないため、
+                   確定させるには下記 --recompute-fail-reasons を使う。どの行の区間にも収まらなかった
+                   (最も早い行の start_ts より前の mtime を持つ) verdict は黙って落とさず、
+                   件数を収集の stdout に出す (0 件でも出す)。
   tokens          このタスクの全フェーズ合計 subagent_tokens (停止時コンテキストサイズの合計、処理総量ではない)
   tokens_processed subagent transcript を message.id 重複排除して積み上げた実処理量。ファイルが無ければ null
   pr_url          finish_mode=pr のときの PR URL
@@ -39,6 +48,7 @@
 使い方:
   collect-task-metrics.py <session.jsonl> [<session.jsonl> ...] [--out PATH] [--dry-run] [--no-diff-stats]
   collect-task-metrics.py --scan <プロジェクトルートの絶対パス> [--out PATH] [--dry-run] [--no-diff-stats]
+  collect-task-metrics.py --recompute-fail-reasons <repo_root の絶対パス> [--out PATH] [--dry-run]
 
   相対パスは ~/.claude/projects/ 起点。--out 省略時は ~/.claude/task-pipeline/metrics.jsonl。
   同じ (session, task_id) は既存ファイルにあればスキップする (増分収集・再実行安全)。
@@ -51,6 +61,14 @@
   無い・~/.claude/projects/ 自体が無い場合も 0 件として正常終了する (usage エラーにしない)。
   走査先のルートは環境変数 COLLECT_TASK_METRICS_PROJECTS_BASE で差し替えられる (テスト用。既定は
   ~/.claude/projects/)。
+
+  --recompute-fail-reasons は明示列挙・--scan と排他。<repo_root> の basename (owner/repo の repo 部分)
+  と `repo` フィールドが一致する --out (省略時は既定値) の行だけを対象に、fail_reasons を
+  「同じ (repo, task) の行を start_ts 昇順に並べ、次の行の start_ts を上限にする」窓で読み直して
+  書き戻す (in-place)。対象外の行・fail_reasons 以外のフィールドは変更しない。同じ task の行が
+  1 行しかない場合は値が変わらない。帰属できなかった verdict の件数と、値が変わった行数を stdout に
+  出す。--dry-run を付けると書き戻さない。増分収集では自動的に遡及されない過去の行を確定させる手段
+  (上記 fail_reasons の項を参照)。
 """
 import json
 import os
@@ -58,7 +76,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone
 
 DEFAULT_OUT = os.path.expanduser('~/.claude/task-pipeline/metrics.jsonl')
 PROJECTS_BASE = os.path.expanduser('~/.claude/projects')
@@ -102,39 +120,88 @@ def repo_root_of(cwd):
     return m.group(1) if m else None
 
 
-def read_fail_reasons(repo_root, slug):
-    """<repo_root>/.task-pipeline/runs/<slug>/verdicts を走査し、verdict=="FAIL" の判定を
-    ファイル名昇順で [{"phase":, "attempt":, "required_fixes":}, ...] に組み立てて返す。
+def list_fail_verdicts(vdir):
+    """vdir (<repo_root>/.task-pipeline/runs/<slug>/verdicts) を走査し、verdict=="FAIL" の判定を
+    ファイル名昇順で [{"phase":, "attempt":, "required_fixes":, "mtime":}, ...] に組み立てて返す。
 
     phase は verdict JSON 本文の "phase" キーをそのまま使う (pr_fix/rebase_fix でもファイル名の
     連番 <n> を含まない実測値と一致させるため — ファイル名だけが `pr_fix-<n>-<attempt>.json` の
     3要素になる)。attempt はファイル名末尾の `-<数字>.json` から取る (JSON 本文には attempt が無い)。
+    mtime は `os.path.getmtime` の値 (verifier が verdict ファイルを書いた時刻の代理 — verdict
+    ファイルは書かれた後どこからも書き換えられないので、この代理が成り立つ)。
 
-    FAIL が1件も無ければ []。verdicts ディレクトリが無い・読めない・中の JSON が1つでも壊れて
-    いるときは、収集全体を止めずに None を返し、stderr に1行警告する (収集器は機械的な転記に
-    徹し、分類はしない — 部分的に読めた分だけを返す拾い上げはしない)。
+    ディレクトリが無い・読めない・中の JSON が1つでも壊れているときは例外をそのまま投げる
+    (呼び出し側が catch して None 化 + stderr 警告を出す。この関数自体は収集対象の slug 等の
+    文脈を知らないので、警告メッセージの組み立ては呼び出し側の責務)。
     """
-    if not repo_root or not slug:
+    names = sorted(fn for fn in os.listdir(vdir) if fn.endswith('.json'))
+    fail_verdicts = []
+    for fn in names:
+        path = os.path.join(vdir, fn)
+        with open(path) as fh:
+            data = json.load(fh)
+        if data.get('verdict') != 'FAIL':
+            continue
+        m = FAIL_ATTEMPT_RE.search(fn)
+        fail_verdicts.append({
+            'phase': data.get('phase'),
+            'attempt': int(m.group(1)) if m else None,
+            'required_fixes': data.get('required_fixes') or [],
+            'mtime': os.path.getmtime(path),
+        })
+    return fail_verdicts
+
+
+def _parse_ts(ts):
+    """ISO8601 文字列 (例 '2026-08-04T00:01:00Z') を tz-aware datetime にパースする。
+    空/None/パース失敗は None (window の下限/上限として「無制限」に倒す防御的フォールバック)。
+    """
+    if not ts:
         return None
-    vdir = os.path.join(repo_root, '.task-pipeline', 'runs', slug, 'verdicts')
     try:
-        names = sorted(fn for fn in os.listdir(vdir) if fn.endswith('.json'))
-        fail_reasons = []
-        for fn in names:
-            with open(os.path.join(vdir, fn)) as fh:
-                data = json.load(fh)
-            if data.get('verdict') == 'FAIL':
-                m = FAIL_ATTEMPT_RE.search(fn)
-                fail_reasons.append({
-                    'phase': data.get('phase'),
-                    'attempt': int(m.group(1)) if m else None,
-                    'required_fixes': data.get('required_fixes') or [],
-                })
-        return fail_reasons
-    except Exception as e:
-        print(f"collect-task-metrics: fail_reasons unavailable for task {slug!r} "
-              f"({vdir}): {e}", file=sys.stderr)
+        return datetime.fromisoformat(ts.replace('Z', '+00:00'))
+    except Exception:
         return None
+
+
+def attribute_fail_reasons(vdir, windows):
+    """vdir の FAIL verdict を、windows (呼び出し側が start_ts 昇順に並べた
+    [(lower_dt_or_None, upper_dt_or_None), ...]) の該当区間に振り分ける。
+
+    区間は半開区間 [lower, upper) (lower は含む、upper は含まない = 次の区間に属する)。
+    upper が None の区間は「最後のレコード」を表し上限無し (+inf) として扱う。lower が None の
+    要素は理論上先頭以外に出ないはずだが、防御的に「下限無し」として扱う。
+
+    戻り値 (buckets, unattributed_count)。buckets は windows と同じ長さのリストで、各要素は
+    その区間に属す [{"phase":, "attempt":, "required_fixes":}, ...] (ファイル名昇順を保つ)。
+    unattributed_count は、最初の区間の lower より前の mtime を持つために、どの区間にも
+    収まらなかった FAIL verdict の件数 (黙って落とさず、件数として呼び出し側 = 収集の出力に
+    運ばせるためにここで数える)。
+
+    vdir が読めない・中の JSON が壊れているとき (list_fail_verdicts が例外を投げたとき) は
+    そのまま伝播させる (呼び出し側で catch する)。
+    """
+    items = list_fail_verdicts(vdir)
+    buckets = [[] for _ in windows]
+    unattributed = 0
+    for it in items:
+        dt = datetime.fromtimestamp(it['mtime'], tz=timezone.utc)
+        placed = False
+        for idx, (lower, upper) in enumerate(windows):
+            if lower is not None and dt < lower:
+                continue
+            if upper is not None and dt >= upper:
+                continue
+            buckets[idx].append({
+                'phase': it['phase'],
+                'attempt': it['attempt'],
+                'required_fixes': it['required_fixes'],
+            })
+            placed = True
+            break
+        if not placed:
+            unattributed += 1
+    return buckets, unattributed
 
 
 def diff_stats_for_commit(repo_root, commit):
@@ -415,8 +482,6 @@ def process(path, fetch_diff_stats=True):
             elif finish_mode == 'commit':
                 diff = diff_stats_for_commit(repo_root, commit)
 
-        fail_reasons = read_fail_reasons(repo_root, slug)
-
         rows.append({
             'repo': repo_of(cwd),
             'session': os.path.basename(path),
@@ -435,7 +500,10 @@ def process(path, fetch_diff_stats=True):
             'verifier_count': verifier_count,
             'orchestrator_overhead_seconds': orchestrator_overhead_seconds,
             'phase_counts': dict(phase_counts),
-            'fail_reasons': fail_reasons,
+            # main() の compute_new_fail_reasons が、同じ (repo, task) の他の行 (既存行含む) と
+            # あわせて start_ts 順の window を組んでから埋める (この時点では他の行を知らない)。
+            'fail_reasons': None,
+            '_repo_root': repo_root,  # 内部専用。main() が使い終わったら JSON へ書き出す前に pop する。
             'tokens': tokens,
             'tokens_processed': sub['processed_tokens'] if sub else None,
             'pr_url': pr_url,
@@ -449,12 +517,147 @@ def process(path, fetch_diff_stats=True):
     return rows
 
 
+def _fail_reasons_group_windows(members):
+    """members: [{"start_ts":, ...}, ...] (グループ内の全レコード、既存/新規を問わない)。
+    start_ts 昇順に並べ替えた順序と、その順序に対応する window ([(lower, upper), ...]、
+    半開区間 [lower, upper)。最後は upper=None で無制限) を返す。
+
+    start_ts が同じ (または両方パース不能) レコードが並ぶ場合の順序は Python の安定ソートにより
+    入力順を保つ (グループの構築順 = 既存行を先、新規行を後、のいずれか呼び出し側の並び)。
+    """
+    ordered = sorted(members, key=lambda m: (_parse_ts(m.get('start_ts')) or datetime.min.replace(tzinfo=timezone.utc)))
+    windows = []
+    for idx, m in enumerate(ordered):
+        lower = _parse_ts(m.get('start_ts'))
+        upper = _parse_ts(ordered[idx + 1].get('start_ts')) if idx + 1 < len(ordered) else None
+        windows.append((lower, upper))
+    return ordered, windows
+
+
+def compute_new_fail_reasons(existing_rows, new_rows):
+    """existing_rows (out ファイルから読み込んだ既存行、変更しない) と new_rows (今回収集した
+    新規行、各行に process() が付けた '_repo_root' を持つ) を (repo, task) でグルーピングし、
+    start_ts 昇順の window で fail_reasons を計算して new_rows の該当フィールドをその場で埋める。
+
+    既存行の fail_reasons は書き換えない (増分収集は追記のみ — 過去の行を確定させたい場合は
+    --recompute-fail-reasons を使う)。window の下限/上限には既存行の start_ts も使う — 新規行が
+    グループ内で時系列的に最後でなければ、既存の後続レコードの start_ts が正しい上限になる。
+
+    verdicts が読めない (list_fail_verdicts が例外を投げる) グループは、対象の新規行すべてを
+    fail_reasons=None にし、stderr に 1 回警告する (list_fail_verdicts 自体は文脈を知らないため
+    ここでメッセージを組み立てる)。
+
+    戻り値: このグループ群全体での unattributed 件数の合計 (帰属先の無かった FAIL verdict を
+    黙って落とさず数える — 要求3)。new_rows の全行から '_repo_root' を pop してから返る
+    (JSON へ書き出す前に必ずこの関数を通す設計)。
+    """
+    groups = defaultdict(list)
+    for r in existing_rows:
+        groups[(r.get('repo'), r.get('task'))].append({'start_ts': r.get('start_ts'), 'new': False})
+    for r in new_rows:
+        groups[(r.get('repo'), r.get('task'))].append({'start_ts': r.get('start_ts'), 'new': True, 'row': r})
+
+    unattributed_total = 0
+    for (repo, task), members in groups.items():
+        if task is None or not any(m['new'] for m in members):
+            continue
+        ordered, windows = _fail_reasons_group_windows(members)
+        repo_root = next((m['row']['_repo_root'] for m in ordered if m['new']), None)
+        if not repo_root:
+            for m in ordered:
+                if m['new']:
+                    m['row']['fail_reasons'] = None
+            continue
+        vdir = os.path.join(repo_root, '.task-pipeline', 'runs', task, 'verdicts')
+        try:
+            buckets, unattributed = attribute_fail_reasons(vdir, windows)
+        except Exception as e:
+            print(f"collect-task-metrics: fail_reasons unavailable for task {task!r} "
+                  f"({vdir}): {e}", file=sys.stderr)
+            for m in ordered:
+                if m['new']:
+                    m['row']['fail_reasons'] = None
+            continue
+        unattributed_total += unattributed
+        for idx, m in enumerate(ordered):
+            if m['new']:
+                m['row']['fail_reasons'] = buckets[idx]
+
+    for r in new_rows:
+        r.pop('_repo_root', None)
+    return unattributed_total
+
+
+def recompute_fail_reasons(out, repo_root, dry_run):
+    """out (既存の metrics.jsonl) の全行を読み直し、repo_of(repo_root) と 'repo' が一致する行だけを
+    対象に fail_reasons を再計算して書き戻す (in-place)。他の repo の行・fail_reasons 以外の
+    フィールドは一切変更しない。同じ task の行が1行しかなければ window は上限無し = 元の全件走査と
+    同じ値になる (変わらない)。
+
+    dry_run なら書き戻さず、変更内容 (対象タスク数・変更行数・unattributed 件数) だけを stdout に
+    出す。verdicts が読めないタスクは fail_reasons=None にし stderr に警告する (通常収集と同じ契約)。
+    """
+    if not os.path.exists(out):
+        sys.exit(f"--recompute-fail-reasons: {out} not found")
+    rows = []
+    with open(out) as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            rows.append(json.loads(line))
+
+    target_repo = repo_of(repo_root)
+    groups = defaultdict(list)
+    for idx, r in enumerate(rows):
+        if r.get('repo') == target_repo:
+            groups[r.get('task')].append(idx)
+
+    changed = 0
+    unattributed_total = 0
+    for task, idxs in groups.items():
+        if task is None:
+            continue
+        members = [{'start_ts': rows[i].get('start_ts'), 'idx': i} for i in idxs]
+        ordered, windows = _fail_reasons_group_windows(members)
+        vdir = os.path.join(repo_root, '.task-pipeline', 'runs', task, 'verdicts')
+        try:
+            buckets, unattributed = attribute_fail_reasons(vdir, windows)
+        except Exception as e:
+            print(f"collect-task-metrics: fail_reasons unavailable for task {task!r} "
+                  f"({vdir}): {e}", file=sys.stderr)
+            for m in ordered:
+                if rows[m['idx']].get('fail_reasons') is not None:
+                    changed += 1
+                rows[m['idx']]['fail_reasons'] = None
+            continue
+        unattributed_total += unattributed
+        for idx, m in enumerate(ordered):
+            new_val = buckets[idx]
+            if rows[m['idx']].get('fail_reasons') != new_val:
+                changed += 1
+            rows[m['idx']]['fail_reasons'] = new_val
+
+    print(f"recompute-fail-reasons: {len(groups)} task(s) matched repo {target_repo!r}, "
+          f"{changed} row(s) changed")
+    print(f"fail_reasons: {unattributed_total} verdict(s) could not be attributed to any collected run")
+
+    if dry_run:
+        print(f"(dry-run: not writing to {out})")
+        return
+
+    with open(out, 'w') as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + '\n')
+    print(f"rewrote {out}")
+
+
 def main():
     args = sys.argv[1:]
     out = DEFAULT_OUT
     dry_run = False
     fetch_diff_stats = True
     scan_root = None
+    recompute_root = None
     files = []
     i = 0
     while i < len(args):
@@ -469,12 +672,22 @@ def main():
         elif a == '--scan':
             i += 1
             scan_root = args[i]
+        elif a == '--recompute-fail-reasons':
+            i += 1
+            recompute_root = args[i]
         else:
             files.append(a)
         i += 1
 
     usage = ('usage: collect-task-metrics.py <session.jsonl> [...] [--out PATH] [--dry-run] [--no-diff-stats]\n'
-              '   or: collect-task-metrics.py --scan <project root> [--out PATH] [--dry-run] [--no-diff-stats]')
+              '   or: collect-task-metrics.py --scan <project root> [--out PATH] [--dry-run] [--no-diff-stats]\n'
+              '   or: collect-task-metrics.py --recompute-fail-reasons <repo root> [--out PATH] [--dry-run]')
+    if recompute_root is not None:
+        if files or scan_root is not None:
+            sys.exit('usage: --recompute-fail-reasons is mutually exclusive with explicit session '
+                      'file arguments and --scan\n' + usage)
+        recompute_fail_reasons(out, os.path.abspath(recompute_root), dry_run)
+        return
     if scan_root is not None:
         if files:
             sys.exit('usage: --scan is mutually exclusive with explicit session file arguments\n' + usage)
@@ -482,6 +695,7 @@ def main():
     elif not files:
         sys.exit(usage)
 
+    existing_rows = []
     existing_keys = set()
     if os.path.exists(out):
         with open(out) as fh:
@@ -490,6 +704,7 @@ def main():
                     r = json.loads(line)
                 except Exception:
                     continue
+                existing_rows.append(r)
                 existing_keys.add((r.get('session'), r.get('task_id')))
 
     new_rows = []
@@ -502,7 +717,10 @@ def main():
             existing_keys.add(key)
             new_rows.append(row)
 
+    unattributed_total = compute_new_fail_reasons(existing_rows, new_rows)
+
     print(f"{len(new_rows)} new task-run(s) collected from {len(files)} session file(s)")
+    print(f"fail_reasons: {unattributed_total} verdict(s) could not be attributed to any collected run")
     for r in new_rows:
         task = r['task'] or '(no-slug)'
         model = ','.join(r['model_actual']) if r.get('model_actual') else (r['model'] or '?')
