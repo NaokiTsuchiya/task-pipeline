@@ -188,6 +188,34 @@ light は research+plan → implement → report。どちらもその後 `finali
 | `rebase_fix` | `finalize` | `pr_fix` |
 | `rebase_fix` | `finalize` | `rebase_fix` |
 
+## state.json に置いてよいものの基準 (gh-58)
+
+**基準**: 最低限「`queue` の遷移と同じ書き込みで更新される必要があるか」で判定する。
+実装上は「`withQueueLock` (queue エントリの座標を書き換える verb) を経由するか、
+`withExistingStateLock` (それ以外の帳簿 verb) を経由するか」という分岐が、そのまま
+この基準に対応している (`state-store.ts`)。
+
+現行の全 field をこの基準で分類すると:
+
+| 分類 | フィールド | 説明 |
+|---|---|---|
+| queue と同じ書き込みで更新が必要 | `queue`, `completed`, `relisted`, `withdrawn_branches` | `retire`/`restore`/`withdraw` は queue エントリの座標を書き換えるのと**同じ原子的書き込み**でこれらを更新する。 |
+| 帳簿系 (queue の遷移とは無関係に単体で更新) | `candidates`, `promoted`, `stalled`, `stalled_since`, `history`, `history_archived` | `LEDGER_VERBS` の一部として更新される。queue の遷移に一度も参加しない。 |
+| 全 verb 共通のメタ情報 | `updated_at`, `schema_version` | 書き込み系 verb 全体の共通後処理 (`finalizeStateV2`) が毎回更新する。 |
+| 初期化時に固定される設定値 | `tracker`, `source` | `init` 時に決まり、以降どの verb からも書き換わらない。 |
+
+**history がこの基準で対応 (上限+退避) が要った理由**: 「帳簿系」バケットの中で
+`history` だけが無制限に育つ性質を持つ (gh-58 の実測: 書き込みのたびに全文を
+再シリアライズするコスト、`get` を呼んだときにオーケストレーターのコンテキストへ
+乗るコストの両方が history のサイズに比例して単調に悪化する)。同じバケットの
+`candidates`/`promoted`/`stalled`/`stalled_since` は小さく、上限が要る規模では伸びない。
+
+**queue と co-write が要らない = 保存層を分けても原子性を壊さない**、という性質は
+将来「帳簿系を state.json から分離する」判断の土台になるが、**分離そのものは本 issue
+の範囲外**である。全 field を分離しても現時点では約 2KB しか浮かず、`get` が「壊れた
+state を人が読むための入口」である以上ファイルを増やすと逆に読みにくくなる (トレード
+オフが割に合う規模になったら改めて判断する)。
+
 ## verb 一覧
 
 48 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
@@ -397,8 +425,26 @@ state.ts history-append --state-dir <dir> --line <s> \
 ```
 
 前提: state.json が存在する (`missing`)。
-効果: `history` に 1 行追加。空文字も有効な値。
-成功: `{"ok": true, "history_length": <n>}`。
+効果: `history` に 1 行追加。空文字も有効な値。**同じ書き込みで、追記後の要素数が上限を
+超えていれば古い行から `<state dir>/history-archive.ndjson` へ退避し、`history` を
+上限件数に切り詰める。退避した件数だけ `history_archived` を加算する** (gh-58)。
+成功: `{"ok": true, "history_length": <n>, "archived": <m>}` (`m` は今回の呼び出しで
+退避した件数。通常は 0)。
+
+**閾値**:
+
+| 判定 | 値 | 不等号 |
+|---|---|---|
+| history の上限 | 100 | 追記後の要素数がこれを**超えたら**古い行から退避 (実装は `state-ledger-v2.ts` の `HISTORY_MAX_LINES`。**SKILL.md には数値を置かない**) |
+
+**上限で落ちた行の読み方**: `<state dir>/history-archive.ndjson` に**古い順・追記専用**
+で残る。1 行 = 元の history 文字列を JSON エンコードしたもの (`--line` の値が改行を
+含んでいても 1 エントリ = 1 行のまま保てる)。`cat`/`tail` でそのまま読める (クオートは
+付くが内容は判読できる)。プログラムから読むときは 1 行ずつ `JSON.parse` する。このファイル
+の掃除規則は無い (`completed` 等と異なり証跡として無期限に残す)。既存の (この機能導入前
+の) `history` が上限を大きく超えていても、`history-append` を 1 回呼べばその場で上限まで
+切り詰められ、超過分は退避される (`history-append` 以外の verb は `history` を一切
+読み書きしないので、上限超過状態のまま残っていてもエラーにはならない)。
 
 ### `candidates-set`
 

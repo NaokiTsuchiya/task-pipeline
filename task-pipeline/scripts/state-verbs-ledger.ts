@@ -28,6 +28,7 @@ import {
   applyRelistedDropV2,
   applyStalledSetV2,
   getV2,
+  HISTORY_MAX_LINES,
   isRecord,
   isSessionAlive,
   isSessionStale,
@@ -392,6 +393,22 @@ export async function cmdSessionsAlive(
   return { ok: true, alive };
 }
 
+// 上限超過で history から落ちた行を history-archive.ndjson へ追記する (gh-58)。
+// 1行 = 元の history 文字列を JSON エンコードしたもの — --line の値に埋め込みの
+// 改行が入っていても (CLI 引数として禁止されていないので、schema 上も許される)
+// 1エントリ = 1行のまま保てる。state.json の原子的書き込みより**先に**呼ぶこと
+// (cmdHistoryAppend 参照): 途中終了時に「行は残るが重複しうる」側に倒し、
+// 「行を失う」側には倒さない。
+async function appendHistoryArchive(
+  stateDir: string,
+  lines: readonly string[],
+): Promise<void> {
+  if (lines.length === 0) return;
+  const path = joinPath(stateDir, "history-archive.ndjson");
+  const content = lines.map((line) => `${JSON.stringify(line)}\n`).join("");
+  await Deno.writeTextFile(path, content, { append: true, create: true });
+}
+
 export async function cmdHistoryAppend(
   stateDir: string,
   flags: Map<string, string>,
@@ -400,12 +417,24 @@ export async function cmdHistoryAppend(
     throw new CliErrorV2("usage", "missing required flag: --line");
   }
   const line = flags.get("line")!;
+  let archived = 0;
   const next = await withExistingStateLock(
     stateDir,
     lockOpts(flags),
-    (current) => applyHistoryAppendV2(current, line),
+    async (current) => {
+      const { state, dropped } = applyHistoryAppendV2(
+        current,
+        line,
+        HISTORY_MAX_LINES,
+      );
+      if (dropped.length > 0) {
+        await appendHistoryArchive(stateDir, dropped);
+        archived = dropped.length;
+      }
+      return state;
+    },
   );
-  return { ok: true, history_length: next.history.length };
+  return { ok: true, history_length: next.history.length, archived };
 }
 
 // --- 候補・帳簿 -------------------------------------------------------------

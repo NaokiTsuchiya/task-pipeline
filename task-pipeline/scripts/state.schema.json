@@ -338,6 +338,7 @@
     "promoted": { "type": "array", "items": { "type": "string" } },
     "withdrawn_branches": { "type": "array", "items": { "$ref": "#/$defs/withdrawnBranch" } },
     "history": { "type": "array", "items": { "type": "string" } },
+    "history_archived": { "type": "integer", "minimum": 0 },
     "schema_version": { "type": "integer", "enum": [2] }
   },
   "required": ["tracker", "source", "updated_at", "queue", "completed", "candidates", "relisted", "promoted", "history", "schema_version"],

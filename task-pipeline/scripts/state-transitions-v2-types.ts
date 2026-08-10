@@ -196,6 +196,10 @@ export interface V2State {
   readonly completed: readonly CompletedEntry[];
   readonly withdrawn_branches: readonly WithdrawnBranchEntry[];
   readonly history: readonly string[];
+  // 退避済み history 行数の累計 (gh-58)。スキーマ上は任意キー (この機能導入前の
+  // 既存 v2 state.json には無い) だが、normalizeStateV2 が全書き込み経路の入口で
+  // 0 埋めするので、ここでは必須にできる (withdrawn_branches と同じパターン)。
+  readonly history_archived: number;
   readonly schema_version: number;
   // 停滞の記録 (スキーマ上は任意キー)。queue エントリの座標を持たない帳簿の値で、
   // 書き換えるのは stalled-set だけ (state-ledger-v2.ts)。

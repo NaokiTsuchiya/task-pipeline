@@ -46,11 +46,17 @@ export interface LockedApplyResult {
   value: Record<string, unknown>;
 }
 
+// fn は同期・非同期のどちらでもよい (history-append が退避ファイルへの書き込みを
+// lock 保持中に行うために非同期を必要とする。gh-58)。同期の fn は
+// `X | Promise<X>` の合併型を構造的に満たすので、既存の同期呼び出し元は無変更で通る。
 export async function applyStateChange(
   stateDir: string,
   fn: (
     current: Record<string, unknown> | undefined,
-  ) => Record<string, unknown> | undefined,
+  ) =>
+    | Record<string, unknown>
+    | undefined
+    | Promise<Record<string, unknown> | undefined>,
   preCheck = true,
 ): Promise<LockedApplyResult> {
   let current: Record<string, unknown> | undefined;
@@ -75,7 +81,7 @@ export async function applyStateChange(
     }
   }
 
-  const next = fn(current);
+  const next = await fn(current);
   if (next === undefined) {
     return {
       wrote: false,
@@ -105,7 +111,10 @@ async function withStateLock(
   opts: { retryMs: number; maxRetries: number },
   fn: (
     current: Record<string, unknown> | undefined,
-  ) => Record<string, unknown> | undefined,
+  ) =>
+    | Record<string, unknown>
+    | undefined
+    | Promise<Record<string, unknown> | undefined>,
 ): Promise<LockedApplyResult> {
   await acquireLock(stateDir, opts);
   try {
@@ -153,16 +162,18 @@ export async function withQueueLock(
 // 対象にする verb 用のラッパ (approve/history-append/candidates-*/promoted-*/relisted-*/
 // stalled-set が使う)。「state.json が無ければ missing」の共通チェックと finalizeStateV2 の
 // 適用をここに集約する。
+// mutate は同期・非同期のどちらでもよい (history-append が上限超過分を
+// history-archive.ndjson へ退避するために非同期を必要とする。gh-58)。
 export async function withExistingStateLock(
   stateDir: string,
   opts: { retryMs: number; maxRetries: number },
-  mutate: (current: V2State) => V2State,
+  mutate: (current: V2State) => V2State | Promise<V2State>,
 ): Promise<V2State> {
-  const result = await withStateLock(stateDir, opts, (current) => {
+  const result = await withStateLock(stateDir, opts, async (current) => {
     if (current === undefined) {
       throw new CliErrorV2("missing", `state.json not found in ${stateDir}`);
     }
-    const next = mutate(normalizeStateV2(current));
+    const next = await mutate(normalizeStateV2(current));
     return finalizeStateV2(next, nowIso()) as unknown as Record<
       string,
       unknown

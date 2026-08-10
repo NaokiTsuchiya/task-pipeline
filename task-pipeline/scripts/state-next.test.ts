@@ -241,6 +241,7 @@ function state(queue: V2Item[], overrides: Partial<V2State> = {}): V2State {
     completed: [],
     withdrawn_branches: [],
     history: [],
+    history_archived: 0,
     schema_version: 2,
     ...overrides,
   };

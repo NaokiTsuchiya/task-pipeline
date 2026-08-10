@@ -350,6 +350,7 @@ function buildState(
     completed: [],
     withdrawn_branches: [],
     history: [],
+    history_archived: 0,
     schema_version: 2,
     ...extra,
   };

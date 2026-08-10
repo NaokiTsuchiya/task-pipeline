@@ -62,6 +62,12 @@ export const LEDGER_VERBS = [
 ] as const;
 export type LedgerVerb = (typeof LEDGER_VERBS)[number];
 
+// history の要素数の上限 (gh-58)。実装はこの定数のみが正で、SKILL.md には数値を
+// 置かない (docs/state-cli-contract.md の history-append 節の閾値表が参照先)。
+// 追記後の要素数がこれを超えたら、超えた分だけ古い行から history-archive.ndjson へ
+// 退避する (applyHistoryAppendV2)。
+export const HISTORY_MAX_LINES = 100;
+
 // ---------------------------------------------------------------------------
 // 共通ヘルパ
 // ---------------------------------------------------------------------------
@@ -80,13 +86,22 @@ export function finalizeStateV2(state: V2State, nowIso: string): V2State {
 }
 
 // 読み込んだ生の JSON を V2State として扱う前の正規化。v2 スキーマ上 optional な
-// withdrawn_branches (v1 に無かったので移行後も欠けうる) を空配列で埋める。
-// **他のキーには触れない** — 検証は checkStateV2 が済ませている。
+// withdrawn_branches (v1 に無かったので移行後も欠けうる) を空配列で埋め、同じく
+// optional な history_archived (gh-58 導入前の state.json には無い) を 0 で埋める。
+// **他のキーには触れない** — 検証は checkStateV2 が済ませている。両方とも既に
+// 正しい型で存在するときは入力をそのまま返す (新しいオブジェクトを作らない) — 呼び出し
+// 側が参照同一性に依存できる (L-NORM-1)。
 export function normalizeStateV2(parsed: Record<string, unknown>): V2State {
-  if (Array.isArray(parsed.withdrawn_branches)) {
+  const needsWithdrawnBranches = !Array.isArray(parsed.withdrawn_branches);
+  const needsHistoryArchived = typeof parsed.history_archived !== "number";
+  if (!needsWithdrawnBranches && !needsHistoryArchived) {
     return parsed as unknown as V2State;
   }
-  return { ...parsed, withdrawn_branches: [] } as unknown as V2State;
+  return {
+    ...parsed,
+    withdrawn_branches: needsWithdrawnBranches ? [] : parsed.withdrawn_branches,
+    history_archived: needsHistoryArchived ? 0 : parsed.history_archived,
+  } as unknown as V2State;
 }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +124,7 @@ export function buildFreshStateV2(
     promoted: [],
     withdrawn_branches: [],
     history: [],
+    history_archived: 0,
     schema_version: V2_SCHEMA_VERSION,
   };
 }
@@ -186,8 +202,34 @@ export function isSessionAlive(
 // history-append
 // ---------------------------------------------------------------------------
 
-export function applyHistoryAppendV2(state: V2State, line: string): V2State {
-  return { ...state, history: [...state.history, line] };
+export interface HistoryAppendResultV2 {
+  readonly state: V2State;
+  // 上限超過で history から落ちた行 (古い順)。呼び出し側 (state-verbs-ledger.ts) が
+  // これを history-archive.ndjson へ退避する。0件なら退避は起きていない。
+  readonly dropped: readonly string[];
+}
+
+// cap を引数で受けるのは、テストが小さい cap で境界ケース (上限ちょうど/上限超え等) を
+// 高速に再現できるようにするため。実運用では呼び出し側が HISTORY_MAX_LINES を渡す。
+export function applyHistoryAppendV2(
+  state: V2State,
+  line: string,
+  cap: number,
+): HistoryAppendResultV2 {
+  const next = [...state.history, line];
+  if (next.length <= cap) {
+    return { state: { ...state, history: next }, dropped: [] };
+  }
+  const overflow = next.length - cap;
+  const dropped = next.slice(0, overflow);
+  return {
+    state: {
+      ...state,
+      history: next.slice(overflow),
+      history_archived: state.history_archived + dropped.length,
+    },
+    dropped,
+  };
 }
 
 // ---------------------------------------------------------------------------

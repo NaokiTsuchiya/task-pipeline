@@ -372,7 +372,14 @@ const VALID_CASES: { label: string; value: unknown }[] = [
       relisted: [{ id: "t-3", seen_at: "2026-08-07T00:00:00Z" }],
       promoted: ["gh-9"],
       history: ["2026-08-07T00:00Z done t-1"],
+      history_archived: 3,
     }),
+  },
+  {
+    // gh-58: history_archived は任意キー。stateOf の既定値には含めていないので、
+    // この case は「無くても合法」を明示的に確認する (直上の case が「あっても合法」)。
+    label: "gh-58: history_archived が無い state も合法 (任意キー)",
+    value: stateOf([]),
   },
 ];
 
@@ -733,6 +740,14 @@ const INVALID_CASES: { label: string; value: unknown }[] = [
   },
   { label: "未知トップレベルキー", value: stateOf([], { review: null }) },
   { label: "queue が非配列", value: stateOf([], { queue: {} }) },
+  {
+    label: "gh-58: history_archived が負数",
+    value: stateOf([], { history_archived: -1 }),
+  },
+  {
+    label: "gh-58: history_archived が文字列",
+    value: stateOf([], { history_archived: "3" }),
+  },
 ];
 
 // ---------------------------------------------------------------------------
