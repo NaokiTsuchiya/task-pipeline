@@ -514,7 +514,7 @@ function countsOf(
 }
 
 // ---------------------------------------------------------------------------
-// 実行の生存管理 (現行 SKILL.md 「飛行中の扱い」)
+// 実行の生存管理 (現行 playbooks/inflight.md 「飛行中の扱い」)
 // ---------------------------------------------------------------------------
 
 // 引き取りの枠。新しいタスク (kind==initial) と仕上げ (pr_fix/rebase_fix) は別枠で、
@@ -934,7 +934,7 @@ export function deriveNext(state: V2State, input: NextInput): NextResult {
 
 /**
  * `task_counts/<session>` の中身から件数を数える。**`wc -l` と同じ意味論** =
- * 改行文字の数 (末尾改行の無い最終行は数えない)。SKILL.md が `wc -l` と書いているので、
+ * 改行文字の数 (末尾改行の無い最終行は数えない)。playbooks/max-tasks.md が `wc -l` と書いているので、
  * CLI と手順書の数え方が食い違わないようにここを合わせる。
  */
 export function countTaskLines(text: string): number {
