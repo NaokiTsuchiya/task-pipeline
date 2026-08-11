@@ -1,0 +1,30 @@
+{
+    "name": "task-pipeline/be-state-v2-experiment",
+    "description": "gh-22: isolated experiment evaluating the Be Framework becoming pattern against a 7-verb reduction of state model v2. Not part of the task-pipeline skill or its test harnesses.",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.3",
+        "be-framework/be": "0.x-dev"
+    },
+    "require-dev": {
+        "vimeo/psalm": "^6.16",
+        "phpunit/phpunit": "^11.0"
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "autoload": {
+        "psr-4": {
+            "Experiment\\BeStateV2\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Experiment\\BeStateV2\\Illegal\\": "illegal-examples/",
+            "Experiment\\BeStateV2\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

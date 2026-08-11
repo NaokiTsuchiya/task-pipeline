@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<psalm errorLevel="4" resolveFromConfigFile="true"
+       xmlns="https://getpsalm.org/schema/config"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="https://getpsalm.org/schema/config vendor/vimeo/psalm/config.xsd">
+    <projectFiles>
+        <directory name="src" />
+    </projectFiles>
+    <issueHandlers>
+        <!-- Be Framework の becoming エンジンは候補クラスのコンストラクタをリフレクション
+             (ReflectionClass::newInstanceArgs) 経由で呼ぶため、Psalm の静的呼び出しグラフに
+             現れない。未使用メソッド/プロパティの誤検知をこの2種に限って抑止する
+             (研究 research.md 9-d で機構を確認済み。実際に未使用のデッドコードを見逃す
+             ためではなく、becoming パターン特有の構造的な誤検知を抑えるためだけの抑止)。 -->
+        <PossiblyUnusedMethod errorLevel="suppress" />
+        <PossiblyUnusedProperty errorLevel="suppress" />
+        <!-- projectFiles は src/ だけを対象にしている (受け入れ条件6の実演を
+             illegal-examples/ に個別解析させるための構成、research.md 9-c 参照) ため、
+             各 verb の *Input クラスが tests/ からしか new されない事実を Psalm は見えない。
+             実際に外部から使われている (tests/ 配下のテストが証拠) ことは implementation.md
+             で確認する。 -->
+        <UnusedClass errorLevel="suppress" />
+    </issueHandlers>
+</psalm>
