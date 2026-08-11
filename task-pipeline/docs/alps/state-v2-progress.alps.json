@@ -1,0 +1,378 @@
+{
+  "alps": {
+    "title": "task-pipeline 状態モデル v2 — 領域 P (進行) 主図",
+    "doc": "生成元: P_NODE_KEYS (state-model-v2.ts) / VERB_SPEC.p, ADVANCE_EDGES (state-transitions-v2-spec.ts)。手動編集禁止 — `deno run --allow-write task-pipeline/scripts/alps-v2.ts` で再生成する (task-pipeline/docs/alps-profiles-2026-08.md 参照)。",
+    "descriptor": [
+      {
+        "id": "queued",
+        "type": "semantic",
+        "title": "queued",
+        "descriptor": [
+          {
+            "href": "#t-claim"
+          }
+        ]
+      },
+      {
+        "id": "resting",
+        "type": "semantic",
+        "title": "resting",
+        "descriptor": [
+          {
+            "href": "#t-restore"
+          }
+        ]
+      },
+      {
+        "id": "blocked",
+        "type": "semantic",
+        "title": "blocked",
+        "descriptor": [
+          {
+            "href": "#t-restore"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_full_research",
+        "type": "semantic",
+        "title": "running(initial,full,research)",
+        "descriptor": [
+          {
+            "href": "#t-set-gate"
+          },
+          {
+            "href": "#t-advance-1"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_full_plan",
+        "type": "semantic",
+        "title": "running(initial,full,plan)",
+        "descriptor": [
+          {
+            "href": "#t-advance-2"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_full_implement",
+        "type": "semantic",
+        "title": "running(initial,full,implement)",
+        "descriptor": [
+          {
+            "href": "#t-advance-3"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_full_report",
+        "type": "semantic",
+        "title": "running(initial,full,report)",
+        "descriptor": [
+          {
+            "href": "#t-advance-4"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_full_finalize",
+        "type": "semantic",
+        "title": "running(initial,full,finalize)",
+        "descriptor": [
+          {
+            "href": "#t-block"
+          },
+          {
+            "href": "#t-ship"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_full_rebase_fix",
+        "type": "semantic",
+        "title": "running(initial,full,rebase_fix)",
+        "descriptor": [
+          {
+            "href": "#t-advance-5"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_light_research_plan",
+        "type": "semantic",
+        "title": "running(initial,light,research+plan)",
+        "descriptor": [
+          {
+            "href": "#t-advance-6"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_light_implement",
+        "type": "semantic",
+        "title": "running(initial,light,implement)",
+        "descriptor": [
+          {
+            "href": "#t-advance-7"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_light_report",
+        "type": "semantic",
+        "title": "running(initial,light,report)",
+        "descriptor": [
+          {
+            "href": "#t-advance-8"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_light_finalize",
+        "type": "semantic",
+        "title": "running(initial,light,finalize)",
+        "descriptor": [
+          {
+            "href": "#t-block"
+          },
+          {
+            "href": "#t-ship"
+          }
+        ]
+      },
+      {
+        "id": "running_initial_light_rebase_fix",
+        "type": "semantic",
+        "title": "running(initial,light,rebase_fix)",
+        "descriptor": [
+          {
+            "href": "#t-advance-9"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_pr_fix_pr_fix",
+        "type": "semantic",
+        "title": "running(pr_fix,-,pr_fix)",
+        "descriptor": [
+          {
+            "href": "#t-advance-10"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_pr_fix_finalize",
+        "type": "semantic",
+        "title": "running(pr_fix,-,finalize)",
+        "descriptor": [
+          {
+            "href": "#t-block"
+          },
+          {
+            "href": "#t-ship"
+          }
+        ]
+      },
+      {
+        "id": "running_pr_fix_rebase_fix",
+        "type": "semantic",
+        "title": "running(pr_fix,-,rebase_fix)",
+        "descriptor": [
+          {
+            "href": "#t-advance-11"
+          },
+          {
+            "href": "#t-block"
+          }
+        ]
+      },
+      {
+        "id": "running_rebase_fix_rebase_fix",
+        "type": "semantic",
+        "title": "running(rebase_fix,-,rebase_fix)",
+        "descriptor": [
+          {
+            "href": "#t-advance-12"
+          },
+          {
+            "href": "#t-block"
+          },
+          {
+            "href": "#t-rebase-give-up"
+          }
+        ]
+      },
+      {
+        "id": "running_rebase_fix_finalize",
+        "type": "semantic",
+        "title": "running(rebase_fix,-,finalize)",
+        "descriptor": [
+          {
+            "href": "#t-block"
+          },
+          {
+            "href": "#t-ship"
+          }
+        ]
+      },
+      {
+        "id": "t-claim",
+        "type": "unsafe",
+        "rt": "#running_initial_full_research",
+        "title": "claim",
+        "doc": "queued → running(initial,full,research)"
+      },
+      {
+        "id": "t-set-gate",
+        "type": "unsafe",
+        "rt": "#running_initial_light_research_plan",
+        "title": "set-gate",
+        "doc": "running(initial,full,research) → running(initial,light,research+plan)"
+      },
+      {
+        "id": "t-advance-1",
+        "type": "unsafe",
+        "rt": "#running_initial_full_plan",
+        "title": "advance",
+        "doc": "running(initial,full,research) → running(initial,full,plan)"
+      },
+      {
+        "id": "t-advance-2",
+        "type": "unsafe",
+        "rt": "#running_initial_full_implement",
+        "title": "advance",
+        "doc": "running(initial,full,plan) → running(initial,full,implement)"
+      },
+      {
+        "id": "t-advance-3",
+        "type": "unsafe",
+        "rt": "#running_initial_full_report",
+        "title": "advance",
+        "doc": "running(initial,full,implement) → running(initial,full,report)"
+      },
+      {
+        "id": "t-advance-4",
+        "type": "unsafe",
+        "rt": "#running_initial_full_finalize",
+        "title": "advance",
+        "doc": "running(initial,full,report) → running(initial,full,finalize)"
+      },
+      {
+        "id": "t-advance-5",
+        "type": "unsafe",
+        "rt": "#running_initial_full_finalize",
+        "title": "advance",
+        "doc": "running(initial,full,rebase_fix) → running(initial,full,finalize)"
+      },
+      {
+        "id": "t-advance-6",
+        "type": "unsafe",
+        "rt": "#running_initial_light_implement",
+        "title": "advance",
+        "doc": "running(initial,light,research+plan) → running(initial,light,implement)"
+      },
+      {
+        "id": "t-advance-7",
+        "type": "unsafe",
+        "rt": "#running_initial_light_report",
+        "title": "advance",
+        "doc": "running(initial,light,implement) → running(initial,light,report)"
+      },
+      {
+        "id": "t-advance-8",
+        "type": "unsafe",
+        "rt": "#running_initial_light_finalize",
+        "title": "advance",
+        "doc": "running(initial,light,report) → running(initial,light,finalize)"
+      },
+      {
+        "id": "t-advance-9",
+        "type": "unsafe",
+        "rt": "#running_initial_light_finalize",
+        "title": "advance",
+        "doc": "running(initial,light,rebase_fix) → running(initial,light,finalize)"
+      },
+      {
+        "id": "t-advance-10",
+        "type": "unsafe",
+        "rt": "#running_pr_fix_finalize",
+        "title": "advance",
+        "doc": "running(pr_fix,-,pr_fix) → running(pr_fix,-,finalize)"
+      },
+      {
+        "id": "t-advance-11",
+        "type": "unsafe",
+        "rt": "#running_pr_fix_finalize",
+        "title": "advance",
+        "doc": "running(pr_fix,-,rebase_fix) → running(pr_fix,-,finalize)"
+      },
+      {
+        "id": "t-advance-12",
+        "type": "unsafe",
+        "rt": "#running_rebase_fix_finalize",
+        "title": "advance",
+        "doc": "running(rebase_fix,-,rebase_fix) → running(rebase_fix,-,finalize)"
+      },
+      {
+        "id": "t-block",
+        "type": "unsafe",
+        "rt": "#blocked",
+        "title": "block",
+        "doc": "running(initial,full,research), running(initial,full,plan), running(initial,full,implement), running(initial,full,report), running(initial,full,finalize), running(initial,full,rebase_fix), running(initial,light,research+plan), running(initial,light,implement), running(initial,light,report), running(initial,light,finalize), running(initial,light,rebase_fix), running(pr_fix,-,pr_fix), running(pr_fix,-,finalize), running(pr_fix,-,rebase_fix), running(rebase_fix,-,rebase_fix), running(rebase_fix,-,finalize) → blocked"
+      },
+      {
+        "id": "t-restore",
+        "type": "unsafe",
+        "rt": "#queued",
+        "title": "restore",
+        "doc": "resting, blocked → queued"
+      },
+      {
+        "id": "t-ship",
+        "type": "unsafe",
+        "rt": "#resting",
+        "title": "ship",
+        "doc": "running(initial,full,finalize), running(initial,light,finalize), running(pr_fix,-,finalize), running(rebase_fix,-,finalize) → resting"
+      },
+      {
+        "id": "t-rebase-give-up",
+        "type": "unsafe",
+        "rt": "#resting",
+        "title": "rebase-give-up",
+        "doc": "running(rebase_fix,-,rebase_fix) → resting"
+      }
+    ]
+  }
+}
