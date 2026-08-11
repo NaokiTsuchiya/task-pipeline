@@ -142,15 +142,18 @@ fi
 # --- T6 (回帰ガード): 「残す」と決めた記述が巻き込まれて消えていない ---------------------
 # 分割で所在が分かれたので、needle ごとに「どのファイルに在るべきか」を対にして見る
 # (全ファイルを cat して探すと、移し先を間違えても気づけない)。
+# gh-59: heartbeat の 90 分/1440 分・retire の 24 時間は、CLI 所有の再掲として手順書側から
+# 削り契約への参照に置き換えたので、この 3 件の needle は「残った参照文」を固定する形に
+# 更新してある (旧 needle は元の数値そのものだったが、それは今回まさに消すべきものだった)。
 _detail=
 check_needle() {
     grep -qF -- "$2" "$1" || _detail="$_detail [消えている: $2 (${1##*/})]"
 }
-check_needle "$skill_md" 'heartbeat の 90 分/1440 分がなぜその値か'
-check_needle "$skill_md" '24 時間より古い控えは `retire` のたびに掃除される'
+check_needle "$skill_md" 'heartbeat の生存判定/掃除閾値がなぜその値か'
+check_needle "$skill_md" '古い控えは `retire` のたびに掃除される'
 check_needle "$pr_follow_md" 'watch-pr.sh <PR URL> <task id> 60 21600'
 check_needle "$pr_follow_md" '6 時間何も動かなかった'
-check_needle "$merge_recovery_md" '24 時間より古い控えを同じ書き込みで掃除する'
+check_needle "$merge_recovery_md" '`docs/state-cli-contract.md` の `retire` 節。控えの保持期間の閾値もそちらにある'
 check_needle "$max_tasks_md" '件数はこのファイルの行数'
 if [ -z "$_detail" ]; then
     ok "T6 「残す」と決めた記述 (別 verb の契約説明・watch 引数・カウント規則) が残っている"
