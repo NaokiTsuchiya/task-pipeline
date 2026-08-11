@@ -14,7 +14,7 @@
 // 別のノードへ丸めると、壊れ方が v2 の合法な状態として固定されてしまうため。
 // 一方、v1 スキーマ上「任意キー」だったもの (review.branch/tip/base、withdrawn_asked、
 // watch.review_only/answered など) は既定値で埋める — v2 では required だが、欠落は
-// v1-valid な入力として実在するため (tests/fixtures/state-cli/valid-legacy-live.json)。
+// v1-valid な入力として実在するため (task-pipeline/scripts/fixtures/valid-legacy-live.json)。
 //
 // テスト: state-migrate-v2.test.ts / 実行は deno task test
 // (リポジトリルートの deno.json が *.test.ts を自動検出する)。

@@ -136,7 +136,7 @@ export function buildFreshStateV2(
 //   - それ以外 (3 以上・非数値)   → schema エラー
 //
 // 「欠落」を v1 とみなすのは、schema_version 導入前の state.json が実在するため
-// (tests/fixtures/state-cli/valid-legacy-live.json)。移行後は schema_version が 2 に
+// (task-pipeline/scripts/fixtures/valid-legacy-live.json)。移行後は schema_version が 2 に
 // なるので、2 回目の init は no-op 分岐に落ちる (= 再移行しない)。
 export function applyInitV2(
   current: Record<string, unknown> | undefined,

@@ -18,7 +18,7 @@ set -u
 tests_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 repo_dir=$(CDPATH='' cd -- "$tests_dir/.." && pwd -P) || exit 1
 state_ts=$repo_dir/task-pipeline/scripts/state.ts
-fixture=$tests_dir/fixtures/state-cli/v2-queued.json
+fixture=$repo_dir/task-pipeline/scripts/fixtures/v2-queued.json
 id=t-1a2b3c4d
 
 [ -f "$state_ts" ] || { printf 'state.ts not found: %s\n' "$state_ts" >&2; exit 1; }
@@ -146,7 +146,7 @@ fi
 # v1 では ship に当たる処理が fix-done → in-review → watch-set の 3 verb に分かれており、
 # 順序を誤ると指摘が再浮上したり前提違反になったりした。v2 では 1 回の ship が
 # handled への合流・ask の消費・sig のリセット・session の扱いをまとめて行う。
-fixture2=$tests_dir/fixtures/state-cli/v2-open-follow.json
+fixture2=$repo_dir/task-pipeline/scripts/fixtures/v2-open-follow.json
 id2=t-full
 
 [ -f "$fixture2" ] || { printf 'fixture not found: %s\n' "$fixture2" >&2; exit 1; }
