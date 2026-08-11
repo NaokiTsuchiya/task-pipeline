@@ -45,7 +45,7 @@ import {
 
 const SCRIPT_URL = new URL("./state.ts", import.meta.url);
 const REPO_ROOT = new URL("../../", import.meta.url);
-const FIXTURES_DIR = new URL("tests/fixtures/state-cli/", REPO_ROOT);
+const FIXTURES_DIR = new URL("fixtures/", import.meta.url);
 const CONTRACT_DOC = new URL(
   "task-pipeline/docs/state-cli-contract.md",
   REPO_ROOT,

@@ -22,7 +22,7 @@ set -u
 tests_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P) || exit 1
 repo_dir=$(CDPATH='' cd -- "$tests_dir/.." && pwd -P) || exit 1
 state_ts=$repo_dir/task-pipeline/scripts/state.ts
-fixture=$tests_dir/fixtures/state-cli/valid-watch-rebase.json
+fixture=$repo_dir/task-pipeline/scripts/fixtures/valid-watch-rebase.json
 
 [ -f "$state_ts" ] || { printf 'state.ts not found: %s\n' "$state_ts" >&2; exit 1; }
 [ -f "$fixture" ] || { printf 'fixture not found: %s\n' "$fixture" >&2; exit 1; }

@@ -34,13 +34,13 @@ import {
   type RunKind,
 } from "./state-model-v2.ts";
 
-import validLegacyLiveRaw from "../../tests/fixtures/state-cli/valid-legacy-live.json" with {
+import validLegacyLiveRaw from "./fixtures/valid-legacy-live.json" with {
   type: "json",
 };
-import validSkillExampleRaw from "../../tests/fixtures/state-cli/valid-skill-example.json" with {
+import validSkillExampleRaw from "./fixtures/valid-skill-example.json" with {
   type: "json",
 };
-import validWatchRebaseRaw from "../../tests/fixtures/state-cli/valid-watch-rebase.json" with {
+import validWatchRebaseRaw from "./fixtures/valid-watch-rebase.json" with {
   type: "json",
 };
 
