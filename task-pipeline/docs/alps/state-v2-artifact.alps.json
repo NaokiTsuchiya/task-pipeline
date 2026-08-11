@@ -1,0 +1,306 @@
+{
+  "alps": {
+    "title": "task-pipeline 状態モデル v2 — 領域 A (成果物) 従図",
+    "doc": "生成元: A_NODE_KEYS (state-transitions-v2-nodes.ts) / VERB_SPEC.a (state-transitions-v2-spec.ts)。手動編集禁止 — `deno run --allow-write task-pipeline/scripts/alps-v2.ts` で再生成する。 fix-ask/rebase-ask/attention サブ軸内の遷移 (fix-request 等) は着地ノードが VERB_SPEC からは一意に定まらないため辺を引いていない (task-pipeline/docs/alps-profiles-2026-08.md 参照)。",
+    "descriptor": [
+      {
+        "id": "none",
+        "type": "semantic",
+        "title": "none"
+      },
+      {
+        "id": "merged",
+        "type": "semantic",
+        "title": "merged"
+      },
+      {
+        "id": "withdrawn_asked_false",
+        "type": "semantic",
+        "title": "withdrawn(asked=false)",
+        "descriptor": [
+          {
+            "href": "#t-withdraw-asked"
+          }
+        ]
+      },
+      {
+        "id": "withdrawn_asked_true",
+        "type": "semantic",
+        "title": "withdrawn(asked=true)",
+        "descriptor": [
+          {
+            "href": "#t-withdraw-asked"
+          }
+        ]
+      },
+      {
+        "id": "open_follow_null",
+        "type": "semantic",
+        "title": "open(follow=null)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_auto_null_taken",
+        "type": "semantic",
+        "title": "open(auto,null,taken)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_auto_null_queued",
+        "type": "semantic",
+        "title": "open(auto,null,queued)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_auto_null_quiet",
+        "type": "semantic",
+        "title": "open(auto,null,quiet)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_auto_pending_taken",
+        "type": "semantic",
+        "title": "open(auto,pending,taken)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_auto_pending_queued",
+        "type": "semantic",
+        "title": "open(auto,pending,queued)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_auto_pending_quiet",
+        "type": "semantic",
+        "title": "open(auto,pending,quiet)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_auto_taken_taken",
+        "type": "semantic",
+        "title": "open(auto,taken,taken)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_auto_taken_queued",
+        "type": "semantic",
+        "title": "open(auto,taken,queued)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_auto_taken_quiet",
+        "type": "semantic",
+        "title": "open(auto,taken,quiet)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_human_null_taken",
+        "type": "semantic",
+        "title": "open(human,null,taken)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_human_null_queued",
+        "type": "semantic",
+        "title": "open(human,null,queued)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_human_null_quiet",
+        "type": "semantic",
+        "title": "open(human,null,quiet)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_human_pending_taken",
+        "type": "semantic",
+        "title": "open(human,pending,taken)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_human_pending_queued",
+        "type": "semantic",
+        "title": "open(human,pending,queued)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_human_pending_quiet",
+        "type": "semantic",
+        "title": "open(human,pending,quiet)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_human_taken_taken",
+        "type": "semantic",
+        "title": "open(human,taken,taken)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_human_taken_queued",
+        "type": "semantic",
+        "title": "open(human,taken,queued)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "open_human_taken_quiet",
+        "type": "semantic",
+        "title": "open(human,taken,quiet)",
+        "descriptor": [
+          {
+            "href": "#t-merged"
+          },
+          {
+            "href": "#t-withdraw"
+          }
+        ]
+      },
+      {
+        "id": "t-merged",
+        "type": "unsafe",
+        "rt": "#merged",
+        "title": "merged",
+        "doc": "19 件の from → merged"
+      },
+      {
+        "id": "t-withdraw",
+        "type": "unsafe",
+        "rt": "#withdrawn_asked_false",
+        "title": "withdraw",
+        "doc": "19 件の from → withdrawn(asked=false)"
+      },
+      {
+        "id": "t-withdraw-asked",
+        "type": "unsafe",
+        "rt": "#withdrawn_asked_true",
+        "title": "withdraw-asked",
+        "doc": "2 件の from → withdrawn(asked=true)"
+      }
+    ]
+  }
+}
