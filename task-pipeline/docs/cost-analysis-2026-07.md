@@ -271,6 +271,16 @@ gh-53 の plan FAIL は、このタスクが直そうとしていた「fail-open
 - 模擬 A/B/C: 本文 §4 の構成。リポジトリと成果物はセッションの scratchpad に生成
   (恒久保存はしていない)。模擬の各エージェント transcript は Arm A/C が Agent tool の
   `tasks/<agentId>.output`、Arm B が workflow の `subagents/workflows/<runId>/agent-*.jsonl`。
+- 役割 × フェーズ × attempt 別の課金換算 (verifier の SendMessage 再開・executor のフェーズ進行/
+  同一フェーズ再実行を体ごとの時系列分割で正しく按分する):
+  `docs/scripts/aggregate-role-phase-cost.py <session.jsonl> [--model M]`。
+  **整合性の確認手順**: 出力の1行のうち、同じ体 (agentId) から複数セグメントに分かれていない行
+  (attempt が1回しか出現しない verifier、フェーズが1回しか出現しない executor、
+  adapter/triage/pr-watcher の通常呼び出し) は、その体の transcript
+  (`<セッションディレクトリ>/subagents/agent-<agentId>.jsonl`) に `aggregate-orchestrator-usage.py`
+  を直接通して得た `weighted` と一致する。体を跨いだ行 (verifier の再検証・executor の複数フェーズ) は、
+  同じ体の行をすべて合算した値が直接実行の値と一致する。
+  集計できなかった呼び出しの件数は出力末尾の `uncountable=<n>` に必ず出る (0件でも出る)。
 
 ## 10. レバー2 の実測と適用結果 (2026-07-29 追記)
 

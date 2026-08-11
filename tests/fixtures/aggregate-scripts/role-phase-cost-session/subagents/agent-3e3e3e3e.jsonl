@@ -1,0 +1,4 @@
+{"type": "assistant", "timestamp": "2026-08-10T08:55:00Z", "message": {"id": "m-e3-1", "model": "claude-test-model", "usage": {"input_tokens": 300, "output_tokens": 60}, "content": []}}
+{"type": "assistant", "timestamp": "2026-08-10T08:57:00Z", "message": {"id": "m-e3-extra", "model": "claude-test-model", "usage": {"input_tokens": 1000, "output_tokens": 200}, "content": []}}
+{"type": "assistant", "timestamp": "2026-08-10T09:00:00Z", "message": {"id": "m-e3-2", "model": "claude-test-model", "usage": {"input_tokens": 100, "output_tokens": 20}, "content": []}}
+{"type": "assistant", "timestamp": "2026-08-10T09:30:00Z", "message": {"id": "m-e3-3", "model": "claude-test-model", "usage": {"input_tokens": 50, "output_tokens": 10}, "content": []}}
