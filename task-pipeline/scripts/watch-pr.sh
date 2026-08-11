@@ -14,6 +14,14 @@
 # 基点状態 | コメント数 | レビュー数 | スレッド総数 | 未解決スレッド数 (取得窓内) | 直近更新時刻。
 # GraphQL 1 回で全部取れるので 1 周 1 リクエスト。
 #
+# レビュー・レビューコメントのうち **下書き (state=PENDING。UI の "Start a review" 後、Submit
+# review の前) は署名から除く**。下書きとそのコメントは、その下書きの作成者本人の認証では
+# GraphQL に返る — ソロ開発では gh の認証主体とレビュアーが同一人物なので、素のまま数えると
+# レビュアーが書いている途中で追従が起き、まだ送信していない指摘に対して修正と push が走る。
+# 除外はコメント/レビュー単位であってスレッド単位ではない (送信済みコメントを含むスレッドに
+# 下書きの返信が足されただけでは動かず、そのスレッド自体は署名に残り続ける)。送信された瞬間
+# (PENDING -> SUBMITTED) は件数か直近更新時刻のどちらかが必ず動くので、従来どおり検知される。
+#
 # 署名にフィールドを足すと、既に張られている旧フォーマットの watch.sig との初回比較は必ず
 # 不一致になる (フィールド数が違うので当然)。これはアップグレード直後に 1 回だけ catch-up 相当の
 # 空観測を招くが、実害は無い (指摘があれば拾えるし、無ければ `clean`/`wait` で終わるだけ) ので
@@ -32,6 +40,9 @@
 #     100 を超えるとき、最も古い側のスレッドの resolve/unresolve は totalCount が動かない
 #     ため検知できない (そのスレッド自体の新規投稿は totalCount で拾える — 検知できないのは
 #     投稿より後で起きる resolve/unresolve だけ)。
+#   - 下書きの除外は totalCount からの引き算 (窓内で見えた下書きの数を引く) で行うため、
+#     取得窓の外にある下書きは引けず、送信済みとして数えられたままになる。下書きは常に
+#     最新側にあるので実際上は窓内に入る。
 #
 # 終了コード:
 #   0  変化を検知した (stdout に旧→新の署名)
@@ -64,8 +75,8 @@ query='query($owner:String!,$repo:String!,$number:Int!){
   repository(owner:$owner,name:$repo){ pullRequest(number:$number){
     state headRefOid mergeable mergeStateStatus
     comments(last:50){totalCount nodes{updatedAt}}
-    reviews(last:50){totalCount nodes{updatedAt}}
-    reviewThreads(last:100){totalCount nodes{isResolved comments(last:20){nodes{updatedAt}}}}
+    reviews(last:50){totalCount nodes{updatedAt state}}
+    reviewThreads(last:100){totalCount nodes{isResolved comments(last:20){nodes{updatedAt state}}}}
     commits(last:1){nodes{commit{statusCheckRollup{state}}}}
   }}
 }'
@@ -83,18 +94,23 @@ query='query($owner:String!,$repo:String!,$number:Int!){
 # 同じ「一過性/無関心な値を確定済みの一方の帰結と同じ扱いに畳む」考え方。mergeStateStatus の
 # DIRTY (コンテンツ衝突) は mergeable=CONFLICTING 側で既に拾えるので、ここでの関心事
 # (基点遅れ = BEHIND) 以外は区別しない。
-jq_signature='.data.repository.pullRequest | [
+# 下書きの除外は totalCount からの引き算で行う。窓内のノードから数え直すと、窓の外で
+# 起きた新規投稿 (totalCount でしか見えない) を落としてしまう。
+# `state` が無い応答 (このクエリより古い形) は送信済み扱いに倒れる。
+jq_signature='def has_submitted: [.comments.nodes[] | select(.state != "PENDING")] | length > 0;
+.data.repository.pullRequest | [
   .state,
   .headRefOid,
   (.commits.nodes[0].commit.statusCheckRollup.state // "PENDING"),
   (if .mergeable == "CONFLICTING" then "CONFLICTING" else "MERGEABLE" end),
   (if .mergeStateStatus == "BEHIND" then "BEHIND" else "CLEAN" end),
   (.comments.totalCount | tostring),
-  (.reviews.totalCount | tostring),
-  (.reviewThreads.totalCount | tostring),
-  ([.reviewThreads.nodes[] | select(.isResolved | not)] | length | tostring),
-  ([.comments.nodes[].updatedAt, .reviews.nodes[].updatedAt,
-    .reviewThreads.nodes[].comments.nodes[].updatedAt] | max // "-")
+  ((.reviews.totalCount - ([.reviews.nodes[] | select(.state == "PENDING")] | length)) | tostring),
+  ((.reviewThreads.totalCount - ([.reviewThreads.nodes[] | select(has_submitted | not)] | length)) | tostring),
+  ([.reviewThreads.nodes[] | select(.isResolved | not) | select(has_submitted)] | length | tostring),
+  ([.comments.nodes[].updatedAt,
+    (.reviews.nodes[] | select(.state != "PENDING") | .updatedAt),
+    (.reviewThreads.nodes[].comments.nodes[] | select(.state != "PENDING") | .updatedAt)] | max // "-")
 ] | join("|")'
 
 signature() {

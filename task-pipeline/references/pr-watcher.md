@@ -112,13 +112,13 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
      repository(owner:$owner,name:$repo){ pullRequest(number:$number){
        reviewDecision
        reviewThreads(last:100){nodes{isResolved isOutdated
-         comments(last:20){nodes{databaseId author{login} path line url body updatedAt}}}}
+         comments(last:20){nodes{databaseId author{login} path line url body updatedAt state}}}}
        reviews(last:50){nodes{databaseId state author{login} url body updatedAt}}
        comments(last:50){nodes{databaseId author{login} url body updatedAt}}
      }}}' -F owner=<owner> -F repo=<repo> -F number=<番号>
    ```
 
-   **取得窓は署名側 (`~/.claude/skills/task-pipeline/scripts/watch-pr.sh` の `reviewThreads(last:100)` を含む実クエリ、61-63 行) が変化を検知しうる範囲に合わせてある。狭めてはならない。** 署名は PR 直下コメント `last:50` / レビュー `last:50` / スレッド `last:100` × スレッド内コメント `last:20` の updatedAt と件数を見ており、ここを狭めると**署名は動いたのに観測に載らない変化**が生まれ、`clean` 判定でその変化だけが消費される (署名は先に進むので、同じ指摘が再び検知されることはない)。とくに**スレッド内コメントは新しい側 (`last`) を取ること** — 古い側 5 件だけでは、6 件以上に育ったスレッドへの新しい返信が丸ごと見えない。
+   **取得窓は署名側 (`~/.claude/skills/task-pipeline/scripts/watch-pr.sh` の `reviewThreads(last:100)` を含む実クエリ、77-79 行) が変化を検知しうる範囲に合わせてある。狭めてはならない。** 署名は PR 直下コメント `last:50` / レビュー `last:50` / スレッド `last:100` × スレッド内コメント `last:20` の updatedAt と件数を見ており、ここを狭めると**署名は動いたのに観測に載らない変化**が生まれ、`clean` 判定でその変化だけが消費される (署名は先に進むので、同じ指摘が再び検知されることはない)。とくに**スレッド内コメントは新しい側 (`last`) を取ること** — 古い側 5 件だけでは、6 件以上に育ったスレッドへの新しい返信が丸ごと見えない。
 
    残余: 署名側の窓の**外**は観測にも載らないが、署名も動かないので「検知されたのに観測されない」にはならない — PR 直下コメント 51 件目以降・レビュー 51 件目以降・スレッド内 21 件目以降 (いずれも古い側) の本文編集 (新規投稿はいずれも totalCount で拾えるので、これは編集に限った残余である) と、スレッド総数が 100 を超えるときの**最も古い側**のスレッドの resolve/unresolve (そのスレッド自体の新規投稿は totalCount で拾える) がこれに当たる。これは署名側の窓の問題なので、このファイルの取得窓では塞げない。
 
@@ -127,6 +127,7 @@ verdict の割り当て: actionable な指摘か CI 失敗があれば `fix`。�
    絞り込み:
 
    - `isResolved` が真のスレッドは落とす (解決済み)。`isOutdated` は落とさない (指摘自体は生きていることがある)。
+   - **`state` が `PENDING` のコメント/レビューは落とす** (レビュアーが書いている途中の下書きで、まだ送信されていない)。actionable・`questions`・「要確認」のいずれにも入れない。下書きはその作成者本人の認証では GraphQL に返るので、ソロ開発 (PR の author = レビュアー = `gh` の認証主体) では必ず観測に現れる。**落とすのはそのコメント/レビュー 1 件だけで、スレッドごとではない** — 送信済みコメントを含むスレッドに下書きの返信が足されているときは、送信済みの側は従来どおり分類する。送信されれば `state` は `SUBMITTED` になり、署名も動いて次の観測が来るので取りこぼさない。
    - **id が `handled` にあるものは落とす** (前の周回で対応済み)。id は `rc-<databaseId>` (スレッド内コメント) / `ic-<databaseId>` (PR 直下のコメント) / `rv-<databaseId>` (レビュー本文) とする。
    - **`<!-- task-pipeline` マーカーを含むコメントは落とす** (パイプライン自身が投稿した対応報告)。**author では落とさない** — ソロ開発では PR の author (パイプラインを回している本人) がそのままレビュアーなので、author で切ると本人の指摘が全部消える。bot も落とさない — lint / レビュー bot の指摘は CI 失敗と同じく直す価値がある。
    - 承認・「LGTM」・雑談・すでに答えの出ている質問は actionable ではない。**具体的な変更要求と、指摘された不具合だけ** を actionable にする。`state` が `CHANGES_REQUESTED` のレビュー本文は原則 actionable。

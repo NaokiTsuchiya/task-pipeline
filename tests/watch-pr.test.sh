@@ -312,6 +312,84 @@ _detail=
 [ "$(call_count "$resp")" = 3 ] || _detail="$_detail call_count=$(call_count "$resp") (want 3)"
 if [ -z "$_detail" ]; then ok "W17 UNKNOWN への一過性の遷移 → signature 不変 (AC4)"; else ng "W17 UNKNOWN への一過性の遷移 → signature 不変 (AC4)" "$_detail"; fi
 
+# --- W18〜W23: 下書き (state:PENDING) のレビュー・レビューコメント ---------------------
+# 下書きは作成者本人の認証では GraphQL に返るので、素の件数・updatedAt に混じる。W18〜W20 は
+# 「下書きが増えても署名が動かない」、W21〜W23 は「その下書きが送信されたら動く」を見る。
+# 送信済みの中身 (PR 直下コメント 2 件・レビュー 3 件・スレッド 1 本) は 6 ケースで共通。
+# $1=head sha $2=reviews.totalCount $3=reviews.nodes $4=reviewThreads.totalCount $5=同 nodes
+draft_body() {
+    printf '{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"%s","comments":{"totalCount":2,"nodes":[{"updatedAt":"2026-05-01T00:00:00Z"}]},"reviews":{"totalCount":%s,"nodes":%s},"reviewThreads":{"totalCount":%s,"nodes":%s},"commits":{"nodes":[{"commit":{"statusCheckRollup":{"state":"SUCCESS"}}}]}}}}}' "$1" "$2" "$3" "$4" "$5"
+}
+rv_sent='[{"updatedAt":"2026-05-02T00:00:00Z","state":"COMMENTED"}]'
+rv_sent_draft='[{"updatedAt":"2026-05-02T00:00:00Z","state":"COMMENTED"},{"updatedAt":"2026-06-09T00:00:00Z","state":"PENDING"}]'
+rv_sent_sent='[{"updatedAt":"2026-05-02T00:00:00Z","state":"COMMENTED"},{"updatedAt":"2026-06-09T00:00:00Z","state":"SUBMITTED"}]'
+th_sent='{"isResolved":false,"comments":{"nodes":[{"updatedAt":"2026-05-03T00:00:00Z","state":"SUBMITTED"}]}}'
+th_draft_only='{"isResolved":false,"comments":{"nodes":[{"updatedAt":"2026-06-09T00:00:00Z","state":"PENDING"}]}}'
+th_draft_sent='{"isResolved":false,"comments":{"nodes":[{"updatedAt":"2026-06-09T00:00:00Z","state":"SUBMITTED"}]}}'
+th_mixed_draft='{"isResolved":false,"comments":{"nodes":[{"updatedAt":"2026-05-03T00:00:00Z","state":"SUBMITTED"},{"updatedAt":"2026-06-09T00:00:00Z","state":"PENDING"}]}}'
+th_mixed_sent='{"isResolved":false,"comments":{"nodes":[{"updatedAt":"2026-05-03T00:00:00Z","state":"SUBMITTED"},{"updatedAt":"2026-06-09T00:00:00Z","state":"SUBMITTED"}]}}'
+
+# 署名が動かないことを見る 3 ケース (W7/W14/W17 と同じ max=2 interval=1 の 3 フェッチ型。
+# base = 下書きが増える前、以降 2 回は増えた後を返し、base と同じ署名のまま timeout するはず)。
+# $1=ケース id $2=task 名 $3=旧応答 $4=新応答 $5=期待署名 $6=見出し
+check_quiet() {
+    _resp=$(mkresp "$3" "$4" "$4")
+    _out=$(GH_MOCK_RESPONSES=$_resp bash "$watch_sh" "$pr_url" "$2" 1 2 2>"$work/.${2}err")
+    _rc=$?
+    _want="PR-WATCH $2 timeout $5"
+    _detail=
+    [ "$_rc" = 2 ] || _detail="exit=$_rc (want 2) err=$(flat "$(cat "$work/.${2}err")")"
+    [ "$_out" = "$_want" ] || _detail="$_detail got=[$(flat "$_out")] want=[$(flat "$_want")]"
+    [ "$(call_count "$_resp")" = 3 ] || _detail="$_detail call_count=$(call_count "$_resp") (want 3)"
+    if [ -z "$_detail" ]; then ok "$1 $6"; else ng "$1 $6" "$_detail"; fi
+}
+
+# 署名が動くことを見る 3 ケース (W5/W9 と同じ 2 フェッチ型)。
+# $1=ケース id $2=task 名 $3=旧応答 $4=新応答 $5=旧署名 $6=新署名 $7=見出し
+check_changed() {
+    _resp=$(mkresp "$3" "$4")
+    _out=$(GH_MOCK_RESPONSES=$_resp bash "$watch_sh" "$pr_url" "$2" 1 10 2>"$work/.${2}err")
+    _rc=$?
+    _want="PR-WATCH $2 changed $5 -> $6"
+    _detail=
+    [ "$_rc" = 0 ] || _detail="exit=$_rc (want 0) err=$(flat "$(cat "$work/.${2}err")")"
+    [ "$_out" = "$_want" ] || _detail="$_detail got=[$(flat "$_out")] want=[$(flat "$_want")]"
+    [ "$(call_count "$_resp")" = 2 ] || _detail="$_detail call_count=$(call_count "$_resp") (want 2)"
+    if [ -z "$_detail" ]; then ok "$1 $7"; else ng "$1 $7" "$_detail"; fi
+}
+
+# W18/W21: インラインコメントを伴わない下書きレビュー本文が 1 件増える → 送信される。
+sig18='OPEN|sha-w18|SUCCESS|MERGEABLE|CLEAN|2|3|1|1|2026-05-03T00:00:00Z'
+sig21='OPEN|sha-w18|SUCCESS|MERGEABLE|CLEAN|2|4|1|1|2026-06-09T00:00:00Z'
+old18=$(draft_body sha-w18 3 "$rv_sent" 1 "[$th_sent]")
+draft18=$(draft_body sha-w18 4 "$rv_sent_draft" 1 "[$th_sent]")
+sent18=$(draft_body sha-w18 4 "$rv_sent_sent" 1 "[$th_sent]")
+check_quiet W18 task18 "$old18" "$draft18" "$sig18" "下書きレビューが 1 件増えても署名不変 (要求1)"
+check_changed W21 task21 "$draft18" "$sent18" "$sig18" "$sig21" "下書きレビューの送信 (PENDING→SUBMITTED) → changed (要求3)"
+
+# W19/W22: 下書きだけで構成される新規スレッドが増える → そのコメントが送信される。
+# 下書きスレッドも isResolved:false で返るので、未解決スレッド数 (署名の 9 番目) に
+# 混入しないことを、期待署名が 1 のままであることで見る。
+sig19='OPEN|sha-w19|SUCCESS|MERGEABLE|CLEAN|2|3|1|1|2026-05-03T00:00:00Z'
+sig22='OPEN|sha-w19|SUCCESS|MERGEABLE|CLEAN|2|3|2|2|2026-06-09T00:00:00Z'
+old19=$(draft_body sha-w19 3 "$rv_sent" 1 "[$th_sent]")
+draft19=$(draft_body sha-w19 3 "$rv_sent" 2 "[$th_sent,$th_draft_only]")
+sent19=$(draft_body sha-w19 3 "$rv_sent" 2 "[$th_sent,$th_draft_sent]")
+check_quiet W19 task19 "$old19" "$draft19" "$sig19" "下書きだけの新規スレッドが増えても署名不変 (要求1)"
+check_changed W22 task22 "$draft19" "$sent19" "$sig19" "$sig22" "下書きスレッドの送信 → changed (要求3)"
+
+# W20/W23: 混在スレッド。送信済みコメントを含むスレッドに下書きの返信が足される → 送信される。
+# 期待署名のスレッド総数 (8 番目) と未解決数 (9 番目) が旧と同じ 1|1 であることが、
+# 「下書きの巻き添えでスレッドごと落としていない」ことの証拠になる (要求4)。
+# W23 は件数がどちらも動かず、直近更新時刻だけで検知される経路である。
+sig20='OPEN|sha-w20|SUCCESS|MERGEABLE|CLEAN|2|3|1|1|2026-05-03T00:00:00Z'
+sig23='OPEN|sha-w20|SUCCESS|MERGEABLE|CLEAN|2|3|1|1|2026-06-09T00:00:00Z'
+old20=$(draft_body sha-w20 3 "$rv_sent" 1 "[$th_sent]")
+draft20=$(draft_body sha-w20 3 "$rv_sent" 1 "[$th_mixed_draft]")
+sent20=$(draft_body sha-w20 3 "$rv_sent" 1 "[$th_mixed_sent]")
+check_quiet W20 task20 "$old20" "$draft20" "$sig20" "混在スレッドへの下書き返信で署名不変・スレッドは残る (要求1・4)"
+check_changed W23 task23 "$draft20" "$sent20" "$sig20" "$sig23" "混在スレッドの下書き返信の送信 → changed (要求3)"
+
 printf '\n%s\n' "----------------------------------------"
 printf 'PASS %s / FAIL %s / SKIP %s\n' "$pass" "$fail" "$skipped"
 [ "$fail" -eq 0 ] || exit 1
