@@ -10,6 +10,7 @@
 
 | skill | 内容 |
 |---|---|
+| [task-cost](task-cost/SKILL.md) | task-pipeline のセッション transcript から、役割 (adapter/triage/verifier/executor/pr-watcher) × フェーズ × attempt (verifier の初回/再検証) 別の課金換算コスト (weighted・実費) を 1 コマンドで出す。 |
 | [task-pipeline](task-pipeline/SKILL.md) | 承認済みタスクの自動消化パイプライン。 |
 | [task-prep](task-prep/SKILL.md) | 要望を task-pipeline が消化できる issue 群に変える準備 skill。 |
 | [task-scout](task-scout/SKILL.md) | ready の在庫が尽き、トラッカー上の open issue にも次の手がかりが無いときに、コードベースの実査から「まだ issue になっていないやるべきこと」を根拠付きの候補として出す偵察 skill。 |

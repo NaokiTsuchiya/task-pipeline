@@ -1,0 +1,1 @@
+{"type": "assistant", "timestamp": "2026-08-10T12:00:00Z", "message": {"id": "m-a4-1", "model": "claude-test-model", "usage": {"input_tokens": 80, "output_tokens": 16}, "content": []}}
