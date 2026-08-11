@@ -74,7 +74,7 @@ state.json への**書き込み**は、目的に対応する verb を CLI (`~/.c
 - **`verdict-path` — 判定 JSON の書き込み先はこの verb が返す。** 検証ゲート (下記タスク実行の手順 6) を起動する直前に 1 回呼ぶ: `state.ts verdict-path --state-dir <dir> --id <id>`。読み取り専用で state.json を 1 バイトも変えない。返る `path` をそのまま verifier に渡す。**フェーズ名・試行回数・修正/解決サイクルの連番からファイル名を組み立てる規則はこの手順書には無い** — すべて CLI の内側にある (契約は `docs/state-cli-contract.md` の `verdict-path` 節)。
 - **`history` に残す/追記する、という記述は本 SKILL.md 全域で `history-append --line <text>` を呼ぶことを指す** (個々の箇所で verb 名を都度書き足さない)。
 - **verb がエラーを返したときの扱い** (エラー時は state.json が不変なので、いずれの分岐も安全に選べる): **`lock` (11、取得失敗)** → CLI は既定回数リトライ済みなので、これ以上再試行せずそのイテレーションでは書き込みを諦め、次の wakeup に回す。**`conflict` (15、前提違反 — 対象は存在するが `progress`/`run`/`session`/`artifact.*` 等が想定と違う)** → `state.ts get` で読み直し、判断の前提が変わっていないか確認したうえで、処理をやり直すか破棄する。**`schema` (12、state.json 自体が不正)** → パイプライン全体が動けない状態なので再試行し続けず、そのタスク (無ければパイプライン全体) を BLOCKED 相当として報告する。**それ以外 (`usage`/`missing`/`permission`)** → 呼び出し側の不整合か環境側の権限不備なので、再試行せず実際のエラー出力を添えて報告する。
-- 排他のリトライ回数・stale 判定の閾値・heartbeat の 90 分/1440 分がなぜその値かなど、CLI の内部規則の**理由**は `docs/state-machine.md` を参照 (ここには書かない)。
+- 排他のリトライ回数・stale 判定の閾値・heartbeat の生存判定/掃除閾値がなぜその値かなど、CLI の内部規則の**理由**は `docs/state-machine.md` を参照 (ここには書かない)。数値は `docs/state-cli-contract.md` の「heartbeat の契約」節にある。
 
 ## state.json スキーマ
 
@@ -104,7 +104,7 @@ state.json への**書き込み**は、目的に対応する verb を CLI (`~/.c
   `{"attention": "auto | {\"human\": \"fix_limit|errors|manual\"}", "asks": {"fix": null, "rebase": null}, "ledger": {"handled": [], "fix_attempts": 0, "review_only": [], "answered": []}, "probe": {"proc": null, "proc_started_at": null, "sig": null, "head": null, "ci": null, "checked_at": null, "errors": 0, "note": null}}`
   - `attention` = **その PR を機械に委ねているか、人待ちか**。`asks` = **未消費の要求** (`fix` はレビュー指摘への対応要求、`rebase` は載せ直し/解消の要求)。`ledger` = **PR の寿命全体の記憶** (対応済み id・押し直し回数・要確認・回答済み)。`probe` = **観測キャッシュとバックグラウンド観測プロセスのリース**。
   - **追従の対象は導出する** (「追従中」という主張をどこにも保存しない): `progress == resting` かつ `artifact.state == open` かつ `follow` が非 null かつ `attention == auto` かつ `asks.fix` が null かつ `asks.rebase` が queued でない、のときだけ追従する (設計 1.3 節)。
-- `completed` は **retire で queue を離れた** タスクの控え (`{id, done_at}`)。トラッカーの反映遅延で `list` に一瞬再登場したときの照合先で、24 時間より古い控えは `retire` のたびに掃除される (設計 2.5 節)。
+- `completed` は **retire で queue を離れた** タスクの控え (`{id, done_at}`)。トラッカーの反映遅延で `list` に一瞬再登場したときの照合先で、古い控えは `retire` のたびに掃除される (閾値は `docs/state-cli-contract.md` の `retire` 節。設計 2.5 節)。
 - **status という単一の語はもう無い。** 報告やトラッカーの語彙 (`in_progress` / `in_review` / `done`) は外向きの語であって、state.json の座標ではない。対応は `running` → in_progress、`resting × open` → in_review、`resting × merged` (と `completed`) → done。
 
 - フェーズ列はタスクの `gate` により 2 形態ある。`full` (既定): **research → plan → implement → report**。`light`: **research+plan → implement → report** (research と plan を 1 フェーズに統合し、検証ゲートも 1 回になる)。`gate` はタスク実行手順 1 で、タスクファイルの frontmatter から機械的に判定する — **宣言が無い・判定できないタスクは常に `full`** で、一度決めたら以降変えない。宣言の妥当性は統合ゲートの verifier が再判定する (verifier.md の research+plan 節) — 覆されても gate とフェーズ列は巻き戻さず、full 相当の要求が統合ゲートでそのまま課される。`phase` とサブエージェントへの指示は必ずこれらの英語トークンを使う (統合フェーズは `research+plan` の 1 トークン)。**判定 JSON のパスは `state.ts verdict-path` が返す** — フェーズ名や試行回数からファイル名を組み立てない。どの `kind` の列でも最後に検証対象外の `finalize` が付く。`finish=pr` では、レビュー待ち (`resting × open`) になった後に `kind: pr_fix` の run (`phase: pr_fix` → `finalize`) が何度か追加で回ることがある (`playbooks/pr-follow.md`)。同じく `kind: rebase_fix` の run (`phase: rebase_fix` → `finalize`) が回ることもある (`playbooks/merge-recovery.md` の「解決サイクル」)。
@@ -157,7 +157,7 @@ state.json への書き込みはすべて上記「CLI (state.ts) の呼び出し
 1. アダプタサブエージェントに `list` を実行させる (プロンプト書式は下記「アダプタの呼び方」)。返るのは `{id, title}` のインデックスだけで、本文は `tasks/<id>.md` にある。**`queue` に `queued` / `running` で載っている id は常に候補から除く** (実行中・実行待ちのタスク)。`resting` / `blocked` で載っている id、および **`completed` に控えのある id** が一覧に混ざっていた場合、**その id は常に候補から除いたうえで**、次のように扱う (**ただし生きている他セッションが所有しているタスクは対象外** — 除いたままにして `relisted` にも足さない。相手が追従中の PR を持つタスクを、こちらの観測で承認へ差し戻さないため):
    - `relisted` に無い → `{"id": ..., "seen_at": <現在時刻>}` を足す。トラッカー側の除外の反映に遅延があるトラッカーでは、直前に片付けたタスクが 1 度だけ再登場することがあるため。
    - `relisted` に有り、`seen_at` から 10 分未満 → 何もしない (別セッションの `list` と数秒差で並んだだけかもしれず、まだ判定できない)。
-   - `relisted` に有り、`seen_at` から 10 分以上 → 遅延ではなくユーザーがトラッカー側で復帰させたものなので、**まだ queue に居るタスク** (`resting` / `blocked`) なら `state.ts restore --id <id>` を呼ぶ (`progress: queued` に戻し、`run` / `blocked_reason` / `session` を初期値に、`probe` のリースを外し、**`worktree` / `base` / `artifact` はそのまま残し**、`relisted` から消す、を単一の書き込みで行う。周回データ [`fix_attempts` / `review_only` / `answered` / `asks` / `attention`] のリセットは次の `claim` が行うので、ここでは何もしない)。観測プロセスが**自分の起動したもので**生きていれば止める。
+   - `relisted` に有り、`seen_at` から 10 分以上 → 遅延ではなくユーザーがトラッカー側で復帰させたものなので、**まだ queue に居るタスク** (`resting` / `blocked`) なら `state.ts restore --id <id>` を呼ぶ (効果は `docs/state-cli-contract.md` の `restore` 節。**「`worktree` / `base` / `artifact` はそのまま残る」**)。観測プロセスが**自分の起動したもので**生きていれば止める。
      - **`completed` に控えのある id が 10 分以上残っていた場合は `restore` を使わない** — その id は既に queue を離れており (回収済み)、マージ済みの成果の上に来た新しい要求とみなすのが正しい。**通常の新規候補として手順 2 以降の承認に入れる** (設計 2.5 節)。
      - **`worktree` / `base` / `artifact` を残すのは、worktree もブランチも PR も回収まで消さないためである** (捨てる弊害は `docs/state-machine.md`)。
      - 復帰したタスクは承認 UI に出さず、そのまま `queued` として扱う — **ユーザーがトラッカー側で戻した操作そのものが承認である**。復帰させたら**この承認フローはそこで終える** (手順 2〜4 に進まない)。下の `relisted` の掃除だけ済ませて、このイテレーションでそのタスクの実行に入る。同時に複数が復帰していたら 1 件だけ実行し、残りは `queued` のまま次のイテレーションに回す。
@@ -210,7 +210,7 @@ Return only what the adapter file specifies for this operation.
 
 ## タスク実行
 
-1. `state.ts claim --id <id> --session <自分の id>` を呼び (`progress: running`, `run: {kind: initial, gate: full, phase: research, attempts: 0}`, `session: <自分の id>` に更新する。前提は `progress==queued` — `conflict` ならそのタスクは既に別セッションに取られているので着手しない。**`follow` があれば周回データもここでリセットされる** [`fix_attempts→0` / `review_only`・`answered→[]` / `asks` 両方 null / `attention→auto` / `probe.sig→null`。`ledger.handled` だけは PR の寿命全体の記憶として残る] — 復帰したタスクを流し直したときに、前回対応済みのレビュー指摘が新しい findings として再浮上しないのはこのためである)、`runs/<id>/` を作る (`session` をここで主張するのは、worktree 作成と実行エージェント起動の間に他セッションがこのエントリを所有者なしと読むのを防ぐため)。アダプタで `mark <id> in_progress` する。この `mark` が `{"ok": false}` で**着手済みの兆候** (already assigned / already in progress) を返したら実行しない: `state.ts dequeue --id <id>` を呼んでタスクを queue から外して history に記録し、次のイテレーションへ進む (別のセッションか人が着手している — トラッカー側を正とする)。それ以外の `mark` 失敗は上記「アダプタの呼び方」のとおり続行する。`mark` の後、**タスクファイルに本文があるかを確かめる** (ask / auto 共通。`approve` の値で分けない):
+1. `state.ts claim --id <id> --session <自分の id>` を呼ぶ (効果は `docs/state-cli-contract.md` の `claim` 節。前提は `progress==queued` — `conflict` ならそのタスクは既に別セッションに取られているので着手しない。**`follow` があれば周回データもここでリセットされる** — 復帰したタスクを流し直したときに、前回対応済みのレビュー指摘が新しい findings として再浮上しないのはこのためである)、`runs/<id>/` を作る (`session` をここで主張するのは、worktree 作成と実行エージェント起動の間に他セッションがこのエントリを所有者なしと読むのを防ぐため)。アダプタで `mark <id> in_progress` する。この `mark` が `{"ok": false}` で**着手済みの兆候** (already assigned / already in progress) を返したら実行しない: `state.ts dequeue --id <id>` を呼んでタスクを queue から外して history に記録し、次のイテレーションへ進む (別のセッションか人が着手している — トラッカー側を正とする)。それ以外の `mark` 失敗は上記「アダプタの呼び方」のとおり続行する。`mark` の後、**タスクファイルに本文があるかを確かめる** (ask / auto 共通。`approve` の値で分けない):
    ```
    f=<tasks/<id>.md の絶対パス>
    [ -f "$f" ] && ! grep -qF 'この行がまだ残っているなら' "$f" \
@@ -266,7 +266,7 @@ Return only what the adapter file specifies for this operation.
        state.ts ship --id <id> --commits <n> [--ref <ref> --branch task-pipeline/<id> --tip <tip> --base <タスクの base>]
        ```
        - **引数の構成は `next` の `tasks[].finalize.ship` が返す** (`ref_kind` = `--ref` に渡すものの種類、`branch` / `base` = そのまま渡す値、`group_flags` = `--commits` が 1 以上のときにまとめて付けるフラグ)。`<n>` だけは git の観測なので自分で取る: `git -C <プロジェクトルート> rev-list --count <base>..<branch>`。**1 以上なら 4 つのグループフラグを全部付ける** (`ref`: `pr` なら PR URL、`commit` ならコミットハッシュ。`tip` は `git -C <プロジェクトルート> rev-parse <branch>`)。**0 なら 4 つとも省略する** (`finish=none`。契約は「4 つとも指定」か「4 つとも省略」のどちらかのみで、片側だけは `usage` になる)。
-       - この 1 回の書き込みが、v1 で 3 verb に分かれていた処理をまとめて行う: `progress → resting`、artifact のグループ欄の作成/更新 (**既存の `follow` は保持される** — 押し直しで `fix_attempts` や `handled` が失われる経路が無い)、`asks.fix` の消費 (対応した id を `ledger.handled` へ合流)、`asks.rebase` の消費、`probe.sig → null` (次の観測が catch-up になる)、`session` の扱い (追従が続くなら保持、そうでなければ null)。
+       - この 1 回の書き込みが、v1 で 3 verb に分かれていた処理をまとめて行う (効果は `docs/state-cli-contract.md` の `ship` 節)。既存の `follow` は保持されるので、押し直しで `fix_attempts` や `handled` が失われる経路は無い。
        - **後続の指示は応答から読む。** 経路の記憶で分岐しない:
          ```json
          {"ok": true, "id": "...", "notify": "initial|update|none", "mark": true|false, "fix_count": 2}
