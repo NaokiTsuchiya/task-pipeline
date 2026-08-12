@@ -20,13 +20,14 @@ Pause for the user only when the work genuinely requires them: a destructive or 
 
 ## 引数と場所
 
-- `$ARGUMENTS`: `<tracker> [source] [finish=none|commit|pr] [approve=ask|auto] [max_open=<N>] [rebase=auto|off] [max_tasks=<N>]` (例: `markdown ./TASKS.md finish=commit`、`gh ?label=ready finish=pr approve=auto`)。`/loop` 経由では毎イテレーション同じ引数で再起動される。
-  - tracker より後ろのトークンは、`finish=` / `approve=` / `max_open=` / `rebase=` / `max_tasks=` で始まるものがそれぞれの設定、それ以外が `source`。
+- `$ARGUMENTS`: `<tracker> [source] [finish=none|commit|pr] [approve=ask|auto] [max_open=<N>] [rebase=auto|off] [max_tasks=<N>] [review=<path>]` (例: `markdown ./TASKS.md finish=commit`、`gh ?label=ready finish=pr approve=auto`)。`/loop` 経由では毎イテレーション同じ引数で再起動される。
+  - tracker より後ろのトークンは、`finish=` / `approve=` / `max_open=` / `rebase=` / `max_tasks=` / `review=` で始まるものがそれぞれの設定、それ以外が `source`。
   - `approve` は承認の取り方。`ask` (省略時): 候補の上位から**ユーザーが 1 件選ぶ**。`auto`: **順位 1 位を自動で採る** (下記「承認」)。`auto` にすると人を待つ定常ポイントが無くなり、パイプラインは ready なタスクを上から消化し続ける — **トラッカー側の ready がそのまま唯一の人間ゲートになる**ので、`?label=ready` のような絞り込み無しで `auto` を使ってはならない。
   - `max_open` は**マージ待ちのまま溜めてよい自分の PR の本数** (既定 2)。この本数に達している間は新しいタスクを着手しない。ただし**上限に達している間も枯渇の判定と追従の打ち切りには到達する** (下記「ペーシングと枯渇」の停滞) — 到達しないと、誰もマージしない限り空の wakeup が無期限に続く。レビューが追いつかないまま PR だけが積み上がるのを防ぐための上限で、`finish=pr` のときだけ意味を持つ。
   - **`source` は省略できる。** その場合はアダプタ起動プロンプトの `source:` を空にして渡し、既定値の解釈はアダプタに委ねる (既定を持たないアダプタはエラーを返す)。state.json の `source` には与えられたまま (省略なら空文字) を記録する。
   - `finish` はタスク完了時のコード変更の扱い。`none` (省略時): working tree に未コミットで残す。`commit`: タスクごとに現在のブランチへコミット。`pr`: タスクごとにブランチを切り、コミット・push して PR を作成し、**以降その PR の CI とレビューコメントを追従する** (`playbooks/pr-follow.md`)。
   - `rebase` は**マージを回収した後に、まだレビュー待ちの自分の PR を新しい `origin/<base>` へ載せ直すか**。`auto` (省略時): ガードを全部通ったものだけ rebase して force push する (`playbooks/merge-recovery.md` の「残った PR を新しい基点へ載せ直す」)。`off`: 何もしない (基点が古いままの PR は人がリベースする)。`finish=pr` のときだけ意味を持つ。
+  - `review` は**プロジェクト固有のレビュー観点ファイルの置き場所** (既定: target project のルート直下の `TASK_PIPELINE_REVIEW.md`)。相対パスは target project のルート基準で解決する。実装フェーズ (`implement` / `pr_fix`) の実装と検証だけがこのファイルを読み、他のフェーズは読まない (`references/executor.md` / `references/verifier.md` の各節)。**この値は `state.ts next --config` には渡さない** — スケジューリングの判断材料ではなく、未知のキーとして `usage` エラーになる。渡す先は下記「タスク実行」手順 3・6 の起動プロンプトの `review file:` だけで、値には**解決済みの絶対パス**を書く (相対パスの基準を先方に推測させない)。
   - `max_tasks` は**このセッションで新しく着手して完了させてよいタスク数の上限** (既定: 無制限。省略時は現行の挙動を一切変えない)。到達したら、揮発資源ゼロの地点でループを止める — コンテキスト肥大を抑え、人が `/clear` してから再開できるようにするための引数 (`playbooks/max-tasks.md`)。
 - skill dir: `~/.claude/skills/task-pipeline/`
 - アダプタ定義: `~/.claude/skills/task-pipeline/references/adapters/<tracker>.md`。存在しなければ adapters/ を Glob で列挙して提示し、**ループを止めて** (`playbooks/depleted.md` の手順 2 と同じ) 終了する。
@@ -228,7 +229,7 @@ Return only what the adapter file specifies for this operation.
    ```
    You are the long-lived executor for exactly one task.
    Read ~/.claude/skills/task-pipeline/references/executor.md and follow it.
-   task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス>
+   task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス> / review file: <レビュー観点ファイルの絶対パス>
    finish mode: <none|commit|pr>
    Begin with phase "<phase>".
    ```
@@ -244,7 +245,7 @@ Return only what the adapter file specifies for this operation.
    ```
    You are a fresh, independent verifier.
    Read ~/.claude/skills/task-pipeline/references/verifier.md and follow it.
-   phase: <phase> / task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス> / verdict path: <verdict-path が返した path>
+   phase: <phase> / task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス> / verdict path: <verdict-path が返した path> / review file: <レビュー観点ファイルの絶対パス>
    Write the full verdict JSON to verdict path, then return only the minimal verdict JSON.
    ```
    - **未インストール環境のフォールバック**: `task-pipeline-verifier` は `agents/task-pipeline-verifier.md` を `~/.claude/agents/` に置いて初めて存在する (このリポジトリの `install.sh` が行う)。Agent tool が unknown agent type のエラーを返したら、**同じプロンプトのまま** `subagent_type: general-purpose` で起動し直し、history に「verifier agent type 未インストール — general-purpose で実行」を 1 行残す。skill 単体でも動く状態を保つためで、フォールバックしたこと自体は失敗ではない。
@@ -253,7 +254,7 @@ Return only what the adapter file specifies for this operation.
    ```
    Re-verify the same phase against the updated artifacts.
    Your previous verdict for this phase is at <前回の verdict path>.
-   phase: <phase> / task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス> / verdict path: <verdict-path が返した新しい path>
+   phase: <phase> / task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス> / verdict path: <verdict-path が返した新しい path> / review file: <レビュー観点ファイルの絶対パス>
    Write the full verdict JSON to the new verdict path, then return only the minimal verdict JSON.
    ```
    - `SendMessage` がエラーを返したら、**同じ内容で新規起動 (上記フレッシュ起動プロンプト) にフォールバックし**、history に「verifier 再開失敗 — フレッシュ起動」を1行残す (未インストール環境のフォールバックと同型のパターン)。
