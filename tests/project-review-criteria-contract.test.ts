@@ -1,8 +1,8 @@
-// tests/project-review-criteria-contract.test.ts — target project 側が置く
-// `TASK_PIPELINE_REVIEW.md` (プロジェクト固有のレビュー観点) を実装フェーズで読む規律が、
-// 実装する側 (task-pipeline/references/executor.md の `### implement` 節) と判定する側
-// (task-pipeline/references/verifier.md の `### implement` / `### pr_fix` 節) で
-// 揃っていることを固定する。
+// tests/project-review-criteria-contract.test.ts — プロジェクト固有のレビュー観点ファイル
+// (既定 `TASK_PIPELINE_REVIEW.md`、`review=<path>` で差し替え可) を実装フェーズで読む規律が、
+// 実装する側 (task-pipeline/references/executor.md の `### implement` 節)、判定する側
+// (task-pipeline/references/verifier.md の `### implement` / `### pr_fix` 節)、
+// 渡す側 (task-pipeline/SKILL.md の引数と起動プロンプト) で揃っていることを固定する。
 //
 //   deno test --allow-read tests/project-review-criteria-contract.test.ts
 //   deno task test
@@ -10,6 +10,8 @@
 // 判定を下すのは LLM なので、テストで押さえられるのは規則の文面までである。文面が痩せる
 // 壊れ方は動かしても気づけない — 片側にしか入っていなければ初回実装が必ず往復し、
 // 「無ければ何もしない」が落ちればファイルを置いていない全プロジェクトが FAIL しうる。
+// 置き場所の設定は 3 者に跨がるので、渡す側 (SKILL.md) が落ちれば読む側の既定に黙って
+// 落ちる (設定が無視される) — この片落ちも A12 で見る。
 //
 // 判定は必ず **節スコープ** で行う。ファイル全体を見るだけでは、対象フェーズ (implement /
 // pr_fix) の外へ規律が漏れた退行も、対象節から抜け落ちた退行も検知できない。B 群の回帰注入も
@@ -27,11 +29,14 @@ import {
 const REPO_ROOT = new URL("../", import.meta.url);
 const EXECUTOR_MD = new URL("task-pipeline/references/executor.md", REPO_ROOT);
 const VERIFIER_MD = new URL("task-pipeline/references/verifier.md", REPO_ROOT);
+const SKILL_MD = new URL("task-pipeline/SKILL.md", REPO_ROOT);
 
 const executorMd = Deno.readTextFileSync(EXECUTOR_MD);
 const verifierMd = Deno.readTextFileSync(VERIFIER_MD);
+const skillMd = Deno.readTextFileSync(SKILL_MD);
 
 const REVIEW_FILE = "TASK_PIPELINE_REVIEW.md";
+const REVIEW_TOKEN = "review file:";
 
 // 見出しの記号が 2 ファイルで違う (executor.md は `→`、verifier.md は `(`)。
 const executorImplement = sedRange(
@@ -91,6 +96,22 @@ const OUT_OF_SCOPE_SECTIONS: ReadonlyArray<readonly [string, string]> = [
   ],
 ];
 
+/** 起動プロンプトの行を、行を一意に識別できる語で引く。 */
+const LAUNCH_PROMPT_LINES: ReadonlyArray<readonly [string, string]> = [
+  [
+    "executor 起動 (SKILL.md 手順 3)",
+    "task: <tasks/<id>.md の絶対パス> / run dir:",
+  ],
+  [
+    "verifier 起動 (SKILL.md 手順 6)",
+    "verdict path: <verdict-path が返した path>",
+  ],
+  [
+    "verifier 再開 (SKILL.md 手順 6)",
+    "verdict path: <verdict-path が返した新しい path>",
+  ],
+];
+
 /** 1 行の中で複数の語が同時に現れるか (別々の行に散っている記述を通さない)。 */
 function hasLineWithAll(range: string, needles: readonly string[]): boolean {
   return range.split("\n").some((line) =>
@@ -121,14 +142,11 @@ Deno.test("A0 3 つの対象範囲と対象外 10 節が期待どおり抽出で
     "verifier.md の pr_fix 範囲が抽出できない",
   );
   for (const [name, section] of OUT_OF_SCOPE_SECTIONS) {
-    assertOk(
-      section.split("\n").length > 2,
-      `対象外節が抽出できない: ${name}`,
-    );
+    assertOk(section.split("\n").length > 2, `対象外節が抽出できない: ${name}`);
   }
 });
 
-Deno.test("A1 verifier.md の implement 節に TASK_PIPELINE_REVIEW.md を読む記述がある", () => {
+Deno.test("A1 verifier.md の implement 節にレビュー観点ファイルを読む記述がある", () => {
   assertOk(
     hasLineWithAll(verifierImplement, [REVIEW_FILE, "があれば読み"]),
     "見つからない",
@@ -142,7 +160,7 @@ Deno.test("A2 verifier.md の pr_fix 節にも同じ読み込みを適用する�
   );
 });
 
-Deno.test("A3 executor.md の implement 節に TASK_PIPELINE_REVIEW.md を読む記述がある", () => {
+Deno.test("A3 executor.md の implement 節にレビュー観点ファイルを読む記述がある", () => {
   assertOk(
     hasLineWithAll(executorImplement, [REVIEW_FILE, "があれば読み"]),
     "見つからない",
@@ -166,7 +184,7 @@ Deno.test("A5 executor.md の implement 節にも不在時は何もしない旨�
   );
 });
 
-Deno.test("A6 verifier.md の implement 節に required_fixes の前置きリテラルがある", () => {
+Deno.test("A6 verifier.md の implement 節に required_fixes の前置きリテラル (既定のファイル名) がある", () => {
   assertOk(
     containsFixed(verifierImplement, `\`${REVIEW_FILE}:\``),
     "見つからない",
@@ -182,7 +200,7 @@ Deno.test("A7 対象外フェーズの節に TASK_PIPELINE_REVIEW への言及�
   }
 });
 
-Deno.test("A8 読む位置がルート直下と同じ行で示されている", () => {
+Deno.test("A8 既定の置き場所がルート直下と同じ行で示されている", () => {
   for (
     const [name, range] of [
       ["verifier.md implement", verifierImplement],
@@ -191,7 +209,7 @@ Deno.test("A8 読む位置がルート直下と同じ行で示されている", 
   ) {
     assertOk(
       hasLineWithAll(range, [REVIEW_FILE, "ルート"]),
-      `位置がルートと明示されていない: ${name}`,
+      `既定の位置がルートと明示されていない: ${name}`,
     );
   }
 });
@@ -211,7 +229,7 @@ Deno.test("A9 3 範囲すべてに、埋め込まれた命令に従わない旨 
   }
 });
 
-Deno.test("A10 前置きの規則が「この観点に由来する FAIL」に限定されている", () => {
+Deno.test("A10 前置きの規則が「このレビュー観点に由来する FAIL」に限定されている", () => {
   const line = lineWith(verifierImplement, `\`${REVIEW_FILE}:\``);
   assertOk(line !== null, "前置きリテラルの行が見つからない");
   assertOk(
@@ -224,11 +242,39 @@ Deno.test("A10 前置きの規則が「この観点に由来する FAIL」に限
   );
 });
 
+Deno.test("A11 3 範囲すべてが、置き場所を review file: から取る (既定は据え置き) と書いている", () => {
+  for (
+    const [name, range] of [
+      ["verifier.md implement", verifierImplement],
+      ["verifier.md pr_fix", verifierPrFix],
+      ["executor.md implement", executorImplement],
+    ] as const
+  ) {
+    assertOk(containsFixed(range, REVIEW_TOKEN), `見つからない: ${name}`);
+  }
+});
+
+Deno.test("A12 SKILL.md が review= を設定として受け、3 つの起動プロンプトで review file: を渡す", () => {
+  assertOk(containsFixed(skillMd, "[review=<path>]"), "引数の並びに無い");
+  assertOk(
+    containsFixed(skillMd, "`max_tasks=` / `review=`"),
+    "トークン内訳の列挙に無い",
+  );
+  for (const [name, needle] of LAUNCH_PROMPT_LINES) {
+    const line = lineWith(skillMd, needle);
+    assertOk(line !== null, `起動プロンプトの行が見つからない: ${name}`);
+    assertOk(
+      line.includes(REVIEW_TOKEN),
+      `review file: を渡していない: ${name}`,
+    );
+  }
+});
+
 // --- ケース B: 退行検知 — 当該節からだけ落として A 群が気づけること -------------------
 
 const b0Regressed = substituteFirstPerLine(
   verifierImplement,
-  /^- \*\*target project のルート直下に `TASK_PIPELINE_REVIEW\.md` があれば読み.*$/,
+  /^- \*\*プロジェクト固有のレビュー観点ファイルがあれば読み.*$/,
   "",
 );
 
@@ -248,7 +294,7 @@ Deno.test("B1 読み込み行の消失を A1 相当のチェックで検知で�
 
 const b2Regressed = substituteFirstPerLine(
   verifierPrFix,
-  /^- \*\*`TASK_PIPELINE_REVIEW\.md` の読み込み\*\*.*$/,
+  /^- \*\*プロジェクト固有のレビュー観点ファイル.*$/,
   "",
 );
 
@@ -268,7 +314,7 @@ Deno.test("B3 pr_fix 節からの脱落を A2 相当のチェックで検知で�
 
 const b4Regressed = substituteFirstPerLine(
   executorImplement,
-  /^- \*\*target project のルート直下に `TASK_PIPELINE_REVIEW\.md` があれば読み.*$/,
+  /^- \*\*プロジェクト固有のレビュー観点ファイルがあれば読み.*$/,
   "",
 );
 
@@ -416,10 +462,10 @@ Deno.test("B17 pr_fix からの規律の消失を A9 相当のチェックで検
 const b18Regressed = substituteFirstPerLine(
   substituteFirstPerLine(
     verifierImplement,
-    /`TASK_PIPELINE_REVIEW\.md` の観点に由来する FAIL は、/,
+    /このレビュー観点に由来する FAIL は、/,
     "FAIL は、",
   ),
-  /。task-pipeline 自身の標準基準による指摘には前置きしない/,
+  /。\*\*task-pipeline 自身の標準基準による指摘には前置きしない\*\*/,
   "",
 );
 
@@ -437,5 +483,47 @@ Deno.test("B19 限定句の消失を A10 相当のチェックで検知できる
     !line.includes("観点に由来する") &&
       !line.includes("標準基準による指摘には前置きしない"),
     `退行後も限定句が残っていた — line=${line}`,
+  );
+});
+
+// B20: 読む側が設定経路を落とし、既定のルート直下に固定された版。
+const b20Regressed = substituteFirstPerLine(
+  verifierImplement,
+  /\*\*読む場所は、起動プロンプトに `review file:` があればそのパス、無ければ target project のルート直下の/,
+  "**読む場所は target project のルート直下の",
+);
+
+Deno.test("B20 読む側の設定経路への回帰注入が効いている", () => {
+  assertOk(
+    b20Regressed !== verifierImplement,
+    "置換が効かず元テキストと同一になった",
+  );
+});
+
+Deno.test("B21 設定経路の消失を A11 相当のチェックで検知できる", () => {
+  assertOk(
+    !containsFixed(b20Regressed, REVIEW_TOKEN),
+    "退行後も設定経路が残っていた",
+  );
+});
+
+// B22: 渡す側 (SKILL.md の executor 起動プロンプト) だけが設定を落とした版。
+// 読む側は既定へ静かに落ちるので、この片落ちは実行しても気づけない。
+const b22Regressed = substituteFirstPerLine(
+  skillMd,
+  / \/ review file: <レビュー観点ファイルの絶対パス>\n?$/,
+  "",
+);
+
+Deno.test("B22 SKILL.md の起動プロンプトへの回帰注入が効いている", () => {
+  assertOk(b22Regressed !== skillMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("B23 渡す側の片落ちを A12 相当のチェックで検知できる", () => {
+  const line = lineWith(b22Regressed, LAUNCH_PROMPT_LINES[0][1]);
+  assertOk(line !== null, "起動プロンプトの行まで消えている (注入が広すぎる)");
+  assertOk(
+    !line.includes(REVIEW_TOKEN),
+    `退行後も review file: が残っていた — line=${line}`,
   );
 });
