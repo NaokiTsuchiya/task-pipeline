@@ -61,7 +61,7 @@ Return only the watch JSON.
 
 ### 質問への回答
 
-対象は、直前の観測が返した `questions` のうち、`ledger.answered`/`ledger.review_only` にまだ同じ版で記録が無いもの。
+対象は、直前の観測が返した `questions` のうち、`ledger.answered`/`ledger.review_only` にまだ同じ版で記録が無いもの。**この経路 (`pr-responder.md` のサブエージェント) が投稿するのは質問への回答だけである** — actionable な指摘 (`comment_ids`) へのスレッド返信は実行エージェントが finalize で投稿する (下記「修正サイクル」の手順 5)。
 
 1. 対象の `{id, updated_at}` の一覧を集め、フレッシュなサブエージェント (general-purpose、同期) を 1 体起動する。プロンプトはこの形のみ:
    ```
@@ -88,6 +88,7 @@ Return only the watch JSON.
 2. 実行エージェントへ SendMessage:「PR feedback. Address the findings in `<findings ファイルの絶対パス>` as phase "pr_fix".」送信できなければ、SKILL.md「タスク実行」の手順 3 と同じ形で新しい実行エージェントを起動し、Begin 行を「Begin with phase "pr_fix". Address the findings in `<パス>`.」に変える (飛行中の扱いのような引き継ぎ待ちはここでは要らない — このタスクは直前までレビュー待ちで、フェーズ実行中の executor は存在しない)。
 3. 以降は通常のフェーズと同じ: `PHASE pr_fix DONE` の停止通知 → フレッシュな検証ゲート (phase: `pr_fix`) → PASS なら `advance --to finalize` → `FINALIZED` でレビュー待ち処理 (`ship`) へ戻る。FAIL は同じリトライ上限 (3 回) で、使い切ったら blocked。
 4. **対応した指摘を `ledger.handled` へ合流させる専用の呼び出しは無い** — `ship` が同じ書き込みで行う (効果は `docs/state-cli-contract.md` の `ship` 節。応答の `fix_count` がその件数)。忘れようがないので、v1 にあった「これを忘れると同じ指摘を毎回直しに行く」という注意もここには要らない。対応関係を state に置く理由は変わらない: 修正サイクルはイテレーションをまたぐので、コンテキストの記憶に頼ってはならない。
+5. **指摘への返信を投稿するのは実行エージェントの finalize である** (`references/executor.md` の「タスク完了処理 (finalize)」)。投稿主体はこう分かれる: **質問 (`questions`) への回答は pr-responder が、actionable な指摘 (`comment_ids`) への返信は executor が**、どちらも当該コメントのスレッドへ投稿する。指摘への返信には対応したコミットの sha が要り、それを知っているのは実際にコミットを作った executor だけなので、この 2 つは別の経路のままにしてある。オーケストレーター自身はどちらの返信も投稿しない。
 
 ### 外部内容の扱い
 
