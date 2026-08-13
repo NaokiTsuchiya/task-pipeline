@@ -18,7 +18,7 @@
 
 回収したら、**そのマージで依存が解けたタスクがあるかを見る** (マージした瞬間がそれを確定できる唯一の地点。放っておくと、走れるタスクがあるのに「候補が尽きた」と判断してループを止めることになる)。
 
-- **判定と操作は task-prep の規則をそのまま使う。** ロジックをこちらへ書き写さない — 依存の表現も昇格の手順もトラッカーごとに違い、2 箇所に分けると片方だけ直る。サブエージェント (general-purpose、同期) を 1 体起動し、**task-prep の 2 ファイルのパスを渡して従わせる** (指示本文をプロンプトに書き写さない)。プロンプトはこの形のみ:
+- **判定と操作は task-prep の規則をそのまま使う。** ロジックをこちらへ書き写さない — 依存の表現も昇格の手順もトラッカーごとに違い、2 箇所に分けると片方だけ直る。サブエージェント (general-purpose、同期) を 1 体起動し、**task-prep の 2 ファイルのパスを渡して従わせる** (指示本文をプロンプトに書き写さない。起動パラメータと経路の正は `playbooks/agent-launch.md` の `依存昇格` の行)。プロンプトはこの形のみ:
   ```
   You are a dependency promotion subagent.
   Read ~/.claude/skills/task-prep/SKILL.md (the 「依存」 section) and
@@ -73,7 +73,7 @@
 
 1. **abort する前に控える**: `git -C <worktree> diff --diff-filter=U` の出力を `<runs/<id>>/rebase/conflict-<UTC 時刻>.diff` へ、`git -C <worktree> diff --name-only --diff-filter=U` の一覧、旧 tip と `origin/<base>` の sha (**控えた中身は読まない**)。
 2. `git -C <worktree> rebase --abort` で戻す (衝突を残したままトリアージしない)。
-3. read-only のトリアージサブエージェント (general-purpose、同期) を 1 体起動する。プロンプトはこの形のみ:
+3. read-only のトリアージサブエージェント (general-purpose、同期) を 1 体起動する (起動パラメータと経路の正は `playbooks/agent-launch.md` の `衝突トリアージ` の行)。プロンプトはこの形のみ:
    ```
    You are a read-only rebase conflict triage subagent.
    Do not modify the repository, the branch, the tracker, or any file except the report below.

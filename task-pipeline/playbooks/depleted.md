@@ -5,7 +5,7 @@
 承認で `list` が `{"tasks": []}` を返したら (枯渇。**候補そのものが尽きたときだけ**):
 
 1. マージの回収 (`playbooks/merge-recovery.md`。**そこに含まれる依存の昇格まで済ませる** — 昇格で候補が出たならそれは枯渇ではないので、この手順を抜けて通常の承認に戻る) を行ってから、state.json の history と queue を集計し、証拠パス付きの最終報告を書く。`state.ts stalled-set --value depleted` を呼ぶ。**この最終報告を書くのは `stalled` が `null` から `"depleted"` に変わる最初の 1 回と、SKILL.md の「停滞」の打ち切りで止めるときだけ** (追従だけの周回で毎回出し直さない)。
-   **最終報告には「なぜ候補が無いのか」の内訳を必ず入れる**。**内訳を作るのは read-only の調査サブエージェント 1 体** (general-purpose、同期。オーケストレーターがトラッカーを直接読むことはしない)。判定の規則をここへ書き写さず、**task-prep の棚卸しの規則をパスで渡して従わせる**。**モデルは指定しない** (判断そのものが成果物のため)。プロンプトはこの形のみ:
+   **最終報告には「なぜ候補が無いのか」の内訳を必ず入れる**。**内訳を作るのは read-only の調査サブエージェント 1 体** (general-purpose、同期。オーケストレーターがトラッカーを直接読むことはしない)。判定の規則をここへ書き写さず、**task-prep の棚卸しの規則をパスで渡して従わせる**。**モデルは指定しない** (判断そのものが成果物のため。起動パラメータと経路の正は `playbooks/agent-launch.md` の `survey` の行)。プロンプトはこの形のみ:
    ```
    You are a read-only tracker survey subagent.
    Do not write to the tracker, the repository, or any file. Do not modify anything.

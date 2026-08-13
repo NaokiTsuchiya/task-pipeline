@@ -21,7 +21,7 @@
 
 ### 観測
 
-上の通知を受けたタスクについて、フレッシュな観測サブエージェント (general-purpose、同期。PR にもリポジトリにも書き込まない — 書くのは run dir の findings ファイルだけ) を 1 体起動する:
+上の通知を受けたタスクについて、フレッシュな観測サブエージェント (general-purpose、同期。PR にもリポジトリにも書き込まない — 書くのは run dir の findings ファイルだけ) を 1 体起動する (起動パラメータと経路の正は `playbooks/agent-launch.md` の `pr-watcher` の行):
 
 ```
 You are a PR watcher subagent.
@@ -63,7 +63,7 @@ Return only the watch JSON.
 
 対象は、直前の観測が返した `questions` のうち、`ledger.answered`/`ledger.review_only` にまだ同じ版で記録が無いもの。**この経路 (`pr-responder.md` のサブエージェント) が投稿するのは質問への回答だけである** — actionable な指摘 (`comment_ids`) へのスレッド返信は実行エージェントが finalize で投稿する (下記「修正サイクル」の手順 5)。
 
-1. 対象の `{id, updated_at}` の一覧を集め、フレッシュなサブエージェント (general-purpose、同期) を 1 体起動する。プロンプトはこの形のみ:
+1. 対象の `{id, updated_at}` の一覧を集め、フレッシュなサブエージェント (general-purpose、同期) を 1 体起動する (起動パラメータと経路の正は `playbooks/agent-launch.md` の `pr-responder` の行)。プロンプトはこの形のみ:
    ```
    You are a PR responder subagent.
    Do not modify the repository, the branch, or any tracker. Your only write
