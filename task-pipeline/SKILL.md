@@ -243,23 +243,31 @@ Return only what the adapter file specifies for this operation.
    - `DONE` で、`<name>` が state.json の `run.phase` と一致 → 検証ゲートへ。
    - `DONE` で、`<name>` が state.json の `run.phase` と不一致 (プロトコル行の重複再送など) → 無視する。
    - `REBASE-CONFLICT — <パス>` → 載せ直しが衝突で止まった。`run.phase` が `finalize` なら (PR を出す・押し直す直前の載せ直し) `playbooks/merge-recovery.md` の「コンフリクトのトリアージ」の**手順 3 だけ**を行い、その結果を持って同じ手順書の「解決サイクル」の**「finalize から入る経路」**へ合流する (**手順 4・5 の `rebase-request` は呼ばない** — 前提が `progress==resting` なので、running のタスクでは必ず `conflict` で失敗する。理由と代わりの手順は同節)。`run.phase` が `rebase_fix` なら同じ手順書の「解決サイクル」の諦め方に入る。**どちらでも blocked にはしない。**
-6. **検証ゲート**: 検証エージェントを同期起動する (subagent_type: `task-pipeline-verifier`。**provider・model・mode と経路は起動・再開の直前に `playbooks/agent-launch.md` で決める** — この役割だけは Paseo 経路が第一候補である)。**`next` の `tasks[].gate.reuse_verifier` が agentId を返せば、その検証エージェントを SendMessage で再開する** (下記「再開時のプロンプト」)。**null なら、次のとおりフレッシュに新規起動する。** 起動前に `state.ts verdict-path --id <id>` を 1 回呼び、返る `path` をそのまま verifier に渡す (**このパスを自分で作らない** — フェーズ・試行回数・修正/解決サイクルの連番からの導出はすべて CLI の内側にある)。読み取り専用なので state.json は変わらない:
+6. **検証ゲート**: 検証エージェントを同期起動する (**provider・model・mode と経路は起動・再開の直前に `playbooks/agent-launch.md` で決める** — この役割だけは Paseo 経路が第一候補で、現行ハーネス経路での subagent_type は `task-pipeline-verifier` である)。**`next` の `tasks[].gate.reuse_verifier` が agentId を返せば、その検証エージェントを再開する** (下記「再開時のプロンプト」と「再開の経路」)。**null なら、次のとおりフレッシュに新規起動する。** 起動前に `state.ts verdict-path --id <id>` を 1 回呼び、返る `path` をそのまま verifier に渡す (**このパスを自分で作らない** — フェーズ・試行回数・修正/解決サイクルの連番からの導出はすべて CLI の内側にある)。読み取り専用なので state.json は変わらない:
    ```
    You are a fresh, independent verifier.
    Read ~/.claude/skills/task-pipeline/references/verifier.md and follow it.
    phase: <phase> / task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス> / verdict path: <verdict-path が返した path> / review file: <レビュー観点ファイルの絶対パス>
    Write the full verdict JSON to verdict path, then return only the minimal verdict JSON.
    ```
+   - **起動の経路は 3 段で、上から順に試す** (どの段でも上のプロンプト文面は変えない。provider・model・mode の解決と、落ちてよい失敗の定義は `playbooks/agent-launch.md` の経路節):
+     1. **Paseo 経路** — 解決した provider・model・mode で `paseo run` を**1 回だけ**起動し、`--output-schema` で最小 verdict JSON を stdout で受ける。**エージェントが生まれなかったと言い切れる失敗** (起動コマンドが非ゼロ終了 / agentId が返らない) のときだけ、history に 1 行 (`agent-launch: paseo 経路が失敗 (<理由>) — 現行経路で verifier を起動`) を残して 2 へ落ちる。
+     2. **現行ハーネス経路** — `subagent_type: task-pipeline-verifier` で Agent tool 起動する。agent type が未インストールなら 3 へ落ちる (下記「未インストール環境のフォールバック」に history の 1 行も含めた規定がある)。
+     3. **`general-purpose`** — 同じプロンプトのまま起動する。ここまで落ちても成果物と契約は同じで、変わるのは行動境界の裏打ちだけである。
    - **未インストール環境のフォールバック**: `task-pipeline-verifier` は `agents/task-pipeline-verifier.md` を `~/.claude/agents/` に置いて初めて存在する (このリポジトリの `install.sh` が行う)。Agent tool が unknown agent type のエラーを返したら、**同じプロンプトのまま** `subagent_type: general-purpose` で起動し直し、history に「verifier agent type 未インストール — general-purpose で実行」を 1 行残す。skill 単体でも動く状態を保つためで、フォールバックしたこと自体は失敗ではない。
 
-   - **再開時のプロンプト**: `reuse_verifier` が非 null のとき、この文面で SendMessage する (verdict path は同じく `state.ts verdict-path --id <id>` が返すものをそのまま使う)。**実行エージェントが対応したと宣言する文言 (「addressed」「fixed」等) は入れない** — 直っているかどうかは verifier が現物で確かめることであって、オーケストレーターが宣言することではない:
+   - **再開時のプロンプト**: `reuse_verifier` が非 null のとき、この文面を送る (経路は下記「再開の経路」。verdict path は同じく `state.ts verdict-path --id <id>` が返すものをそのまま使う)。**実行エージェントが対応したと宣言する文言 (「addressed」「fixed」等) は入れない** — 直っているかどうかは verifier が現物で確かめることであって、オーケストレーターが宣言することではない:
    ```
    Re-verify the same phase against the updated artifacts.
    Your previous verdict for this phase is at <前回の verdict path>.
    phase: <phase> / task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス> / verdict path: <verdict-path が返した新しい path> / review file: <レビュー観点ファイルの絶対パス>
    Write the full verdict JSON to the new verdict path, then return only the minimal verdict JSON.
    ```
-   - `SendMessage` がエラーを返したら、**同じ内容で新規起動 (上記フレッシュ起動プロンプト) にフォールバックし**、history に「verifier 再開失敗 — フレッシュ起動」を1行残す (未インストール環境のフォールバックと同型のパターン)。
+   - **再開の経路も 2 段で、上から順に試す**:
+     1. **Paseo 経路** — その verifier を `paseo send` で再開する。`send` には `--output-schema` に相当する指定が無いので、判定は verdict ファイル (無ければ `paseo logs <agentId>`) から読む — **読み方の正は `playbooks/agent-launch.md` の経路節**で、ここには重ねて書かない。落ちたら history に 1 行 (`agent-launch: paseo 経路が失敗 (<理由>) — 現行経路で verifier を再開`) を残して 2 へ。
+     2. **現行ハーネス経路** — `SendMessage` で再開する。
+   - 再開が 2 段とも通らなかったら、**同じ内容で新規起動 (上記フレッシュ起動プロンプト) にフォールバックし**、history に「verifier 再開失敗 — フレッシュ起動」を1行残す (未インストール環境のフォールバックと同型のパターン)。
+   - **再開先で解決される provider・model が前回と同じであることの担保は、`run.verifier_session` の一致である。** `reuse_verifier` が非 null になるのは、その verifier を起動したセッションが自分自身のときだけで (`scripts/state-next.ts` の `reuseVerifierOf`)、**同一セッション内では起動引数 (`impl_provider=` / `verify_provider=`) が変わらない**ので解決結果も変わらない。**prefs (`~/.paseo/orchestration-preferences.json`) をイテレーションの途中で書き換えた場合は保証の外**である — state.json は解決結果を持たない (持たせない: スキーマは変えない)。
 
    - **PASS** → (判定 JSON は verifier が起動時に渡した verdict path へ既に書いている — オーケストレータは書かない) `state.ts advance --id <id> --from <phase> --to <next>` を呼んで phase を進める。次フェーズがあれば SendMessage で実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」と送る (再開は background で走る。停止通知が次の処理を駆動する)。`advance` が通せるのは**その run の列の隣接辺だけ**で、飛び越し・逆行・列違いは `conflict` になる (辺の一覧は `docs/state-cli-contract.md` の「フェーズ列と advance の辺」)。列の最後のフェーズ (`report` / `pr_fix` / `rebase_fix`) まで PASS したら:
      - `finish=none` → **`--to finalize` まで `advance` してから**レビュー待ち処理へ (finalize は検証対象外だが、列の最後のノードである)。
@@ -293,7 +301,7 @@ Return only what the adapter file specifies for this operation.
            - 何が変わったかを 1 語句で添える — `fix_count` が 1 以上なら対応した指摘の件数、衝突解消からの復帰なら載せ直し先。
            - 例: `<id> 更新 (指摘 <fix_count> 件対応): <PR URL>` / `<id> 更新 (載せ直し → <base>): <PR URL>`
            - **素の force push (`playbooks/merge-recovery.md` の「残った PR を新しい基点へ載せ直す」) では送らない** — 詳細と理由はその節に書いてある。
-   - **FAIL** → (判定 JSON は verifier が起動時に渡した verdict path へ既に書いている — オーケストレータは書かない) `state.ts phase-fail --id <id> --phase <phase> --verifier <この検証エージェントの agentId> --session <自分の id>` を呼んで `attempts` を +1 する。SendMessage で実行エージェントへ「Fix required. Read required_fixes from `<verdict path の絶対パス>` and address them in phase `<phase>`.」を送る (required_fixes の中身をそのまま転記せず、ファイルのパスだけを渡す)。修正・再停止後の再検証は、**`next` の `tasks[].gate.reuse_verifier` が agentId を返したときだけ、その検証エージェントを SendMessage で再開する** (上記「再開時のプロンプト」)。null なら上記のとおり新規に (フレッシュに) 起動する。`SendMessage` がエラーを返したら**同じ内容で新規起動し**、history に「verifier 再開失敗 — フレッシュ起動」を1行残す。
+   - **FAIL** → (判定 JSON は verifier が起動時に渡した verdict path へ既に書いている — オーケストレータは書かない) `state.ts phase-fail --id <id> --phase <phase> --verifier <この検証エージェントの agentId> --session <自分の id>` を呼んで `attempts` を +1 する。SendMessage で実行エージェントへ「Fix required. Read required_fixes from `<verdict path の絶対パス>` and address them in phase `<phase>`.」を送る (required_fixes の中身をそのまま転記せず、ファイルのパスだけを渡す)。修正・再停止後の再検証は、**`next` の `tasks[].gate.reuse_verifier` が agentId を返したときだけ、その検証エージェントを再開する** (上記「再開時のプロンプト」と「再開の経路」)。null なら上記のとおり新規に (フレッシュに) 起動する。再開が 2 段とも通らなかったら**同じ内容で新規起動し**、history に「verifier 再開失敗 — フレッシュ起動」を1行残す。
 
 ### 検証ゲートの絶対規則
 

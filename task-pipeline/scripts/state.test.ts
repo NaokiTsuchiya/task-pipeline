@@ -3334,6 +3334,61 @@ Deno.test("T-V-next-6: --session/--alive/--now/--config are all optional", async
   assertEquals((out.counts as Record<string, number>).tasks_started, 0);
 });
 
+// gh-104: 再開先で解決される provider/model が前回と同じであることの担保 (SKILL.md 手順 6)
+// は、この CLI 応答がセッション一致を守ることに全面的に依存する。導出そのものは
+// state-next.test.ts の N-GATE が覆うが、担保が乗っているのはこの境界である。
+Deno.test("T-V-next-7: gate.reuse_verifier は呼び出し側のセッションが一致するときだけ agentId を返す", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [
+    runningItem("t-1", {
+      phase: "plan",
+      attempts: 1,
+      executor: "ex-1",
+      verifier: "vf-1",
+      verifier_session: "s1",
+    }),
+  ]);
+  const matched = await expectOkUnchanged(dir, [
+    "next",
+    "--state-dir",
+    dir,
+    "--session",
+    "s1",
+    "--alive",
+    "s1",
+  ]);
+  assertEquals(
+    (taskOfNext(matched, "t-1").gate as Record<string, unknown>).reuse_verifier,
+    "vf-1",
+  );
+
+  const mismatched = await expectOkUnchanged(dir, [
+    "next",
+    "--state-dir",
+    dir,
+    "--session",
+    "s2",
+    "--alive",
+    "s2",
+  ]);
+  assertEquals(
+    (taskOfNext(mismatched, "t-1").gate as Record<string, unknown>)
+      .reuse_verifier,
+    null,
+  );
+});
+
+/** `next` の応答から id でタスクを 1 件引く。 */
+function taskOfNext(
+  out: Record<string, unknown>,
+  id: string,
+): Record<string, unknown> {
+  const tasks = out.tasks as Record<string, unknown>[];
+  const task = tasks.find((t) => t.id === id);
+  if (task === undefined) throw new Error(`task not found in next: ${id}`);
+  return task;
+}
+
 // ---------------------------------------------------------------------------
 // T-V-verdict-path — 読み取り専用 verb `verdict-path` の CLI 固有の観測
 //
