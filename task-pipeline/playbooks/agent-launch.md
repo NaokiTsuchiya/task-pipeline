@@ -5,7 +5,7 @@
 | 役割 | 起動 | provider・model の解決元 | mode | 経路 |
 |---|---|---|---|---|
 | `executor` | background | `impl` (`impl_provider=` が上書き) | claude: `bypassPermissions` / omp: `full` | 現行のみ (Paseo には停止通知の受け口が無い) |
-| `verifier` | 同期 | `audit` (`verify_provider=` が上書き) | claude: `bypassPermissions` / omp: `full` | Paseo 優先 → 現行 |
+| `verifier` | 同期 | `audit` (`verify_provider=` が上書き) | **無人実行できる mode** — claude: `bypassPermissions` / omp: `full` | Paseo 優先 → 現行 (`task-pipeline-verifier` → `general-purpose`) |
 | `adapter-list` | 同期 | provider は解決しない。model は**安いモデル固定** (`haiku`) | — | 現行のみ |
 | `adapter-mark` | 同期 | **指定しない** (現行どおり) | — | 現行のみ |
 | `triage` | 同期 | **指定しない** — 判断が成果物 | — | 現行のみ |
@@ -30,7 +30,8 @@ provider と model は次の 3 段で決める。上の段が決まればそこ�
 3. それも無ければ**セッション継承** (現行どおり。Agent tool に `model` を渡さない)。
 
 - **prefs のファイルが無いときは、既定のまま進めたうえでユーザーに一度だけ伝える** (1 セッションに 1 回。history にも 1 行)。既定の組は**実装 = claude 系 / 検証 = omp** で、これが「実装と検証を別プロバイダにする」の既定である。omp を検証側に置くのは、`references/verifier.md` の契約 (指示ファイルを読む → verdict path へ書く → 最小 JSON だけを返す → target project を変更しない) を omp のエージェントが完走したことが実測されている唯一の組だからである (`docs/paseo-subagent-2026-08.md` の実測 6)。junie は応答を返しても usage が取れずコストを回収できないので既定には選ばない。
-- **mode は provider ごとに決まる**: claude は `bypassPermissions`、omp は `full`。**省略すると claude は Always Ask に落ちて無人実行が止まる**ので、Paseo 経路では必ず明示する。**現行ハーネス経路に mode の軸は無く**、代わりに agent type の `tools:` 制限が効く (`agents/task-pipeline-verifier.md`)。Paseo 経路ではその縛りが無くなり、行動境界は指示文だけに依存する。
+- **mode は provider ごとに決まる**: claude は `bypassPermissions`、omp は `full`。**省略すると claude は Always Ask に落ちて無人実行が止まる**ので、Paseo 経路では必ず明示する。**現行ハーネス経路に mode の軸は無く**、代わりに agent type の `tools:` 制限が効く (`agents/task-pipeline-verifier.md`)。
+- **verifier が target project を変更しない担保は `references/verifier.md` の行動境界の記述にあり、mode は担保にならない** — 無人で回せる mode (claude `bypassPermissions` / omp `full`) はどれも書き込み自由で、書き込みを禁じる claude の `plan` は verdict の書き出しができないので選べないからである。現行ハーネス経路では、これに加えて agent type の `tools:` が機械的な裏打ちになる (Paseo 経路にはその裏打ちが無い)。
 - **現行ハーネス経路では provider を選べない** (Claude 固定)。解決した provider がそれ以外になった役割をこの経路で起動するときは、model も指定せずセッション継承に落とし、その旨を history に 1 行残す。
 
 ## 経路の選択とフォールバック

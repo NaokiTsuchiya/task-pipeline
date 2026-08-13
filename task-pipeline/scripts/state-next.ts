@@ -721,9 +721,14 @@ function cycleAction(
   return null;
 }
 
-// gh-70: FAIL 後の再検証を同じ verifier の再開にできるか。`run.verifier` を作れたのは
-// それを控えた session だけなので (別セッションからは SendMessage で再開できない、
-// research.md 参照)、セッション不一致は無条件で null に落とす。
+// gh-70: FAIL 後の再検証を同じ verifier の再開にできるか。セッション不一致を無条件で
+// null に落とすのは、起動経路に依存しない次の 2 つの理由による。Paseo 経路では agentId
+// さえあれば別セッションからでも `send` が届くので (docs/paseo-subagent-2026-08.md の
+// 実測 4)、「届かないから」はもう理由ではない:
+//   - 二重再開を止められるのがここだけだから。Paseo 側は送信元を問わないので、同じ
+//     verifier を 2 セッションが同時に再開するのを防げるのは state.json の所有権しかない。
+//   - 再開先で解決される provider/model が前回と同じであることの担保だから。state.json は
+//     解決結果も起動経路も持たないので、同一セッション = 同一起動引数、以外に根拠が無い。
 function reuseVerifierOf(run: V2Run | null, session: string): string | null {
   if (run === null) return null;
   if (run.verifier === null) return null;

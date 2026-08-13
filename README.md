@@ -23,7 +23,7 @@ sh ./install.sh
 
 SKILL.md を持つ skill ディレクトリがすべて `~/.claude/skills/` へ、`agents/*.md` (カスタムサブエージェント定義) がすべて `~/.claude/agents/` へ symlink される。skill や agent を追加したときも同じコマンドを再実行するだけでよい (冪等。既存の無関係なエントリは上書きせず警告して残す)。リンク先は第 1 / 第 2 引数または環境変数 `SKILLS_DIR` / `AGENTS_DIR` で変更できる (例: `sh ./install.sh /path/to/skills /path/to/agents`)。
 
-`agents/` を入れなくても skill は動く (task-pipeline の検証ゲートは general-purpose にフォールバックする) が、`agents/task-pipeline-verifier.md` は検証ゲートの tools を読み取り + テスト実行に必要な最小限に絞る (verifier は target project を変更しない、という行動境界の機械的な裏付け) ので、入れておくのが既定である。
+`agents/` を入れなくても skill は動く。task-pipeline の検証ゲートは **Paseo 経路 → `task-pipeline-verifier` → `general-purpose`** の順に落ちるので、Paseo も `agents/` も無い環境では general-purpose で回る。とはいえ `agents/task-pipeline-verifier.md` は検証ゲートの tools を読み取り + テスト実行に必要な最小限に絞る (verifier は target project を変更しない、という行動境界の機械的な裏付け。Paseo 経路にこの裏打ちは無く、境界は `references/verifier.md` の指示で守る) ので、入れておくのが既定である。
 
 **task-pipeline の実行には `deno` が前提。** `.task-pipeline/state.json` への読み書き (排他・原子的書き込み・heartbeat を含む) は `task-pipeline/scripts/state.ts` という Deno/TypeScript 製 CLI が担う。未導入の環境で task-pipeline を動かすと、CLI の呼び出しコマンド自体がシェルレベルで `deno: command not found` のように失敗する (`deno` 不在は `tests/install-sh-state-cli.test.sh` 等の sh スイートでは SKIP として扱われるだけで失敗にはならないが、実運用では必須)。TypeScript のテスト・型検査・整形はリポジトリルートの `deno.json` に集約してあり、`deno task test` / `deno task check` / `deno task lint` / `deno task fmt` で回す (`deno task test` は引数なしでリポジトリ内の `*.test.ts` を自動検出する)。
 
