@@ -10,6 +10,11 @@
 // 起動パラメータの判断がその場の即興に戻る。どちらも実行時には静かに失敗する (モデルは
 // 「規則が無かった」とは言わずに進む) ので、文面の側で機械照合する。
 //
+// 3 つ目の壊れ方が (c) 節の中で規定どうしが矛盾する — prefs が無いときの帰結が「既定の組を
+// 適用する」と「無条件にセッション継承へ落ちる」の両方を主張する状態 (gh-112)。矛盾したまま
+// でも文面は読めてしまい、実行時には静かに片方だけが採られる (実測では Paseo 経路と別プロバイダ
+// 検証が黙って無効化された) ので、A3b〜A3f が同じ節の中で機械照合する。
+//
 // 判定はすべて **行スコープ / 表の本文行スコープ / 節スコープ** で行う。全文 includes に
 // 退化させると、規律の語が別の場所に 1 つ残っているだけで通ってしまい、この 2 通りの
 // 壊れ方をどちらも見逃す (B 群がその退化を実際に注入して確かめる)。
@@ -72,6 +77,33 @@ function inOrder(text: string, needles: readonly string[]): boolean {
   return true;
 }
 
+/** セッション継承の主張に付いていなければならない条件語 (gh-112)。 */
+const INHERITANCE_NEEDLE = "セッション継承";
+const INHERITANCE_CONDITIONS = ["実在確認", "現行ハーネス経路"] as const;
+
+/** 番号付きリストの n 段目の**本文行** (行頭が `<n>. ` の行。無ければ null)。 */
+function numberedStep(text: string, n: number): string | null {
+  const prefix = `${n}. `;
+  for (const line of text.split("\n")) {
+    if (line.startsWith(prefix)) return line;
+  }
+  return null;
+}
+
+/**
+ * `セッション継承` を条件なしで主張している行。
+ * prefs 不在の帰結は「既定の組を適用する」が正で、セッション継承はその落ち先でしかない
+ * (gh-112)。条件語を伴わない行が 1 本でもあれば、節は 2 通りに読める状態に戻っている。
+ */
+function unconditionalInheritanceLines(text: string): string[] {
+  return text
+    .split("\n")
+    .filter((line) =>
+      line.includes(INHERITANCE_NEEDLE) &&
+      !INHERITANCE_CONDITIONS.some((condition) => line.includes(condition))
+    );
+}
+
 /** 最初の ```json フェンスの中身 (無ければ null)。 */
 function jsonBlock(text: string): string | null {
   const matched = /```json\n([\s\S]*?)\n```/.exec(text);
@@ -128,6 +160,32 @@ const RESOLUTION_STEPS = [
 ] as const;
 
 const PREFS_MISSING_NEEDLE = "一度だけ伝える";
+
+/** prefs 不在の帰結 (解決手順の 3 段目) が名指すべきもの — 既定の組と、その両側の provider。 */
+const DEFAULT_SET_NEEDLES = ["既定の組", "claude", "omp"] as const;
+
+/** 実在確認の規定。手段と落ち先が**同じ行**になければ、落ち先だけが独り歩きする。 */
+const EXISTENCE_CHECK_NEEDLE = "provider の実在を確かめる";
+const EXISTENCE_CHECK_MEANS = "list_providers";
+
+/** prefs 不在で残す history の 1 行。両方の帰結が**同じ規定**に無ければならない。 */
+const HISTORY_RULE_NEEDLE = "prefs 不在で残す history の 1 行";
+const HISTORY_ON_ROUTE = "Paseo 経路に乗る";
+const HISTORY_OFF_ROUTE = "Paseo 経路に乗らない";
+
+/** ユーザーへの一度だけの通知が伝えるべき 3 点 (既定の組 / 置き場所 / 落ち先での無効化)。 */
+const NOTICE_RULE_NEEDLE = "一度だけの通知";
+const NOTICE_NEEDLES = [
+  "既定の組",
+  "~/.paseo/orchestration-preferences.json",
+  "別プロバイダ検証",
+  "可観測性",
+] as const;
+
+/** prefs doc の実在確認の案内。実在するものだけを指していなければならない。 */
+const PREFS_DOC_GUIDE_NEEDLE = "実在するものは";
+const PREFS_DOC_GUIDE_TOOLS = ["list_providers", "list_models"] as const;
+const PREFS_DOC_ABSENT_COMMAND = "paseo model ls";
 
 // フォールバックが持つべき 3 点。「落ちる」と「history に 1 行」は 1 つの規定なので、
 // 節スコープではなく**同じ行**で見る — 節スコープにすると、ベストエフォートの役割の
@@ -291,6 +349,64 @@ Deno.test("U5 lineWith: 行スコープで返す (別の行の一致を混ぜな
   assertOk(found === "別の行に needle", `found=${JSON.stringify(found)}`);
 });
 
+const U_STEP_CASES: readonly [string, string | null, string][] = [
+  ["3. 三段目\n", "3. 三段目", "行頭の番号なら拾う"],
+  ["  3. 入れ子の三段目\n", null, "インデントされた番号は拾わない"],
+  ["本文の途中に 3. がある行\n", null, "行の途中の番号は拾わない"],
+  ["1. 一段目\n2. 二段目\n", null, "その番号が無ければ null"],
+  [
+    "3. 先の三段目\n3. 後の三段目\n",
+    "3. 先の三段目",
+    "同じ番号が複数あれば最初の 1 本",
+  ],
+  [
+    "3. 三段目\n- 直後の箇条書き\n4. 四段目\n",
+    "3. 三段目",
+    "後続行 (箇条書き・次の段) を飲み込まない",
+  ],
+];
+
+for (const [text, expected, label] of U_STEP_CASES) {
+  Deno.test(`U6 numberedStep: ${label}`, () => {
+    const actual = numberedStep(text, 3);
+    assertOk(
+      actual === expected,
+      `expected=${JSON.stringify(expected)} actual=${JSON.stringify(actual)}`,
+    );
+  });
+}
+
+const U_INHERITANCE_CASES: readonly [string, number, string][] = [
+  [
+    "3. それも無ければ**セッション継承** (現行どおり)。\n",
+    1,
+    "条件語が無い行は矛盾として拾う",
+  ],
+  [
+    "実在確認に通らなかったときだけセッション継承で起動する。\n",
+    0,
+    "実在確認が同じ行にあれば拾わない",
+  ],
+  [
+    "現行ハーネス経路ではセッション継承に落とす。\n",
+    0,
+    "現行ハーネス経路が同じ行にあれば拾わない",
+  ],
+  ["実在確認をしてから使う。\n", 0, "セッション継承を含まない行は対象外"],
+  [
+    "実在確認をしてから使う。\nそれも無ければセッション継承。\n",
+    1,
+    "条件語が別の行にあるだけなら拾う (行スコープ)",
+  ],
+];
+
+for (const [text, expected, label] of U_INHERITANCE_CASES) {
+  Deno.test(`U7 unconditionalInheritanceLines: ${label}`, () => {
+    const actual = unconditionalInheritanceLines(text).length;
+    assertOk(actual === expected, `expected=${expected} actual=${actual}`);
+  });
+}
+
 Deno.test("A0 手順書の 3 節が切り出せる", () => {
   assertOk(resolutionSection.length > 0, "解決手順の節が空");
   assertOk(fallbackSection.length > 0, "経路とフォールバックの節が空");
@@ -316,6 +432,62 @@ Deno.test("A3 prefs が無いときの扱いが解決手順の節にある", () 
     containsFixed(resolutionSection, PREFS_MISSING_NEEDLE),
     `見つからない: ${PREFS_MISSING_NEEDLE}`,
   );
+});
+
+Deno.test("A3b 解決手順の 3 段目が既定の組 (実装 = claude / 検証 = omp) に解決する", () => {
+  const step = numberedStep(resolutionSection, 3);
+  assertOk(step !== null, "3 段目の本文行が見つからない");
+  for (const needle of DEFAULT_SET_NEEDLES) {
+    assertOk(step.includes(needle), `3 段目にない (${needle}): ${step}`);
+  }
+});
+
+Deno.test("A3c 解決手順の節に、セッション継承を条件なしで主張する行が無い", () => {
+  const lines = unconditionalInheritanceLines(resolutionSection);
+  assertOk(
+    lines.length === 0,
+    `無条件のセッション継承が残っている: ${JSON.stringify(lines)}`,
+  );
+});
+
+Deno.test("A3d 実在確認の規定に、確認の手段と失敗したときの落ち先が同じ行である", () => {
+  const line = lineWith(resolutionSection, EXISTENCE_CHECK_NEEDLE);
+  assertOk(
+    line !== null,
+    `実在確認の規定が見つからない: ${EXISTENCE_CHECK_NEEDLE}`,
+  );
+  assertOk(
+    line.includes(EXISTENCE_CHECK_MEANS),
+    `確認の手段が同じ行にない: ${line}`,
+  );
+  assertOk(
+    line.includes(INHERITANCE_NEEDLE),
+    `確認に失敗したときの落ち先が同じ行にない: ${line}`,
+  );
+});
+
+Deno.test("A3e prefs 不在の history 規定の 1 行に、両方の経路の帰結がある", () => {
+  const line = lineWith(resolutionSection, HISTORY_RULE_NEEDLE);
+  assertOk(
+    line !== null,
+    `history の規定が見つからない: ${HISTORY_RULE_NEEDLE}`,
+  );
+  assertOk(
+    line.includes(HISTORY_ON_ROUTE),
+    `既定の組を適用できたときの帰結が同じ行にない: ${line}`,
+  );
+  assertOk(
+    line.includes(HISTORY_OFF_ROUTE),
+    `落ち先に落ちたときの帰結が同じ行にない: ${line}`,
+  );
+});
+
+Deno.test("A3f 一度だけの通知の規定に、既定の組・置き場所・無効化されるものがある", () => {
+  const line = lineWith(resolutionSection, NOTICE_RULE_NEEDLE);
+  assertOk(line !== null, `通知の規定が見つからない: ${NOTICE_RULE_NEEDLE}`);
+  for (const needle of NOTICE_NEEDLES) {
+    assertOk(line.includes(needle), `通知の規定にない (${needle}): ${line}`);
+  }
 });
 
 Deno.test("A4 Paseo が失敗したら現行経路へ落ち、同じ規定で history に 1 行残す", () => {
@@ -381,6 +553,21 @@ Deno.test("A10 設定例の実装 (impl) と検証 (audit) が別プロバイダ
   );
 });
 
+Deno.test("A11 prefs doc の実在確認の案内が、実在するツールだけを指している", () => {
+  const line = lineWith(prefsDoc, PREFS_DOC_GUIDE_NEEDLE);
+  assertOk(
+    line !== null,
+    `実在確認の案内が見つからない: ${PREFS_DOC_GUIDE_NEEDLE}`,
+  );
+  for (const tool of PREFS_DOC_GUIDE_TOOLS) {
+    assertOk(line.includes(tool), `案内にない (${tool}): ${line}`);
+  }
+  assertOk(
+    !line.includes(PREFS_DOC_ABSENT_COMMAND),
+    `実在しないコマンドが残っている (${PREFS_DOC_ABSENT_COMMAND}): ${line}`,
+  );
+});
+
 interface Regression {
   readonly label: string;
   readonly original: string;
@@ -404,6 +591,28 @@ const fallbackRuleLine = lineWith(
 const prFollowMd = Deno.readTextFileSync(
   new URL("pr-follow.md", PLAYBOOKS_DIR),
 );
+const stepThreeLine = numberedStep(resolutionSection, 3) as string;
+const existenceLine = lineWith(
+  resolutionSection,
+  EXISTENCE_CHECK_NEEDLE,
+) as string;
+const historyRuleLine = lineWith(
+  resolutionSection,
+  HISTORY_RULE_NEEDLE,
+) as string;
+const noticeRuleLine = lineWith(
+  resolutionSection,
+  NOTICE_RULE_NEEDLE,
+) as string;
+const prefsGuideLine = lineWith(prefsDoc, PREFS_DOC_GUIDE_NEEDLE) as string;
+
+/** A11 相当の述語 (包含側と非包含側の両方)。 */
+function prefsGuidePointsToRealTools(text: string): boolean {
+  const line = lineWith(text, PREFS_DOC_GUIDE_NEEDLE);
+  if (line === null) return false;
+  return PREFS_DOC_GUIDE_TOOLS.every((tool) => line.includes(tool)) &&
+    !line.includes(PREFS_DOC_ABSENT_COMMAND);
+}
 
 const REGRESSIONS: readonly Regression[] = [
   {
@@ -504,6 +713,156 @@ const REGRESSIONS: readonly Regression[] = [
       '"audit": "claude/claude-haiku-4-5"',
     ),
     stillHolds: implAuditDiffer,
+  },
+  {
+    label: "3 段目が旧文 (無条件のセッション継承) に戻る",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      stepThreeLine,
+      "3. それも無ければ**セッション継承** (現行どおり。Agent tool に `model` を渡さない)。",
+    ),
+    stillHolds: (t) => unconditionalInheritanceLines(t).length === 0,
+  },
+  {
+    label: "3 段目から検証側の provider (omp) だけが消える",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      stepThreeLine,
+      stepThreeLine.replace(" / 検証 = `omp`", ""),
+    ),
+    stillHolds: (t) => {
+      const step = numberedStep(t, 3);
+      return step !== null &&
+        DEFAULT_SET_NEEDLES.every((needle) => step.includes(needle));
+    },
+  },
+  {
+    label: "3 段目が番号付きリストから散文へ退化する",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      stepThreeLine,
+      stepThreeLine.replace("3. ", ""),
+    ),
+    stillHolds: (t) => {
+      const step = numberedStep(t, 3);
+      return step !== null &&
+        DEFAULT_SET_NEEDLES.every((needle) => step.includes(needle));
+    },
+  },
+  {
+    label: "セッション継承の行から条件語だけが消える (節の別の行には残る)",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      stepThreeLine,
+      stepThreeLine.replace(
+        "下記の**実在確認**に通らなかったときだけ",
+        "それでも駄目なら",
+      ),
+    ),
+    stillHolds: (t) => unconditionalInheritanceLines(t).length === 0,
+  },
+  {
+    label: "実在確認の行から確認の手段 (list_providers) が消える",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      existenceLine,
+      existenceLine.replace("MCP の `list_providers` を引き", "MCP を引き"),
+    ),
+    stillHolds: (t) =>
+      (lineWith(t, EXISTENCE_CHECK_NEEDLE) as string).includes(
+        EXISTENCE_CHECK_MEANS,
+      ),
+  },
+  {
+    label:
+      "実在確認の行から落ち先 (セッション継承) が消える (節の別の行には残る)",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      existenceLine,
+      existenceLine.replace(
+        "その役割をセッション継承で起動する",
+        "その役割を現行どおり起動する",
+      ),
+    ),
+    stillHolds: (t) =>
+      (lineWith(t, EXISTENCE_CHECK_NEEDLE) as string).includes(
+        INHERITANCE_NEEDLE,
+      ),
+  },
+  {
+    label: "history の規定から落ち先側の帰結が消える",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      historyRuleLine,
+      historyRuleLine.replace(HISTORY_OFF_ROUTE, "セッション継承で起動する"),
+    ),
+    stillHolds: (t) =>
+      (lineWith(t, HISTORY_RULE_NEEDLE) as string).includes(HISTORY_OFF_ROUTE),
+  },
+  {
+    label:
+      "history の規定の落ち先側の帰結が別の行へ移る (節には残るが 1 行ではなくなる)",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      historyRuleLine,
+      `${
+        historyRuleLine.replace(HISTORY_OFF_ROUTE, "セッション継承で起動する")
+      }\n- 落ち先では verifier は ${HISTORY_OFF_ROUTE}。`,
+    ),
+    stillHolds: (t) =>
+      (lineWith(t, HISTORY_RULE_NEEDLE) as string).includes(HISTORY_OFF_ROUTE),
+  },
+  {
+    label: "通知の規定から、落ち先で無効化されるものが消える",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      noticeRuleLine,
+      noticeRuleLine.replace(
+        "、(c) 落ち先に落ちた回は、別プロバイダ検証と Paseo 側の可観測性が効かないこと",
+        "",
+      ),
+    ),
+    stillHolds: (t) => {
+      const line = lineWith(t, NOTICE_RULE_NEEDLE) as string;
+      return NOTICE_NEEDLES.every((needle) => line.includes(needle));
+    },
+  },
+  {
+    label: "通知の規定から prefs の置き場所が消える (節の別の行には残る)",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      noticeRuleLine,
+      noticeRuleLine.replace(
+        "`~/.paseo/orchestration-preferences.json` を置けば",
+        "設定ファイルを置けば",
+      ),
+    ),
+    stillHolds: (t) => {
+      const line = lineWith(t, NOTICE_RULE_NEEDLE) as string;
+      return NOTICE_NEEDLES.every((needle) => line.includes(needle));
+    },
+  },
+  {
+    label: "prefs doc の実在確認の案内が旧文 (実在しない CLI) に戻る",
+    original: prefsDoc,
+    mutated: prefsDoc.replace(
+      prefsGuideLine,
+      "- **provider 名とモデル id は環境ごとに違う。** 実在するものは `paseo provider ls` / `paseo model ls` で確かめる (この例の値をそのまま信じない)。",
+    ),
+    stillHolds: prefsGuidePointsToRealTools,
+  },
+  {
+    label:
+      "prefs doc の案内が部分更新にとどまる (MCP を足したが `paseo model ls` も残る)",
+    original: prefsDoc,
+    mutated: prefsDoc.replace(
+      prefsGuideLine,
+      prefsGuideLine.replace(
+        "CLI では `paseo provider ls` が provider の在庫と `status` を返す。",
+        "CLI では `paseo provider ls` / `paseo model ls` で確かめる。",
+      ),
+    ),
+    stillHolds: prefsGuidePointsToRealTools,
   },
 ];
 
