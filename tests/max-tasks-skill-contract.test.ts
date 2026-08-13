@@ -173,6 +173,242 @@ Deno.test("T9 既存の呼び出し例がそのまま残っている (呼び出�
   assertOk(detail === "", detail);
 });
 
+const T17A_NEEDLE = "ロードできなければツール未接続なので、予約はせず";
+const T19_NEEDLE = "**自動再開の予約** (scheduled task を作れる環境でのみ)";
+/** 手順 5 (iv) の起動先。probe の実測 (gh-100) で `loop` に確定したもの。 */
+const LAUNCH_TARGET_NEEDLE =
+  "**起動先は `loop` skill 1 つだけ。その引数として `/task-pipeline <tracker> <source> ...` を渡せ**";
+const T25_NEEDLE = "**再開後のイテレーション継続**";
+const T26_NEEDLE =
+  "**平文の (iv) を読んだ新セッションが実際に `loop` skill を起動し、2 イテレーション目以降へ進むところまでは未実測である**";
+
+Deno.test("T15 ワンショット予約の作成手順 (fireAt・時刻の作り方・通知の扱い) がある", () => {
+  const detail = missing(section, [
+    ["fireAt", "fireAt の言及が無い"],
+    ["date -Iseconds -v+5M", "fireAt の作り方 (date コマンド) が無い"],
+    [
+      "`notifyOnCompletion` は `false` にする",
+      "notifyOnCompletion の指定が無い",
+    ],
+    [
+      "ベタ書きした `select:` は使わない",
+      "ツールのロード方法 (キーワード検索) が無い",
+    ],
+  ]);
+  assertOk(detail === "", detail);
+});
+
+Deno.test("T16 既存の有無で create と update を呼び分ける旨がある", () => {
+  const detail = missing(section, [
+    ["一覧の verb を 1 回呼び", "一覧で既存を確かめる手順が無い"],
+    ["既にあれば update", "既存ありのときの update が無い"],
+    ["無ければ create", "既存なしのときの create が無い"],
+    [
+      "create が「already exists」で失敗したら update に切り替える",
+      "create 失敗時の update フォールバックが無い",
+    ],
+    [
+      "2 回目以降の再開は必ずこの経路を通る",
+      "連鎖再開が既存経路を通ることの明記が無い",
+    ],
+  ]);
+  assertOk(detail === "", detail);
+});
+
+Deno.test("T17a ツール未接続なら予約せず手動再開の案内に落ちる旨がある", () => {
+  assertOk(containsFixed(section, T17A_NEEDLE), "見つからない");
+});
+
+Deno.test("T17b 呼び出しが失敗しても停止そのものは正常に完了させる旨がある", () => {
+  const detail = missing(section, [
+    [
+      "**呼び出しが失敗したとき**も、自動再開は諦めて",
+      "呼び出し失敗側の扱いが無い",
+    ],
+    ["停止そのものは正常に完了させる", "停止を成功させる旨が無い"],
+    [
+      "自動再開の失敗を理由にパイプラインを止められない状態にしてはならない",
+      "自動再開の失敗が停止を巻き添えにしない旨が無い",
+    ],
+  ]);
+  assertOk(detail === "", detail);
+});
+
+Deno.test("T18 固定 taskId で累積せず、プロジェクトごとに分ける理由も書かれている", () => {
+  const detail = missing(section, [
+    [
+      "`task-pipeline-resume-<プロジェクトルートの basename>`",
+      "固定 taskId の具体形が無い",
+    ],
+    ["再開が連鎖しても scheduled task は増えない", "累積しない旨が無い"],
+    [
+      "別プロジェクトの予約を上書きしてしまう",
+      "プロジェクトごとに分ける理由が無い",
+    ],
+  ]);
+  assertOk(detail === "", detail);
+});
+
+Deno.test("T19 予約の手順が停止アクション (release) より後に置かれている", () => {
+  const releaseLine = grepLineNumber(playbookMd, "state.ts release --id <id>");
+  const reserveLine = grepLineNumber(playbookMd, T19_NEEDLE);
+  assertOk(
+    releaseLine !== null && reserveLine !== null && releaseLine < reserveLine,
+    `release_line=${releaseLine ?? ""} reserve_line=${reserveLine ?? ""}`,
+  );
+});
+
+Deno.test("T20a history に予約の id と発火予定時刻 (失敗時は理由) を残す旨がある", () => {
+  const detail = missing(section, [
+    ["結果を history に残す", "history へ残す手順が無い"],
+    [
+      "max_tasks 停止 — 自動再開を予約: <taskId> fireAt <ISO>",
+      "成功時の history 行の形が無い",
+    ],
+    ["自動再開なし (<理由>)", "失敗時の history 行の形が無い"],
+  ]);
+  assertOk(detail === "", detail);
+});
+
+Deno.test("T20b 最終報告にも予約の id と発火予定時刻が載る旨がある", () => {
+  assertOk(
+    containsFixed(
+      section,
+      "**自動再開の予約**: 作成または更新した `taskId` と発火予定時刻 (ISO)",
+    ),
+    "見つからない",
+  );
+});
+
+Deno.test("T21 アプリが閉じていれば次回起動時に発火する旨が既知の限界として書かれている", () => {
+  const detail = missing(section, [
+    ["アプリが開いている間だけ", "アプリが開いている間だけ走る旨が無い"],
+    ["次回起動時に発火する", "次回起動時に発火する旨が無い"],
+    [
+      "手動再開の案内は自動再開の成否によらず必ず出す",
+      "自動再開が成功しても手動案内を出す旨が無い",
+    ],
+  ]);
+  assertOk(detail === "", detail);
+});
+
+Deno.test("T22 prompt の自己完結要件 4 点が書かれている", () => {
+  const detail = missing(section, [
+    [
+      "新しいセッションはこの会話を一切知らない",
+      "前の会話を知らない前提が無い",
+    ],
+    [
+      "プロジェクトルートの絶対パス",
+      "プロジェクトルートの絶対パスの要求が無い",
+    ],
+    [
+      LAUNCH_TARGET_NEEDLE,
+      "skill を平文で起動させる指示が無い",
+    ],
+    [
+      "prompt の中のスラッシュコマンドは**展開されない**",
+      "スラッシュコマンドが展開されないという実測が無い",
+    ],
+    [
+      "同じ文字列**の `/loop /task-pipeline",
+      "起動引数そのままの再開コマンドを含める要求が無い",
+    ],
+  ]);
+  assertOk(detail === "", detail);
+});
+
+Deno.test("T23a T17a への回帰注入 (メモリ上の複製から該当記述を除去) が効いている", () => {
+  const injected = playbookMd.replace(T17A_NEEDLE, "");
+  assertOk(injected !== playbookMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("T23b T17a の退行 (未接続時の扱いの消失) を T17a 相当のチェックで検知できる", () => {
+  const injected = playbookMd.replace(T17A_NEEDLE, "");
+  assertOk(!containsFixed(injected, T17A_NEEDLE), "除去後も見つかってしまった");
+});
+
+Deno.test("T24a T19 への回帰注入 (予約ブロックの見出しを除去) が効いている", () => {
+  const injected = playbookMd.replace(T19_NEEDLE, "");
+  assertOk(injected !== playbookMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("T24b T19 の退行 (予約ブロックの消失) を T19 相当のチェックで検知できる", () => {
+  const injected = playbookMd.replace(T19_NEEDLE, "");
+  assertOk(
+    grepLineNumber(injected, T19_NEEDLE) === null,
+    "除去後も行番号が取れてしまった",
+  );
+});
+
+Deno.test("T25 再開後のイテレーション継続の扱い (駆動元・継続しない場合の帰結) がある", () => {
+  const detail = missing(section, [
+    [T25_NEEDLE, "継続の扱いを書いた段落が無い"],
+    [
+      "(iv) で起動させる `loop` skill が持っている",
+      "継続を駆動するのが何かの明示が無い",
+    ],
+    [
+      "`ScheduleWakeup` が (skill を起動する前の時点で既に) ツール一覧にある",
+      "新セッション側の材料を実測したことの記載が無い",
+    ],
+    [
+      "**1 イテレーションで止まる**",
+      "`loop` を経由しない起動で止まることの記載が無い",
+    ],
+    [
+      "**実質 1 件ずつ進む**",
+      "止まった場合の帰結 (1 件ずつ進む) の記載が無い",
+    ],
+  ]);
+  assertOk(detail === "", detail);
+});
+
+Deno.test("T26 実走までは未実測であることが既知の限界として書かれている", () => {
+  const detail = missing(section, [
+    ["**既知の限界**", "既知の限界の段落が無い"],
+    [T26_NEEDLE, "実走が未実測である旨が無い"],
+    [
+      "probe は実在の issue に本物のパイプラインが走ってしまうのを避けるため skill の起動を禁じた",
+      "未実測の理由 (probe が起動を禁じた読み取り専用の観測であること) が無い",
+    ],
+  ]);
+  assertOk(detail === "", detail);
+});
+
+Deno.test("T27a LAUNCH_TARGET への回帰注入 (起動先の記述を除去) が効いている", () => {
+  const injected = playbookMd.replace(LAUNCH_TARGET_NEEDLE, "");
+  assertOk(injected !== playbookMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("T27b 起動先の退行 (手順 5 (iv) の起動先の消失・書き換え) を検知できる", () => {
+  const injected = playbookMd.replace(LAUNCH_TARGET_NEEDLE, "");
+  assertOk(
+    !containsFixed(injected, LAUNCH_TARGET_NEEDLE),
+    "除去後も見つかってしまった",
+  );
+});
+
+Deno.test("T28a T25 への回帰注入 (継続の扱いの見出しを除去) が効いている", () => {
+  const injected = playbookMd.replace(T25_NEEDLE, "");
+  assertOk(injected !== playbookMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("T28b T25 の退行 (継続の扱いの消失) を T25 相当のチェックで検知できる", () => {
+  const injected = playbookMd.replace(T25_NEEDLE, "");
+  assertOk(!containsFixed(injected, T25_NEEDLE), "除去後も見つかってしまった");
+});
+
+Deno.test("T29a T26 への回帰注入 (未実測の記述を除去) が効いている", () => {
+  const injected = playbookMd.replace(T26_NEEDLE, "");
+  assertOk(injected !== playbookMd, "置換が効かず元テキストと同一になった");
+});
+
+Deno.test("T29b T26 の退行 (未実測の記述の消失) を T26 相当のチェックで検知できる", () => {
+  const injected = playbookMd.replace(T26_NEEDLE, "");
+  assertOk(!containsFixed(injected, T26_NEEDLE), "除去後も見つかってしまった");
+});
+
 Deno.test("T10 max_tasks の停止判定が「併走の枠」より前に置かれている", () => {
   const gateLine = grepLineNumber(skillMd, "`max_tasks` による停止判定");
   const concurrencyLine = grepLineNumber(skillMd, "**併走の枠**:");
