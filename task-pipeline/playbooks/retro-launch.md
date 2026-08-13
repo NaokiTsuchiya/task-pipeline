@@ -2,7 +2,7 @@
 
 ## レトロ観測
 
-メトリクス (`~/.claude/task-pipeline/metrics.jsonl`。1 行 = 1 タスク実行、`fail_reasons` を含む。`playbooks/merge-recovery.md` の「タスクメトリクスの収集」) は蓄積されるだけでは改善アクションに変わらない。**次の 3 トリガーのいずれかで**、read-only のレトロ観測サブエージェント (general-purpose、同期) を 1 体起動し、蓄積分を人が読める要約と構造化された改善候補に変換する。指示は `~/.claude/skills/task-pipeline/references/retro.md` に置き、パスで渡す (SKILL.md の「コンテキスト規律」)。**モデルは指定しない** (改善候補の抽出は判断そのものが成果物のため — トリアージ・枯渇時の内訳調査と同じ扱い)。
+メトリクス (`~/.claude/task-pipeline/metrics.jsonl`。1 行 = 1 タスク実行、`fail_reasons` を含む。`playbooks/merge-recovery.md` の「タスクメトリクスの収集」) は蓄積されるだけでは改善アクションに変わらない。**次の 3 トリガーのいずれかで**、read-only のレトロ観測サブエージェント (general-purpose、同期) を 1 体起動し、蓄積分を人が読める要約と構造化された改善候補に変換する。指示は `~/.claude/skills/task-pipeline/references/retro.md` に置き、パスで渡す (SKILL.md の「コンテキスト規律」)。**モデルは指定しない** (改善候補の抽出は判断そのものが成果物のため — トリアージ・枯渇時の内訳調査と同じ扱い。起動パラメータと経路の正は `playbooks/agent-launch.md` の `retro` の行)。
 
 ### トリガー
 

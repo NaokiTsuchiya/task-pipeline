@@ -20,14 +20,15 @@ Pause for the user only when the work genuinely requires them: a destructive or 
 
 ## 引数と場所
 
-- `$ARGUMENTS`: `<tracker> [source] [finish=none|commit|pr] [approve=ask|auto] [max_open=<N>] [rebase=auto|off] [max_tasks=<N>] [review=<path>]` (例: `markdown ./TASKS.md finish=commit`、`gh ?label=ready finish=pr approve=auto`)。`/loop` 経由では毎イテレーション同じ引数で再起動される。
-  - tracker より後ろのトークンは、`finish=` / `approve=` / `max_open=` / `rebase=` / `max_tasks=` / `review=` で始まるものがそれぞれの設定、それ以外が `source`。
+- `$ARGUMENTS`: `<tracker> [source] [finish=none|commit|pr] [approve=ask|auto] [max_open=<N>] [rebase=auto|off] [max_tasks=<N>] [review=<path>] [impl_provider=<provider>[/<model>]] [verify_provider=<provider>[/<model>]]` (例: `markdown ./TASKS.md finish=commit`、`gh ?label=ready finish=pr approve=auto`)。`/loop` 経由では毎イテレーション同じ引数で再起動される。
+  - tracker より後ろのトークンは、`finish=` / `approve=` / `max_open=` / `rebase=` / `max_tasks=` / `review=` / `impl_provider=` / `verify_provider=` で始まるものがそれぞれの設定、それ以外が `source`。
   - `approve` は承認の取り方。`ask` (省略時): 候補の上位から**ユーザーが 1 件選ぶ**。`auto`: **順位 1 位を自動で採る** (下記「承認」)。`auto` にすると人を待つ定常ポイントが無くなり、パイプラインは ready なタスクを上から消化し続ける — **トラッカー側の ready がそのまま唯一の人間ゲートになる**ので、`?label=ready` のような絞り込み無しで `auto` を使ってはならない。
   - `max_open` は**マージ待ちのまま溜めてよい自分の PR の本数** (既定 2)。この本数に達している間は新しいタスクを着手しない。ただし**上限に達している間も枯渇の判定と追従の打ち切りには到達する** (下記「ペーシングと枯渇」の停滞) — 到達しないと、誰もマージしない限り空の wakeup が無期限に続く。レビューが追いつかないまま PR だけが積み上がるのを防ぐための上限で、`finish=pr` のときだけ意味を持つ。
   - **`source` は省略できる。** その場合はアダプタ起動プロンプトの `source:` を空にして渡し、既定値の解釈はアダプタに委ねる (既定を持たないアダプタはエラーを返す)。state.json の `source` には与えられたまま (省略なら空文字) を記録する。
   - `finish` はタスク完了時のコード変更の扱い。`none` (省略時): working tree に未コミットで残す。`commit`: タスクごとに現在のブランチへコミット。`pr`: タスクごとにブランチを切り、コミット・push して PR を作成し、**以降その PR の CI とレビューコメントを追従する** (`playbooks/pr-follow.md`)。
   - `rebase` は**マージを回収した後に、まだレビュー待ちの自分の PR を新しい `origin/<base>` へ載せ直すか**。`auto` (省略時): ガードを全部通ったものだけ rebase して force push する (`playbooks/merge-recovery.md` の「残った PR を新しい基点へ載せ直す」)。`off`: 何もしない (基点が古いままの PR は人がリベースする)。`finish=pr` のときだけ意味を持つ。
   - `review` は**プロジェクト固有のレビュー観点ファイルの置き場所** (既定: target project のルート直下の `TASK_PIPELINE_REVIEW.md`)。相対パスは target project のルート基準で解決する。実装フェーズ (`implement` / `pr_fix`) の実装と検証だけがこのファイルを読み、他のフェーズは読まない (`references/executor.md` / `references/verifier.md` の各節)。**この値は `state.ts next --config` には渡さない** — スケジューリングの判断材料ではなく、未知のキーとして `usage` エラーになる。渡す先は下記「タスク実行」手順 3・6 の起動プロンプトの `review file:` だけで、値には**解決済みの絶対パス**を書く (相対パスの基準を先方に推測させない)。
+  - `impl_provider` / `verify_provider` は**サブエージェントの provider・model の上書き**。`impl_provider` が実装側 (実行エージェント)、`verify_provider` が検証側 (検証エージェント) で、値の形は `<provider>[/<model>]` (最初の `/` までが provider)。**解決の正は `playbooks/agent-launch.md`** — 指定が無いときにどこから引くか、どの役割が指定を受け付けないか、mode と経路をどう選ぶかはすべてそちらにある (ここには書かない)。**この 2 つの値も `review` と同じく `state.ts next --config` には渡さない** (未知のキーとして `usage` エラーになる)。
   - `max_tasks` は**このセッションで新しく着手して完了させてよいタスク数の上限** (既定: 無制限。省略時は現行の挙動を一切変えない)。到達したら、揮発資源ゼロの地点でループを止める — コンテキスト肥大を抑え、人が `/clear` してから再開できるようにするための引数 (`playbooks/max-tasks.md`)。止めるとき、scheduled task を作れる環境なら数分後に発火するワンショットの予約を 1 件置いて**コンテキストを持たない新しいセッションで自動再開する**。作れない環境では手動再開の案内を出して止まる (どちらも同じ手順書)。
 - skill dir: `~/.claude/skills/task-pipeline/`
 - アダプタ定義: `~/.claude/skills/task-pipeline/references/adapters/<tracker>.md`。存在しなければ adapters/ を Glob で列挙して提示し、**ループを止めて** (`playbooks/depleted.md` の手順 2 と同じ) 終了する。
@@ -53,6 +54,7 @@ Pause for the user only when the work genuinely requires them: a destructive or 
 
 | 到達条件 | 読むファイル |
 |---|---|
+| サブエージェントを起動または再開する直前 — provider・model・mode と経路を決める | `playbooks/agent-launch.md` |
 | タスク実行 手順 2 — タスク専用の worktree を作る / 作れなかった | `playbooks/worktree.md` |
 | `next` が非除外の `running` タスクに `wait` / `status-check` / `set-takeover` / `clear-takeover` / `takeover` を返した | `playbooks/inflight.md` |
 | `finish=pr` の PR を追従する — `ship` の直後、観測プロセスの終了通知、`next` の `probe-run` / `fix-start` / `fix-ci-rerun` / `fix-give-up` / `release {defer: "fix-start"}` | `playbooks/pr-follow.md` |
@@ -164,7 +166,7 @@ state.json への書き込みはすべて上記「CLI (state.ts) の呼び出し
      - 復帰したタスクは承認 UI に出さず、そのまま `queued` として扱う — **ユーザーがトラッカー側で戻した操作そのものが承認である**。復帰させたら**この承認フローはそこで終える** (手順 2〜4 に進まない)。下の `relisted` の掃除だけ済ませて、このイテレーションでそのタスクの実行に入る。同時に複数が復帰していたら 1 件だけ実行し、残りは `queued` のまま次のイテレーションに回す。
    今回の一覧に現れなかった id は `relisted` から消す。`{"tasks": []}` なら枯渇時フローへ。**除いた結果 0 件になっただけなら枯渇ではない** — その除外は relisted ガードによるもので、復帰かどうかの判定が次の list に持ち越されている。dynamic なら ScheduleWakeup 1800 秒で次イテレーションへ (`seen_at` から 10 分以上あける必要があるので、ここだけは 60 秒ではない。30 分あける理由は `docs/state-machine.md`)。
 2. 優先順位を決める。**まず `list` が返した `priority` で 3 段に分ける** (`high` → 指定なし → `low`)。**この段は人の指示なので、トリアージの判断より常に優先する** — 段をまたいで並べ替えてはならない。順位付けが要るのは各段の中だけである (依存は `ready` 側で既に閉じているので、段は承認 UI の見せ方だけに効く。`priority` を返さないトラッカーでは全件が中位)。
-   **並びを再利用してよいのは、次の 3 つがすべて前回と同じときだけである**: (a) 今回の一覧の id がすべて `candidates` に含まれる、(b) 各 id の `priority` が控えた値と一致する、(c) 各 id の `updated_at` が控えた値と一致する (`updated_at` を条件に入れる理由は `docs/state-machine.md`)。1 つでも崩れたら、トリアージ用サブエージェント (general-purpose、同期) を 1 体起動して順位付けし直す (一覧から消えた id は落とし、`title` は今回の `list` の値で上書きする)。段ごとに分けて渡し、段をまたいだ順位は求めない:
+   **並びを再利用してよいのは、次の 3 つがすべて前回と同じときだけである**: (a) 今回の一覧の id がすべて `candidates` に含まれる、(b) 各 id の `priority` が控えた値と一致する、(c) 各 id の `updated_at` が控えた値と一致する (`updated_at` を条件に入れる理由は `docs/state-machine.md`)。1 つでも崩れたら、トリアージ用サブエージェント (general-purpose、同期) を 1 体起動して順位付けし直す (一覧から消えた id は落とし、`title` は今回の `list` の値で上書きする。**provider・model・mode と経路の決め方は `playbooks/agent-launch.md`** — この役割は「指定しない」側である)。段ごとに分けて渡し、段をまたいだ順位は求めない:
    ```
    You are a triage subagent. Read only; do not modify anything.
    Rank these tasks by which should be worked on first:
@@ -190,7 +192,7 @@ state.json への書き込みはすべて上記「CLI (state.ts) の呼び出し
 
 ## アダプタの呼び方
 
-アダプタ操作は毎回フレッシュなサブエージェント (general-purpose、同期) で行う。**`list` のときだけ Agent tool の `model` パラメータに `haiku` を渡す** (理由は下記)。`mark` では渡さない。プロンプトはこの形のみ:
+アダプタ操作は毎回フレッシュなサブエージェント (general-purpose、同期) で行う。**`list` のときだけ Agent tool の `model` パラメータに `haiku` を渡す** (理由は下記)。`mark` では渡さない (この 2 役割の起動パラメータと経路は `playbooks/agent-launch.md` の表に載っている)。プロンプトはこの形のみ:
 
 ```
 You are a tracker adapter subagent.
@@ -225,7 +227,7 @@ Return only what the adapter file specifies for this operation.
    ```
    ヒットしたら `state.ts set-gate --id <id>` を呼ぶ (`run.gate: "light"`, `run.phase: "research+plan"` に更新。前提は `run` が `initial/full/research` のノードにあること)。ヒットしない・ファイルが無い・コマンドが実行できないときは何もしない — **既定は full**。この判定も `mark` より前に行ってはならない (スタブに `gate:` 行は無いので必ず full に落ちる — 宣言のあるタスクでも安全側の意図した降格)。`mark in_progress` の応答の `gate_declared` と**この grep の結果が食い違ったら両方の値を history に書く** (アダプタの書き出しが宣言を落としたことを観測するため。過去に本文末尾マーカー行方式で 2/3 の宣言が静かに失われた実績があり `docs/gate-declaration-2026-08.md` に記録がある)。
 2. **タスク専用の worktree を作る** (`playbooks/worktree.md`)。作れなかった場合はそこに書いたとおりに扱う。
-3. 実行エージェントを **background で 1 体** 起動する (subagent_type: general-purpose)。プロンプトはこの 5 行のみ:
+3. 実行エージェントを **background で 1 体** 起動する (subagent_type: general-purpose。**provider・model・mode と経路は起動の直前に `playbooks/agent-launch.md` で決める** — 下のプロンプト文面は変えない)。プロンプトはこの 5 行のみ:
    ```
    You are the long-lived executor for exactly one task.
    Read ~/.claude/skills/task-pipeline/references/executor.md and follow it.
@@ -241,7 +243,7 @@ Return only what the adapter file specifies for this operation.
    - `DONE` で、`<name>` が state.json の `run.phase` と一致 → 検証ゲートへ。
    - `DONE` で、`<name>` が state.json の `run.phase` と不一致 (プロトコル行の重複再送など) → 無視する。
    - `REBASE-CONFLICT — <パス>` → 載せ直しが衝突で止まった。`run.phase` が `finalize` なら (PR を出す・押し直す直前の載せ直し) `playbooks/merge-recovery.md` の「コンフリクトのトリアージ」の**手順 3 だけ**を行い、その結果を持って同じ手順書の「解決サイクル」の**「finalize から入る経路」**へ合流する (**手順 4・5 の `rebase-request` は呼ばない** — 前提が `progress==resting` なので、running のタスクでは必ず `conflict` で失敗する。理由と代わりの手順は同節)。`run.phase` が `rebase_fix` なら同じ手順書の「解決サイクル」の諦め方に入る。**どちらでも blocked にはしない。**
-6. **検証ゲート**: 検証エージェントを同期起動する (subagent_type: `task-pipeline-verifier`)。**`next` の `tasks[].gate.reuse_verifier` が agentId を返せば、その検証エージェントを SendMessage で再開する** (下記「再開時のプロンプト」)。**null なら、次のとおりフレッシュに新規起動する。** 起動前に `state.ts verdict-path --id <id>` を 1 回呼び、返る `path` をそのまま verifier に渡す (**このパスを自分で作らない** — フェーズ・試行回数・修正/解決サイクルの連番からの導出はすべて CLI の内側にある)。読み取り専用なので state.json は変わらない:
+6. **検証ゲート**: 検証エージェントを同期起動する (subagent_type: `task-pipeline-verifier`。**provider・model・mode と経路は起動・再開の直前に `playbooks/agent-launch.md` で決める** — この役割だけは Paseo 経路が第一候補である)。**`next` の `tasks[].gate.reuse_verifier` が agentId を返せば、その検証エージェントを SendMessage で再開する** (下記「再開時のプロンプト」)。**null なら、次のとおりフレッシュに新規起動する。** 起動前に `state.ts verdict-path --id <id>` を 1 回呼び、返る `path` をそのまま verifier に渡す (**このパスを自分で作らない** — フェーズ・試行回数・修正/解決サイクルの連番からの導出はすべて CLI の内側にある)。読み取り専用なので state.json は変わらない:
    ```
    You are a fresh, independent verifier.
    Read ~/.claude/skills/task-pipeline/references/verifier.md and follow it.
