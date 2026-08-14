@@ -267,6 +267,11 @@ export type NextAction =
     readonly resume_phase: string;
     readonly recheck_gate: boolean;
     readonly needs_worktree: boolean;
+    /**
+     * gh-117: 差し替え対象の `run.executor` (走っている実行エージェントが無ければ null)。
+     * `set-executor --expect-executor` にそのまま渡す値で、これが古ければ CAS が弾く。
+     */
+    readonly replaces: string | null;
   }
   /** 沈黙した実行エージェントへの Status check (SendMessage)。 */
   | { readonly kind: "status-check" }
@@ -308,6 +313,11 @@ export interface NextFinalize {
 export interface NextGate {
   /** 再開先の agentId。再開できないとき (null / 別セッション / attempts 上限) は null。 */
   readonly reuse_verifier: string | null;
+  /**
+   * gh-117: `phase-fail --expect-attempts` に渡す値 (現在の `run.attempts`)。run が無ければ
+   * null。並行インスタンスが先に同じラウンドを落としていれば、この値は既に古く conflict になる。
+   */
+  readonly attempts: number | null;
 }
 
 export interface NextTask {
@@ -570,6 +580,7 @@ function livenessAction(
         recheck_gate: run.kind === "initial" && run.gate === "full" &&
           run.phase === "research",
         needs_worktree: target.item.worktree === null,
+        replaces: run.executor,
       };
 
   if (run.takeover_at !== null) {
@@ -761,7 +772,10 @@ function deriveTask(
     progress: item.progress,
     artifact: item.artifact.state,
     follow_target: followTarget,
-    gate: { reuse_verifier: reuseVerifierOf(item.run, input.session) },
+    gate: {
+      reuse_verifier: reuseVerifierOf(item.run, input.session),
+      attempts: item.run?.attempts ?? null,
+    },
   };
 
   // **生きている他セッションが所有するタスクには一切触らない** — 座標だけを報告し、

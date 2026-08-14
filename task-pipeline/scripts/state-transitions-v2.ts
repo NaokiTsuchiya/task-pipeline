@@ -376,11 +376,15 @@ export interface PhaseFailResult {
   attempts: number;
 }
 
+// `expectAttempts` は呼び出し側が観測した `run.attempts` (= その FAIL がどの判定ラウンドに
+// 対するものかの世代)。同じラウンドを 2 つの並行インスタンスが落とすと二重加算になるので、
+// 世代が進んでいたら書かずに conflict にする (gh-117。docs/state-machine.md 8 節)。
 export function applyPhaseFail(
   item: V2Item,
   index: number,
   state: V2State,
   phase: string,
+  expectAttempts: number,
   verifier: string | null = null,
   verifierSession: string | null = null,
 ): PhaseFailResult {
@@ -389,6 +393,10 @@ export function applyPhaseFail(
   requirePrecondition(
     run.phase === phase,
     `phase must be ${phase}, got ${String(run.phase)}`,
+  );
+  requirePrecondition(
+    run.attempts === expectAttempts,
+    `run.attempts must be ${expectAttempts}, got ${run.attempts}`,
   );
   const attempts = run.attempts + 1;
   const next: V2Item = {
@@ -1327,6 +1335,9 @@ export function applySetWorktree(
   return { ...replaced, withdrawn_branches };
 }
 
+// `expectExecutor` は呼び出し側が観測した `run.executor` の値 (初回起動なら null)。
+// 一致しなければ書かずに conflict — 同じ session id を共有する 2 つの並行インスタンスは
+// heartbeat では区別できず、これが唯一の食い止めになる (gh-117。docs/state-machine.md 8 節)。
 export function applySetExecutor(
   item: V2Item,
   index: number,
@@ -1334,9 +1345,16 @@ export function applySetExecutor(
   executor: string,
   session: string,
   nowIso: string,
+  expectExecutor: string | null,
 ): V2State {
   requireVerbAxes(item, "set-executor");
   const run = item.run as V2Run;
+  requirePrecondition(
+    run.executor === expectExecutor,
+    `run.executor must be ${expectExecutor ?? "null"}, got ${
+      run.executor ?? "null"
+    }`,
+  );
   const next: V2Item = {
     ...item,
     run: {
@@ -1357,10 +1375,17 @@ export function applyTouchExecutor(
   state: V2State,
   sessionIfUnowned: string | undefined,
   nowIso: string,
+  expectExecutor?: string,
 ): V2State {
   requireVerbAxes(item, "touch-executor");
   const run = item.run as V2Run;
   requirePrecondition(run.executor !== null, "run.executor must be set");
+  if (expectExecutor !== undefined) {
+    requirePrecondition(
+      run.executor === expectExecutor,
+      `run.executor must be ${expectExecutor}, got ${run.executor}`,
+    );
+  }
   const next: V2Item = {
     ...item,
     run: { ...run, executor_last_event_at: nowIso },

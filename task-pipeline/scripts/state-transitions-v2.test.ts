@@ -438,7 +438,8 @@ const VERB_CASES: readonly VerbCase[] = [
     name: "phase-fail",
     verb: "phase-fail",
     invoke: (i, x, s) =>
-      applyPhaseFail(i, x, s, i.run?.phase ?? "research").state,
+      applyPhaseFail(i, x, s, i.run?.phase ?? "research", i.run?.attempts ?? 0)
+        .state,
     frameNode: [P_FULL_IMPLEMENT, A_NODE_NONE],
     frame: ["run.attempts"],
   },
@@ -732,7 +733,8 @@ const VERB_CASES: readonly VerbCase[] = [
   {
     name: "set-executor",
     verb: "set-executor",
-    invoke: (i, x, s) => applySetExecutor(i, x, s, "agent-1", "s1", NOW),
+    invoke: (i, x, s) =>
+      applySetExecutor(i, x, s, "agent-1", "s1", NOW, i.run?.executor ?? null),
     frameNode: [P_FULL_IMPLEMENT, A_NODE_NONE],
     frame: ["run.executor", "run.executor_last_event_at", "session"],
   },
@@ -1389,7 +1391,7 @@ Deno.test("T-V2T-VERIFIER-1: phase-fail writes verifier/verifier_session when gi
 
   // --verifier 省略 (デフォルト引数) → 両方 null のまま
   const omitted = itemOf(
-    applyPhaseFail(item, 0, state, "implement").state,
+    applyPhaseFail(item, 0, state, "implement", item.run!.attempts).state,
   ) as V2Item;
   assertEquals(omitted.run!.verifier, null, "omitted: verifier");
   assertEquals(
@@ -1405,7 +1407,16 @@ Deno.test("T-V2T-VERIFIER-1: phase-fail writes verifier/verifier_session when gi
 
   // --verifier + --session 相当 (直接引数で渡す) → 両方書かれる
   const given = itemOf(
-    applyPhaseFail(item, 0, state, "implement", "agent-1", "s1").state,
+    applyPhaseFail(
+      item,
+      0,
+      state,
+      "implement",
+      item.run!.attempts,
+      "agent-1",
+      "s1",
+    )
+      .state,
   ) as V2Item;
   assertEquals(given.run!.verifier, "agent-1", "given: verifier");
   assertEquals(given.run!.verifier_session, "s1", "given: verifier_session");
@@ -1453,7 +1464,15 @@ Deno.test("T-V2T-VERIFIER-4: set-executor resets verifier/verifier_session to nu
   });
   const state = buildState(withVerifier);
   const out = itemOf(
-    applySetExecutor(withVerifier, 0, state, "agent-2", "s2", NOW),
+    applySetExecutor(
+      withVerifier,
+      0,
+      state,
+      "agent-2",
+      "s2",
+      NOW,
+      withVerifier.run!.executor,
+    ),
   ) as V2Item;
   assertEquals(out.run!.verifier, null, "verifier reset");
   assertEquals(out.run!.verifier_session, null, "verifier_session reset");
@@ -1873,7 +1892,8 @@ const REACH_VARIANTS: readonly ReachVariant[] = [
   },
   {
     label: "phase-fail",
-    run: (i, x, s) => applyPhaseFail(i, x, s, i.run!.phase).state,
+    run: (i, x, s) =>
+      applyPhaseFail(i, x, s, i.run!.phase, i.run!.attempts).state,
   },
   { label: "block", run: (i, x, s) => applyBlock(i, x, s, "reason") },
   { label: "restore", run: (i, x, s) => applyRestore(i, x, s) },
@@ -1989,7 +2009,8 @@ const REACH_VARIANTS: readonly ReachVariant[] = [
   },
   {
     label: "set-executor",
-    run: (i, x, s) => applySetExecutor(i, x, s, "agent-1", "s1", NOW),
+    run: (i, x, s) =>
+      applySetExecutor(i, x, s, "agent-1", "s1", NOW, i.run?.executor ?? null),
   },
   {
     label: "touch-executor",
@@ -2994,3 +3015,66 @@ function assertConflict(fn: () => unknown, msg: string): void {
   }
   assert(threw, msg);
 }
+
+// ---------------------------------------------------------------------------
+// gh-117: 揮発資源の楽観ロック (CAS) を apply 純関数の層で見る。CLI 経路 (state.test.ts の
+// T-CAS-*) は exit code しか観測できないので、投げているのが conflict であって usage では
+// ないことはここで直接確かめる。
+// ---------------------------------------------------------------------------
+
+Deno.test("T-V2T-CAS-1: set-executor compares the observed run.executor", () => {
+  const item = buildItem(P_FULL_IMPLEMENT, A_NODE_NONE); // executor: "agent-0"
+  const state = buildState(item);
+  const ok = itemOf(
+    applySetExecutor(item, 0, state, "agent-1", "s1", NOW, "agent-0"),
+  ) as V2Item;
+  assertEquals(ok.run!.executor, "agent-1", "the observed value is accepted");
+  assertConflict(
+    () => applySetExecutor(item, 0, state, "agent-1", "s1", NOW, null),
+    "omitting the expected value (= null) must not overwrite a live executor",
+  );
+  assertConflict(
+    () => applySetExecutor(item, 0, state, "agent-1", "s1", NOW, "agent-x"),
+    "a stale expected value must be rejected",
+  );
+  const unowned = withExecutor(item, null);
+  assertConflict(
+    () =>
+      applySetExecutor(
+        unowned,
+        0,
+        buildState(unowned),
+        "a",
+        "s1",
+        NOW,
+        "agent-0",
+      ),
+    "expecting an executor that is not there must be rejected",
+  );
+});
+
+Deno.test("T-V2T-CAS-2: phase-fail compares the observed run.attempts", () => {
+  const item = buildItem(P_FULL_IMPLEMENT, A_NODE_NONE); // attempts: 1
+  const state = buildState(item);
+  const bumped = itemOf(
+    applyPhaseFail(item, 0, state, item.run!.phase, 1).state,
+  ) as V2Item;
+  assertEquals(bumped.run!.attempts, 2, "a matching generation increments");
+  assertConflict(
+    () => applyPhaseFail(item, 0, state, item.run!.phase, 0),
+    "a generation that was already consumed must be rejected",
+  );
+});
+
+Deno.test("T-V2T-CAS-3: touch-executor compares the expected executor only when given", () => {
+  const item = buildItem(P_FULL_IMPLEMENT, A_NODE_NONE); // executor: "agent-0"
+  const state = buildState(item);
+  const matched = itemOf(
+    applyTouchExecutor(item, 0, state, undefined, NOW, "agent-0"),
+  ) as V2Item;
+  assertEquals(matched.run!.executor, "agent-0");
+  assertConflict(
+    () => applyTouchExecutor(item, 0, state, undefined, NOW, "agent-x"),
+    "touching someone else's executor must be rejected",
+  );
+});

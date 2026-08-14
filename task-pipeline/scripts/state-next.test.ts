@@ -1823,6 +1823,53 @@ Deno.test("N-GATE-4: verifier 非null・session 一致・attempts>=3 → reuse_v
 });
 
 // ---------------------------------------------------------------------------
+// N-CAS — gh-117: CAS の期待値を呼び出し側へ渡す 2 つの材料
+// (`gate.attempts` と `takeover` の `replaces`)
+// ---------------------------------------------------------------------------
+
+Deno.test("N-CAS-1: gate.attempts は run.attempts をそのまま返し、run が無ければ null", () => {
+  const result = deriveNext(
+    state([
+      item("t-1", { progress: "running", run: run({ attempts: 2 }) }),
+      item("t-2", { progress: "queued", run: null, session: null }),
+    ]),
+    input(),
+  );
+  assertEquals(taskOf(result, "t-1").gate.attempts, 2);
+  assertEquals(taskOf(result, "t-2").gate.attempts, null);
+});
+
+Deno.test("N-CAS-2: takeover.replaces は差し替え対象の executor (居なければ null)", () => {
+  const withExecutor = deriveNext(
+    state([
+      item("t-1", {
+        progress: "running",
+        run: run({
+          executor: "agent-1",
+          takeover_at: isoMinutesAgo(30),
+          executor_last_event_at: isoMinutesAgo(200),
+        }),
+      }),
+    ]),
+    input(),
+  );
+  assertEquals(
+    actionOf(taskOf(withExecutor, "t-1"), "takeover").replaces,
+    "agent-1",
+  );
+
+  const noExecutor = deriveNext(
+    state([
+      item("t-1", { progress: "running", run: run({ executor: null }) }),
+    ]),
+    input(),
+  );
+  const action = actionOf(taskOf(noExecutor, "t-1"), "takeover");
+  assertEquals(action.reason, "no-executor");
+  assertEquals(action.replaces, null);
+});
+
+// ---------------------------------------------------------------------------
 // 導出 8 分類の網羅 (モジュール読み込み時の不変条件。冒頭の nextTest を参照)
 // ---------------------------------------------------------------------------
 
