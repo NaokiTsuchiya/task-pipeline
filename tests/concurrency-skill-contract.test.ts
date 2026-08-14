@@ -1,6 +1,8 @@
-// tests/concurrency-skill-contract.test.ts — task-pipeline/SKILL.md の「毎イテレーションの手順」節が
-// 仕上げ (pr_fix/rebase_fix) だけが飛行中のときに新しいタスクの着手 (claim) へ到達することを固定する
-// (gh-60 の受け入れ条件1・2・5)。
+// tests/concurrency-skill-contract.test.ts — 複数の実行主体が並行するときの手順書の契約を固定する。
+// (1) task-pipeline/SKILL.md の「毎イテレーションの手順」節が、仕上げ (pr_fix/rebase_fix) だけが
+// 飛行中のときに新しいタスクの着手 (claim) へ到達すること (gh-60 の受け入れ条件1・2・5)。
+// (2) 同一 session id の並行インスタンスに対する揮発資源の楽観ロック (CAS) を、SKILL.md と
+// playbooks/inflight.md が実際に使うこと (gh-117。後半の C 系)。
 //
 //   deno test --allow-read tests/concurrency-skill-contract.test.ts
 //   deno task test                          # 自動検出でも走る
@@ -87,5 +89,109 @@ Deno.test("B6 A3 の退行 (順序記述の消失) を A3 相当のチェック�
   assertOk(
     !containsFixed(injectedSection, A3_NEEDLE),
     "除去後も見つかってしまった",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// gh-117: 揮発資源の楽観ロック (CAS) を手順書が実際に使うことの固定。
+//
+// CLI 側の守り (state.ts の --expect-executor / --expect-attempts) は、手順書がその値を
+// 渡さなくなった瞬間に無効になる — 省略は `set-executor` では「null 期待」に倒れるので
+// 気づけるが、`touch-executor` では従来どおり通ってしまう。呼び出し形と conflict の扱いを
+// ここで固定する (契約は task-pipeline/docs/state-cli-contract.md の
+// 「揮発資源の楽観ロック (gh-117)」節)。
+// ---------------------------------------------------------------------------
+
+const INFLIGHT_MD = new URL("task-pipeline/playbooks/inflight.md", REPO_ROOT);
+const inflightMd = Deno.readTextFileSync(INFLIGHT_MD);
+
+const CAS_NEEDLES: { label: string; text: string; needle: string }[] = [
+  {
+    label:
+      "C1 SKILL.md: 初回起動の set-executor は --expect-executor を省略する",
+    text: skillMd,
+    needle: "**この呼び出しは `--expect-executor` を省略する**",
+  },
+  {
+    label:
+      "C2 SKILL.md: 停止通知の touch-executor が送り元の agentId を宣言する",
+    text: skillMd,
+    needle:
+      "`state.ts touch-executor --id <id> --expect-executor <送り元の agentId>",
+  },
+  {
+    label:
+      "C3 SKILL.md: phase-fail が gate.attempts を --expect-attempts に渡す",
+    text: skillMd,
+    needle:
+      "--expect-attempts <イテレーション冒頭の `next` が返した `tasks[].gate.attempts`>",
+  },
+  {
+    label:
+      "C4 SKILL.md: set-executor の conflict は別インスタンスの先行を意味する",
+    text: skillMd,
+    needle:
+      "**`conflict` が返ったら、同じ session id の別インスタンスが先に実行エージェントを立てている**",
+  },
+  {
+    label: "C5 SKILL.md: phase-fail の conflict では自分の判定を捨てる",
+    text: skillMd,
+    needle: "二重加算しないよう自分の判定は捨て",
+  },
+  {
+    label:
+      "C6 SKILL.md: 所有権では同一 session id の並行インスタンスを区別できない",
+    text: skillMd,
+    needle:
+      "**heartbeat は session id 単位なので、同じ id を共有する 2 つの並行インスタンス",
+  },
+  {
+    label:
+      "C7 inflight.md: takeover の set-executor が action の replaces を渡す",
+    text: inflightMd,
+    needle: "--expect-executor <action の `replaces`>",
+  },
+  {
+    label:
+      "C8 inflight.md: status-check 成功後の touch-executor が送信先を宣言する",
+    text: inflightMd,
+    needle:
+      "`state.ts touch-executor --id <id> --expect-executor <送信先の agentId>`",
+  },
+];
+
+for (const c of CAS_NEEDLES) {
+  Deno.test(`${c.label}`, () => {
+    assertOk(containsFixed(c.text, c.needle), `見つからない: ${c.needle}`);
+  });
+  Deno.test(`${c.label} — 回帰注入`, () => {
+    const injected = c.text.replace(c.needle, "");
+    assertOk(injected !== c.text, "置換が効かず元テキストと同一になった");
+    assertOk(
+      !containsFixed(injected, c.needle),
+      "除去後も見つかってしまった",
+    );
+  });
+}
+
+// conflict の扱いは、実在が確かめられていない停止手段に依存してはならない
+// (`TaskStop` はこのリポジトリのどこにも記述が無い)。放置された executor は
+// SKILL.md の既存規則「送り元の agentId が `run.executor` と一致しない通知は無視する」が
+// 吸収する。
+Deno.test("C9 手順書が未検証の停止手段 (TaskStop) に依存していない", () => {
+  for (
+    const [name, text] of [["SKILL.md", skillMd], ["inflight.md", inflightMd]]
+  ) {
+    assertOk(
+      !/TaskStop/i.test(text),
+      `${name} に TaskStop への依存が入っている`,
+    );
+  }
+  assertOk(
+    containsFixed(
+      skillMd,
+      "送り元の agentId が state.json の `run.executor` と一致しない通知は無視する",
+    ),
+    "放置された executor を吸収する既存規則が消えている",
   );
 });

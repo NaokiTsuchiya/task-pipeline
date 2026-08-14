@@ -165,9 +165,18 @@ export async function cmdPhaseFail(
     );
   }
   const session = flags.get("session") ?? null;
+  const expectAttempts = requireIntFlag(flags, "expect-attempts");
   let attempts = 0;
   await withQueueLock(stateDir, id, lockOpts(flags), (item, index, state) => {
-    const result = applyPhaseFail(item, index, state, phase, verifier, session);
+    const result = applyPhaseFail(
+      item,
+      index,
+      state,
+      phase,
+      expectAttempts,
+      verifier,
+      session,
+    );
     attempts = result.attempts;
     return result.state;
   });
@@ -715,12 +724,24 @@ export async function cmdSetExecutor(
   const id = requireFlag(flags, "id");
   const executor = requireFlag(flags, "executor");
   const session = requireFlag(flags, "session");
+  // 省略は「まだ誰も握っていないはず」の宣言なので null 期待。`--expect-executor null` も同義。
+  const expectExecutor = flags.has("expect-executor")
+    ? nullableFlag(flags.get("expect-executor")!)
+    : null;
   await withQueueLock(
     stateDir,
     id,
     lockOpts(flags),
     (item, index, state) =>
-      applySetExecutor(item, index, state, executor, session, nowIso()),
+      applySetExecutor(
+        item,
+        index,
+        state,
+        executor,
+        session,
+        nowIso(),
+        expectExecutor,
+      ),
   );
   return { ok: true, id, executor, session };
 }
@@ -731,12 +752,20 @@ export async function cmdTouchExecutor(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const sessionIfUnowned = flags.get("session");
+  const expectExecutor = flags.get("expect-executor");
   await withQueueLock(
     stateDir,
     id,
     lockOpts(flags),
     (item, index, state) =>
-      applyTouchExecutor(item, index, state, sessionIfUnowned, nowIso()),
+      applyTouchExecutor(
+        item,
+        index,
+        state,
+        sessionIfUnowned,
+        nowIso(),
+        expectExecutor,
+      ),
   );
   return { ok: true, id };
 }

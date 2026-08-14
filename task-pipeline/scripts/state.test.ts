@@ -677,12 +677,28 @@ Deno.test("T-U-enum: every enum flag rejects a value outside its vocabulary", as
       setup: [restingOpen()],
     },
     {
-      args: ["phase-fail", "--id", "t-1", "--phase", "bogus"],
+      args: [
+        "phase-fail",
+        "--id",
+        "t-1",
+        "--phase",
+        "bogus",
+        "--expect-attempts",
+        "0",
+      ],
       setup: [queueItem({ progress: "running", run: runOf() })],
     },
     {
       // finalize は検証ゲートを持たないので --phase としては usage
-      args: ["phase-fail", "--id", "t-1", "--phase", "finalize"],
+      args: [
+        "phase-fail",
+        "--id",
+        "t-1",
+        "--phase",
+        "finalize",
+        "--expect-attempts",
+        "0",
+      ],
       setup: [
         queueItem({ progress: "running", run: runOf({ phase: "finalize" }) }),
       ],
@@ -1890,11 +1906,23 @@ Deno.test("T-V-phase-fail: attempts increments; a phase mismatch is conflict", a
     "t-1",
     "--phase",
     "research",
+    "--expect-attempts",
+    "0",
   ]);
   assertEquals(out.attempts, 1);
   await expectFailureUnchanged(
     dir,
-    ["phase-fail", "--state-dir", dir, "--id", "t-1", "--phase", "plan"],
+    [
+      "phase-fail",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--phase",
+      "plan",
+      "--expect-attempts",
+      "1",
+    ],
     EXIT_CODES.conflict,
   );
 });
@@ -1910,6 +1938,8 @@ Deno.test("T-V-phase-fail-verifier-1: --verifier + --session writes run.verifier
     "t-1",
     "--phase",
     "research",
+    "--expect-attempts",
+    "0",
     "--verifier",
     "agent-1",
     "--session",
@@ -1934,6 +1964,8 @@ Deno.test("T-V-phase-fail-verifier-2: omitting --verifier leaves both null", asy
     "t-1",
     "--phase",
     "research",
+    "--expect-attempts",
+    "0",
   ]);
   assertEquals(out.verifier, null);
   assertEquals(out.verifier_session, null);
@@ -1956,6 +1988,8 @@ Deno.test("T-V-phase-fail-verifier-3: --verifier without --session is usage", as
       "t-1",
       "--phase",
       "research",
+      "--expect-attempts",
+      "0",
       "--verifier",
       "agent-1",
     ],
@@ -3902,6 +3936,266 @@ Deno.test("T-V-touch-executor-conflict: without an executor it is conflict", asy
   );
 });
 
+// gh-117: 揮発資源の楽観ロック (CAS)。同じ session id を共有する 2 つの並行インスタンスは
+// heartbeat では区別できないので、書き込み側が「観測した現在値」を宣言し、ずれていたら
+// conflict で落ちることだけが二重起動と二重加算を食い止める。契約は
+// docs/state-cli-contract.md の「揮発資源の楽観ロック (gh-117)」節。
+
+function runningWithExecutor(
+  executor: string | null,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return queueItem({
+    progress: "running",
+    run: runOf({ executor, ...overrides }),
+  });
+}
+
+Deno.test("T-CAS-SE-1: set-executor accepts only the observed run.executor", async () => {
+  // 受理側: 現在値 null × フラグ省略 / null 明示、現在値 "agent-1" × 一致する期待値。
+  const accepted: {
+    label: string;
+    item: Record<string, unknown>;
+    extra: string[];
+  }[] = [
+    { label: "null x omitted", item: runningWithExecutor(null), extra: [] },
+    {
+      label: "null x --expect-executor null",
+      item: runningWithExecutor(null),
+      extra: ["--expect-executor", "null"],
+    },
+    {
+      label: "agent-1 x --expect-executor agent-1 (takeover)",
+      item: runningWithExecutor("agent-1"),
+      extra: ["--expect-executor", "agent-1"],
+    },
+  ];
+  for (const c of accepted) {
+    const dir = await tempDir();
+    await setupQueue(dir, [c.item]);
+    await expectOk(dir, [
+      "set-executor",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--executor",
+      "agent-9",
+      "--session",
+      "s1",
+      ...c.extra,
+    ]);
+    const run = (await readItem(dir)).run as Record<string, unknown>;
+    assertEquals(run.executor, "agent-9", `${c.label}: executor is replaced`);
+  }
+
+  // 拒否側: 期待値と現在値がずれる 3 クラス + 座標違反。
+  const rejected: {
+    label: string;
+    item: Record<string, unknown>;
+    extra: string[];
+  }[] = [
+    {
+      // 別インスタンスが先に握った状態で、自分は「まだ誰も握っていない」と思っている。
+      label: "agent-1 x omitted",
+      item: runningWithExecutor("agent-1"),
+      extra: [],
+    },
+    {
+      label: "agent-1 x --expect-executor agent-2",
+      item: runningWithExecutor("agent-1"),
+      extra: ["--expect-executor", "agent-2"],
+    },
+    {
+      label: "null x --expect-executor agent-1",
+      item: runningWithExecutor(null),
+      extra: ["--expect-executor", "agent-1"],
+    },
+    {
+      label: "queued (領域 P の前提)",
+      item: queueItem(),
+      extra: [],
+    },
+  ];
+  for (const c of rejected) {
+    const dir = await tempDir();
+    await setupQueue(dir, [c.item]);
+    await expectFailureUnchanged(
+      dir,
+      [
+        "set-executor",
+        "--state-dir",
+        dir,
+        "--id",
+        "t-1",
+        "--executor",
+        "agent-9",
+        "--session",
+        "s1",
+        ...c.extra,
+      ],
+      EXIT_CODES.conflict,
+    );
+  }
+});
+
+Deno.test("T-CAS-SE-2: two concurrent set-executor calls with the same --session — exactly one wins", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [runningWithExecutor(null)]);
+  const opts = { allowRead: [dir], allowWrite: [dir] };
+  const call = (executor: string) =>
+    runCli([
+      "set-executor",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--executor",
+      executor,
+      "--session",
+      "s1",
+      "--lock-retry-ms",
+      "20",
+      "--lock-max-retries",
+      "50",
+    ], opts);
+  const [a, b] = await Promise.all([call("agent-a"), call("agent-b")]);
+  assertEquals([a.code, b.code].sort(), [0, EXIT_CODES.conflict]);
+  const run = (await readItem(dir)).run as Record<string, unknown>;
+  const winner = a.code === 0 ? "agent-a" : "agent-b";
+  assertEquals(run.executor, winner, "the winner's executor is the one stored");
+});
+
+Deno.test("T-CAS-TE-1: touch-executor compares --expect-executor when given", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [runningWithExecutor("agent-1")]);
+  // 省略時は従来どおり通る。
+  await expectOk(dir, ["touch-executor", "--state-dir", dir, "--id", "t-1"]);
+  await expectOk(dir, [
+    "touch-executor",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--expect-executor",
+    "agent-1",
+  ]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "touch-executor",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--expect-executor",
+      "agent-2",
+    ],
+    EXIT_CODES.conflict,
+  );
+});
+
+Deno.test("T-CAS-PF-1: phase-fail requires --expect-attempts and refuses a stale generation", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem({ progress: "running", run: runOf() })]);
+  const phaseFail = (extra: string[]) => [
+    "phase-fail",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--phase",
+    "research",
+    ...extra,
+  ];
+  // 省略・非数値・負数は usage (フラグの形の問題であって前提違反ではない)。
+  await expectFailureUnchanged(dir, phaseFail([]), EXIT_CODES.usage);
+  await expectFailureUnchanged(
+    dir,
+    phaseFail(["--expect-attempts", "abc"]),
+    EXIT_CODES.usage,
+  );
+  await expectFailureUnchanged(
+    dir,
+    phaseFail(["--expect-attempts", "-1"]),
+    EXIT_CODES.usage,
+  );
+  // 上振れした期待値も conflict。
+  await expectFailureUnchanged(
+    dir,
+    phaseFail(["--expect-attempts", "2"]),
+    EXIT_CODES.conflict,
+  );
+  // 世代が合っていれば加算される。
+  assertEquals(
+    (await expectOk(dir, phaseFail(["--expect-attempts", "0"]))).attempts,
+    1,
+  );
+  // 同じ世代をもう一度落とそうとすると conflict (= 二重加算の本体)。
+  await expectFailureUnchanged(
+    dir,
+    phaseFail(["--expect-attempts", "0"]),
+    EXIT_CODES.conflict,
+  );
+  // 正当なリトライ (世代を読み直した呼び出し) は塞がない。
+  assertEquals(
+    (await expectOk(dir, phaseFail(["--expect-attempts", "1"]))).attempts,
+    2,
+  );
+});
+
+Deno.test("T-CAS-PF-2: two concurrent phase-fail calls with the same --session increment attempts once", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem({ progress: "running", run: runOf() })]);
+  const opts = { allowRead: [dir], allowWrite: [dir] };
+  const call = (verifier: string) =>
+    runCli([
+      "phase-fail",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--phase",
+      "research",
+      "--expect-attempts",
+      "0",
+      "--verifier",
+      verifier,
+      "--session",
+      "s1",
+      "--lock-retry-ms",
+      "20",
+      "--lock-max-retries",
+      "50",
+    ], opts);
+  const [a, b] = await Promise.all([call("v-1"), call("v-2")]);
+  assertEquals([a.code, b.code].sort(), [0, EXIT_CODES.conflict]);
+  const run = (await readItem(dir)).run as Record<string, unknown>;
+  assertEquals(run.attempts, 1, "attempts is incremented exactly once");
+});
+
+Deno.test("T-CAS-FLAG-1: the CAS flags stay bound to their own verbs", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [runningWithExecutor(null)]);
+  await expectFailureUnchanged(
+    dir,
+    [
+      "set-executor",
+      "--state-dir",
+      dir,
+      "--id",
+      "t-1",
+      "--executor",
+      "agent-1",
+      "--session",
+      "s1",
+      "--expect-attempts",
+      "0",
+    ],
+    EXIT_CODES.usage,
+  );
+});
+
 Deno.test("T-V-set-takeover: exactly one of --at/--clear is required", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [queueItem({ progress: "running", run: runOf() })]);
@@ -4580,6 +4874,8 @@ Deno.test("T-SEQ-7: phase-fail --verifier → advance/block/set-executor each re
       "t-1",
       "--phase",
       "research",
+      "--expect-attempts",
+      "0",
       "--verifier",
       "agent-1",
       "--session",

@@ -310,7 +310,7 @@ state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
             "running_mine_finishing":0,"tasks_started":3},
  "tasks": [{"id":"gh-42","ownership":"self","excluded":false,"status":"in_review",
             "progress":"resting","artifact":"open","follow_target":true,
-            "gate":{"reuse_verifier":null},
+            "gate":{"reuse_verifier":null,"attempts":null},
             "actions":[],"observations":[],"finalize":null}],
  "start": {"allowed":false,"blocked_by":["max_open"],"next_id":null,"detail":{}},
  "stalled": {"current":"max_open","since":"<iso>|null","elapsed_min":123,
@@ -350,6 +350,11 @@ state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
   再検証として再開してよいときだけその agentId、それ以外 (`run.verifier` が null /
   `run.verifier_session` が呼び出し側の `--session` と不一致 / `run.attempts` が上限3に
   達している) は null。
+- `tasks[].gate.attempts` (gh-117) は現在の `run.attempts` (run が無ければ null)。
+  `phase-fail --expect-attempts` にそのまま渡す値である。`takeover` action の `replaces`
+  (gh-117) は差し替え対象の `run.executor` (居なければ null) で、`set-executor
+  --expect-executor` にそのまま渡す値である。どちらも下記「揮発資源の楽観ロック」の期待値で、
+  **呼び出し側が state を読み直して組み立て直す必要は無い**。
 
 ### `verdict-path`
 
@@ -567,13 +572,14 @@ state.ts advance --state-dir <dir> --id <id> --from <phase> --to <phase> [lock f
 ### `phase-fail`
 
 ```
-state.ts phase-fail --state-dir <dir> --id <id> --phase <phase> \
+state.ts phase-fail --state-dir <dir> --id <id> --phase <phase> --expect-attempts <n> \
   [--verifier <agentId> --session <id>] [lock flags]
 ```
 
-前提: P が `P_VERIFIED` のいずれかで `run.phase == <phase>`。`--phase` は**検証ゲートを持つ
-フェーズだけ**を受ける (`finalize` は `usage`)。`--verifier` を渡すときは `--session` も
-必須 (`usage`)。
+前提: P が `P_VERIFIED` のいずれかで `run.phase == <phase>`、かつ `run.attempts == <n>`
+(**gh-117**。ずれていれば `conflict` — 下記「揮発資源の楽観ロック」)。`--phase` は**検証ゲートを持つ
+フェーズだけ**を受ける (`finalize` は `usage`)。`--expect-attempts` は必須で、非負整数以外は
+`usage`。`--verifier` を渡すときは `--session` も必須 (`usage`)。
 効果: `attempts` を 1 増やす (ノードは動かない)。`--verifier` を渡すと `run.verifier`/
 `run.verifier_session` (呼び出し側の `--session`) を書く (gh-70。次の `next` が
 `gate.reuse_verifier` としてこれを返せるようにするため)。省略時は両方 null のまま。
@@ -891,10 +897,14 @@ state.ts set-worktree --state-dir <dir> --id <id> --worktree <path> --base <b> \
 ### `set-executor`
 
 ```
-state.ts set-executor --state-dir <dir> --id <id> --executor <s> --session <s> [lock flags]
+state.ts set-executor --state-dir <dir> --id <id> --executor <s> --session <s> \
+  [--expect-executor <s>|null] [lock flags]
 ```
 
-前提: P が `P_RUNNING` のいずれか。
+前提: P が `P_RUNNING` のいずれか、かつ `run.executor == <--expect-executor の値>`
+(**gh-117**。**省略は `null` 期待** = 「まだ誰も握っていないはず」の宣言で、`--expect-executor null`
+も同義。引き継ぎで既存の executor を差し替えるときは、観測した現在値を渡す。ずれていれば
+`conflict` — 下記「揮発資源の楽観ロック」)。
 効果: `run.executor` と `run.executor_last_event_at` を設定し、`session` を立てる。
 `verifier`/`verifier_session` は null に戻す (gh-70。executor が差し替わったら、前回の
 FAIL は引き継ぎ前の実行エージェントの成果物に対する判断なので安全側に倒す)。
@@ -903,10 +913,13 @@ FAIL は引き継ぎ前の実行エージェントの成果物に対する判断
 ### `touch-executor`
 
 ```
-state.ts touch-executor --state-dir <dir> --id <id> [--session <s>] [lock flags]
+state.ts touch-executor --state-dir <dir> --id <id> [--session <s>] \
+  [--expect-executor <s>] [lock flags]
 ```
 
-前提: P が `P_RUNNING` のいずれかで `run.executor` が非 null (`conflict`)。
+前提: P が `P_RUNNING` のいずれかで `run.executor` が非 null (`conflict`)。`--expect-executor` を
+**渡したときだけ** `run.executor` との一致も要求する (**gh-117**。ずれていれば `conflict`)。
+省略時は従来どおり誰の executor でも撫でられる。
 効果: `run.executor_last_event_at` を現在時刻に。`--session` は `session` が null のときだけ
 立てる (他セッションの所有権は奪わない)。
 成功: `{"ok": true, "id": "<id>"}`。
@@ -939,6 +952,28 @@ state.ts set-takeover --state-dir <dir> --id <id> (--at <iso> | --clear true) [l
   この 6 つは lock フラグ (`--lock-retry-ms` / `--lock-max-retries`) も受け付けず、渡すと
   usage になる — 「lock を取らない」が `ALLOWED_FLAGS` の形として観測でき、
   `state.test.ts` の T-D8 が上の一覧と突き合わせる。
+
+## 揮発資源の楽観ロック (gh-117)
+
+heartbeat (`sessions/<id>`) は **session id 単位**なので、同じ id を共有する 2 つの並行
+インスタンス (同じセッションが起床とユーザー入力で二重に回った場合など) を区別できない。両者に
+とって同じタスクが「自分の担当」になり、`set-executor` は後勝ちで黙って上書きし、`phase-fail` は
+`attempts` を二重に加算していた。プロセスを名指しする新しい識別子は導入せず、**既に state にある
+揮発資源の識別子を書き込みの前提として比較する** (compare-and-set)。
+
+| 資源 | 識別子 | 生成 | 保存 | 比較 |
+|---|---|---|---|---|
+| 実行エージェント | `run.executor` (agentId) | 実行エージェントを起動した側が受け取る | `set-executor` | `set-executor --expect-executor` / `touch-executor --expect-executor` |
+| フェーズ判定の世代 | `run.attempts` | `phase-fail` が +1、`claim`/`set-gate`/`advance`/`fix-start`/`rebase-start`/`rebase-forgo` が 0 に戻す (`set-executor` は動かさない) | 同左 | `phase-fail --expect-attempts` |
+
+- 期待値は `next` が配る (`tasks[].gate.attempts`、`takeover` action の `replaces`)。
+- 一致しなければ **`conflict` (15) で落ち、state.json は 1 バイトも変わらない**。負けた側は
+  「別インスタンスが先に同じ資源を握った / 同じ判定ラウンドを消費した」と分かる。
+- `set-executor` の期待値の**省略は `null` 期待**である (「まだ誰も握っていないはず」)。引き継ぎ
+  (既存 executor の意図的な差し替え) は観測した現在値を明示的に渡す形で表現され、**上書きが
+  暗黙に起きる経路は残らない**。
+- 揮発資源を握らない verb (`set-takeover` など) は対象外である。理由は `docs/state-machine.md` の
+  8 節。
 
 ## heartbeat の契約
 
