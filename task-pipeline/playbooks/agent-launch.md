@@ -5,7 +5,7 @@
 | 役割 | 起動 | provider・model の解決元 | mode | 経路 |
 |---|---|---|---|---|
 | `executor` | background | `impl` (`impl_provider=` が上書き) | claude: `bypassPermissions` / omp: `full` | 現行のみ (Paseo には停止通知の受け口が無い) |
-| `verifier` | 同期 | `audit` (`verify_provider=` が上書き) | **無人実行できる mode** — claude: `bypassPermissions` / omp: `full` | Paseo 優先 → 現行 (`task-pipeline-verifier` → `general-purpose`) |
+| `verifier` | 同期 | `audit` (`verify_provider=` が上書き) | **無人実行できる mode** — claude: `bypassPermissions` / omp: `full` / junie: **無し** (Paseo 経路に乗せない) | Paseo 優先 → 現行 (`task-pipeline-verifier` → `general-purpose`) |
 | `adapter-list` | 同期 | provider は解決しない。model は**安いモデル固定** (`haiku`) | — | 現行のみ |
 | `adapter-mark` | 同期 | **指定しない** (現行どおり) | — | 現行のみ |
 | `triage` | 同期 | **指定しない** — 判断が成果物 | — | 現行のみ |
@@ -34,15 +34,18 @@ provider と model は次の 3 段で決める。上の段が決まればそこ�
 - **prefs 不在で残す history の 1 行は、経路の帰結まで書く**: 既定の組を適用できたときは `agent-launch: prefs 不在 — 既定の組で解決 (実装=<provider> / 検証=<provider>) — verifier は Paseo 経路に乗る`、落ち先に落ちたときは `agent-launch: prefs 不在 — 実在確認に通らず (<理由>) セッション継承 — verifier は Paseo 経路に乗らない (別プロバイダ検証と Paseo 側の可観測性が効かない)`。
 - **ユーザーへの一度だけの通知は次の 3 点を伝える**: (a) 既定の組 (実装 = claude 系 / 検証 = omp) で進めていること、(b) `~/.paseo/orchestration-preferences.json` を置けば provider・model を明示指定できること、(c) 落ち先に落ちた回は、別プロバイダ検証と Paseo 側の可観測性が効かないこと。
 - **mode は provider ごとに決まる**: claude は `bypassPermissions`、omp は `full`。**省略すると claude は Always Ask に落ちて無人実行が止まる**ので、Paseo 経路では必ず明示する。**現行ハーネス経路に mode の軸は無く**、代わりに agent type の `tools:` 制限が効く (`agents/task-pipeline-verifier.md`)。
+- **junie には無人実行できる mode が無い**: `paseo provider ls` の `modes` が空 (`""`) で `defaultMode` は `default`、MCP の `list_providers` でも同じく mode の一覧が空である (`docs/paseo-subagent-2026-08.md` 実測 6 の `AvailableModes` は空配列。#116 の実測では検証ゲートがツール承認待ちで停止した)。**解決した provider が junie になったら Paseo 経路に乗せない** — 扱いは下の経路節の項 1 にある。
 - **verifier が target project を変更しない担保は `references/verifier.md` の行動境界の記述にあり、mode は担保にならない** — 無人で回せる mode (claude `bypassPermissions` / omp `full`) はどれも書き込み自由で、書き込みを禁じる claude の `plan` は verdict の書き出しができないので選べないからである。現行ハーネス経路では、これに加えて agent type の `tools:` が機械的な裏打ちになる (Paseo 経路にはその裏打ちが無い)。
 - **現行ハーネス経路では provider を選べない** (Claude 固定)。解決した provider がそれ以外になった役割をこの経路で起動するときは、model も指定せずセッション継承に落とし、その旨を history に 1 行残す。
 
 ## 経路の選択とフォールバック
 
-1. **Paseo 経路を第一候補にする** (`paseo run` で起動、`paseo send` で再開)。CLI が PATH に無ければ実体パスで起動する (OS ごとの在処は `~/.claude/skills/paseo/SKILL.md`)。返り値は、初回は `--output-schema` を付けて stdout の最小 JSON で受け、**再開 (`send`) には同等の指定が無い**ので verdict ファイル (verifier) か `paseo logs <agentId>` から読む。
-2. **失敗したら現行ハーネス経路 (Agent tool / SendMessage) に落ちる。落ちたら history に 1 行残す** (`agent-launch: paseo 経路が失敗 (<理由>) — 現行経路で <役割> を起動`)。「verifier agent type 未インストール → general-purpose」と同型の作法であり、落ちたこと自体は失敗ではない。
-3. **落ちてよいのは「エージェントが生まれなかった」と言い切れる失敗だけである**: 起動コマンドが非ゼロで終了した、または agentId が返らなかったとき。起動した後の失敗 (待ちのタイムアウト、契約外の応答) では落ちない — `paseo run` は冪等ではなく、再試行がそのまま 2 体目の生成になる (`docs/paseo-subagent-2026-08.md` 実測 1 の副次観測)。落ちる前に `paseo ls -a --label` で重複が残っていないかを確かめる。
-4. **どちらの経路も使えないときは、その役割をオーケストレーターが自分で代行しない** (「コンテキスト規律」と「検証ゲートの絶対規則」)。扱いは役割で分かれる:
+1. **Paseo 経路に乗せる前に、解決した provider が無人実行できる mode を持つかを確かめる**: MCP の `list_providers` (CLI なら `paseo provider ls`) が返す mode の一覧に、上の役割の表の mode 列が指す無人実行 mode (claude `bypassPermissions` / omp `full`) があるか。**一覧が空の provider (junie の `"modes": ""`) は Paseo 経路に乗せず、現行ハーネス経路で起動して history に 1 行残す** (`agent-launch: <provider> に無人実行できる mode が無い — 現行経路で <役割> を起動`)。**`status: available` はこの判定の代わりにならない** — 解決手順の節の実在確認は在庫を見るだけで、承認を挟まずに走れるかは見ていない。
+2. **Paseo 経路を第一候補にする** (`paseo run` で起動、`paseo send` で再開)。CLI が PATH に無ければ実体パスで起動する (OS ごとの在処は `~/.claude/skills/paseo/SKILL.md`)。返り値は、初回は `--output-schema` を付けて stdout の最小 JSON で受け、**再開 (`send`) には同等の指定が無い**ので verdict ファイル (verifier) か `paseo logs <agentId>` から読む。
+3. **失敗したら現行ハーネス経路 (Agent tool / SendMessage) に落ちる。落ちたら history に 1 行残す** (`agent-launch: paseo 経路が失敗 (<理由>) — 現行経路で <役割> を起動`)。「verifier agent type 未インストール → general-purpose」と同型の作法であり、落ちたこと自体は失敗ではない。
+4. **落ちてよいのは「エージェントが生まれなかった」と言い切れる失敗だけである**: 起動コマンドが非ゼロで終了した、または agentId が返らなかったとき。起動した後の失敗 (待ちのタイムアウト、契約外の応答) では落ちない — `paseo run` は冪等ではなく、再試行がそのまま 2 体目の生成になる (`docs/paseo-subagent-2026-08.md` 実測 1 の副次観測)。落ちる前に `paseo ls -a --label` で重複が残っていないかを確かめる。**例外は項 5 の permission 待ちだけで、そのときは項 5 が優先する。**
+5. **事前チェック (項 1) を通したのに permission 待ちで停止したら、項 4 の例外として現行ハーネス経路へ落ちる。** 見え方は 3 通りで、どれか 1 つで判定してよい: `--output-schema` を付けた起動の stdout が `{"error":{"code":"OUTPUT_SCHEMA_FAILED","message":"Agent is waiting for permission …"}}`、`paseo wait <id>` が `{"status":"permission", …}`、`paseo permit ls` に承認要求が滞留。扱いは 3 点: (a) **落ちてよい** — `paseo run` を再試行せず別経路へ移るだけなので 2 体目は生まれない (項 4 が禁じているのは再試行である)、(b) **残ったエージェントは掃除を試み、できなければ残置してユーザーに伝える** — `paseo archive <agentId>` (MCP なら `archive_agent`) を 1 回だけ試し、実行できない環境 (Claude Code ハーネス配下では classifier に拒否される) では agentId と掃除のコマンドを報告に添えて渡す。**`paseo permit allow` で勝手に承認はしない** (何を承認するのかを見ていない)、(c) **history に 1 行残す** (`agent-launch: paseo 経路が permission 待ちで停止 (agentId=<id> / 掃除=<archived|残置>) — 現行経路で <役割> を起動`)。
+6. **どちらの経路も使えないときは、その役割をオーケストレーターが自分で代行しない** (「コンテキスト規律」と「検証ゲートの絶対規則」)。扱いは役割で分かれる:
    - **タスクに紐づく役割** (`executor` / `verifier`) → そのタスクを `state.ts block` にして 1 行報告し、`PushNotification` を 1 本送る (SKILL.md「毎イテレーションの手順」2 の規定どおり)。ループは止めない。
    - **アダプタ** (`adapter-list` / `adapter-mark`) → トラッカー不通と同じ扱いにして、`playbooks/depleted.md` の手順 2 でループを止める。
    - **ベストエフォートの役割** (`survey` / `retro` / `pr-watcher` / `pr-responder` / `依存昇格` / `衝突トリアージ`) → その回は飛ばし、history に 1 行残して続行する。

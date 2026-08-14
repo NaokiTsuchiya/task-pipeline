@@ -257,7 +257,7 @@ Return only what the adapter file specifies for this operation.
    Write the full verdict JSON to verdict path, then return only the minimal verdict JSON.
    ```
    - **起動の経路は 3 段で、上から順に試す** (どの段でも上のプロンプト文面は変えない。provider・model・mode の解決と、落ちてよい失敗の定義は `playbooks/agent-launch.md` の経路節):
-     1. **Paseo 経路** — 解決した provider・model・mode で `paseo run` を**1 回だけ**起動し、`--output-schema` で最小 verdict JSON を stdout で受ける。**エージェントが生まれなかったと言い切れる失敗** (起動コマンドが非ゼロ終了 / agentId が返らない) のときだけ、history に 1 行 (`agent-launch: paseo 経路が失敗 (<理由>) — 現行経路で verifier を起動`) を残して 2 へ落ちる。
+     1. **Paseo 経路** — 解決した provider・model・mode で `paseo run` を**1 回だけ**起動し、`--output-schema` で最小 verdict JSON を stdout で受ける。**起動前に事前チェック** (解決した provider が無人実行できる mode を持つか) を通し、通らなければこの段を飛ばして 2 へ。**エージェントが生まれなかったと言い切れる失敗** (起動コマンドが非ゼロ終了 / agentId が返らない) のときだけ、history に 1 行 (`agent-launch: paseo 経路が失敗 (<理由>) — 現行経路で verifier を起動`) を残して 2 へ落ちる。**生まれた後でも permission 待ちで停止したときだけは例外で 2 へ落ちる** (残ったエージェントの扱いと history の文言も同じ節)。
      2. **現行ハーネス経路** — `subagent_type: task-pipeline-verifier` で Agent tool 起動する。agent type が未インストールなら 3 へ落ちる (下記「未インストール環境のフォールバック」に history の 1 行も含めた規定がある)。
      3. **`general-purpose`** — 同じプロンプトのまま起動する。ここまで落ちても成果物と契約は同じで、変わるのは行動境界の裏打ちだけである。
    - **未インストール環境のフォールバック**: `task-pipeline-verifier` は `agents/task-pipeline-verifier.md` を `~/.claude/agents/` に置いて初めて存在する (このリポジトリの `install.sh` が行う)。Agent tool が unknown agent type のエラーを返したら、**同じプロンプトのまま** `subagent_type: general-purpose` で起動し直し、history に「verifier agent type 未インストール — general-purpose で実行」を 1 行残す。skill 単体でも動く状態を保つためで、フォールバックしたこと自体は失敗ではない。

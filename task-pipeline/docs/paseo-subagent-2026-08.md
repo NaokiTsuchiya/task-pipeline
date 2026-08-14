@@ -261,7 +261,7 @@ $P inspect f0bc937d --json / $P inspect c5ebf7e5 --json          # claude / juni
   - claude: `plan` / `default` (Always Ask) / `acceptEdits` / `auto` / `bypassPermissions`
   - omp: `full` (Full Access) / `write` (Write Approval) / `ask` (Always Ask)
   - junie: **空配列** (`"AvailableModes": []`、`Mode` は `default`)
-- **無人実行できる mode**: omp は `full`、claude は `bypassPermissions` (実測 1・5 の親子はこれで承認待ちに入らず完走)、junie は `default` のまま完走した (`JUNIE-OK` を返した)。**`--mode` を省略したときの claude は `auto` ではなく `default` (Always Ask) になる** (`f0bc937d` の `inspect`) ので、無人実行では明示が要る。
+- **無人実行できる mode**: omp は `full`、claude は `bypassPermissions` (実測 1・5 の親子はこれで承認待ちに入らず完走)。**junie は持たない** — `AvailableModes` が空配列で、選べるのは `default` だけである。ここで `JUNIE-OK` を返して完走したのはツールを使わないプロンプトだったからで、ツール実行を伴う役割 (verifier) では承認待ちで停止する (2026-08-14 実測 / #116。扱いは `playbooks/agent-launch.md` の経路節)。**`--mode` を省略したときの claude は `auto` ではなく `default` (Always Ask) になる** (`f0bc937d` の `inspect`) ので、無人実行では明示が要る。
 - **junie は usage を返さない**: 応答は返ったのに `"LastUsage": null` (実測の条件節)。
 
 ### 判定
