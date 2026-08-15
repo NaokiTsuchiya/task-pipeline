@@ -267,7 +267,7 @@ state.ts validate --state-dir <dir>
 
 ```
 state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
-  [--config <k=v,...>]
+  [--config <k=v,...>] [--dead-tasks <csv>]
 ```
 
 前提: state.json が存在し (`missing`)、`checkStateV2` を満たす (`schema`)。
@@ -287,6 +287,16 @@ state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
   `=` の無い断片は `usage`。同じキーが 2 度現れたら後勝ち。
 - `task_counts/<session>` の行数は **`wc -l` と同じ意味論** (改行文字の数。末尾改行の無い
   最終行は数えない) — SKILL.md 側の記述と食い違わせないため。
+- `--dead-tasks` 省略/空 = 孤児の強い証拠の主張なし (既定)。カンマ区切りのタスク id — 呼び出し側
+  (オーケストレーター) が `playbooks/inflight.md` の「孤児の強い証拠」の手順で読み取り専用の照会
+  (`paseo inspect`・run dir・worktree の git 差分の3種すべて) を済ませたものだけを渡す。各要素は
+  trim してから空要素を落とす (`"t-1, t-2"` → `["t-1","t-2"]`、`"t-1,,t-2"` → `["t-1","t-2"]`) —
+  `--alive` の生成元 (`sessions-alive` の出力) と違い人手/プロンプト経由で組み立てる値のため、
+  空白混入を吸収する。ここに挙げた id のタスクは、生存一覧にまだ heartbeat が残っていても
+  (`ownership: alive-other`) 除外されず、沈黙 90 分 / 引き継ぎ待ち 30 分を待たずに
+  `takeover{reason: "strong-evidence"}` になる (`ownership: self` = 自分の所有タスクだけは対象外)。
+  下記の閾値表とは独立の経路であり、**表の数値そのものは変えない** (gh-114 の決定3。
+  `docs/loop-session-orphan-2026-08.md`)。
 
 **閾値** (実装は `state-next.ts` の定数。**SKILL.md には数値を置かない**):
 

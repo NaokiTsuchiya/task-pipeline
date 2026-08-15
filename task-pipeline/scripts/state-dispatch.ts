@@ -105,6 +105,7 @@ export const FLAG_NAMES = [
   "clear",
   "commits",
   "config",
+  "dead-tasks",
   "drop-withdrawn-branch",
   "errors-inc",
   "errors-reset",
@@ -172,7 +173,14 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
   "get": new Set(["state-dir"]),
   "validate": new Set(["state-dir"]),
   // 読み取り専用なので lock フラグを持たない (get / validate / sessions-alive と同じ)。
-  "next": new Set(["state-dir", "session", "alive", "now", "config"]),
+  "next": new Set([
+    "state-dir",
+    "session",
+    "alive",
+    "now",
+    "config",
+    "dead-tasks",
+  ]),
   // 同じく読み取り専用 (検証ゲートの直前に判定 JSON の書き込み先を問う)。
   "verdict-path": new Set(["state-dir", "id"]),
   "session-touch": new Set(["state-dir", "id", "cleanup-stale-min"]),

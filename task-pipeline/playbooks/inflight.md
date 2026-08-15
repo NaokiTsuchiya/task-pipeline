@@ -19,6 +19,22 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
   - **`needs_worktree` が真なら、先にタスク実行の手順 2 (worktree 作成) をやり直す。** `running` にしてから worktree を作るまでの間にセッションが落ちるとこの状態が残る — 気づかずに起動すると、target project がプロジェクトルート (ユーザーの作業ツリー) になってしまう。
   - **`recheck_gate` が真で、run dir に成果物が 1 つも無ければ**、タスク実行の手順 1 の gate 判定をやり直す (gate 判定とその反映の間でセッションが死ぬと、宣言のあるタスクが full のまま固まるため。判定はマーカー行の機械照合なので、何度やっても同じ結果になる)。
   - Begin 行は「Resume from phase "`<resume_phase>`". Check existing artifacts in the run dir first.」に変える (`resume_phase` が `pr_fix` のときは対応する findings ファイルのパスを、`rebase_fix` のときは衝突の控えとトリアージレポートのパスと `onto: origin/<base>` を、`finalize` のときは `finish mode: <mode>, base: <タスクの base>` を添える — finalize の再開でも base が渡らないと PR が既定ブランチに向く)。
-  - `reason` は `takeover-elapsed` (引き継ぎ待ちが満了した) / `no-executor` (**走っている実行エージェントが存在しない** — 起動前にセッションが死んだか、自分で起動し忘れた。待っても新しい情報は増えないのでその場で立てる)。
+  - `reason` は `takeover-elapsed` (引き継ぎ待ちが満了した) / `no-executor` (**走っている実行エージェントが存在しない** — 起動前にセッションが死んだか、自分で起動し忘れた。待っても新しい情報は増えないのでその場で立てる) / `strong-evidence` (**孤児の強い証拠が揃った** — 下記「孤児の強い証拠」の3種すべてが揃ったタスクを、沈黙・引き継ぎ待ちいずれの計時も待たずに即座に引き取る)。
 - **1 セッション 1 タスクの枠は `next` が守る**: 自分が既に同じ種類の run (新しいタスク / 仕上げ) を持っているときの引き取りは `takeover` ではなく `wait {reason: "own-slot-busy"}` になる。新しいタスクと仕上げは互いの枠を塞がない (SKILL.md の「併走の枠」)。
-- **生きている他セッションが所有する `running` タスクは `excluded` が真**で、`actions` は空である (判断対象に入らない)。自分の飛行中タスクが他に無ければ、`start` の判定に従って `queued` / 承認へ進んでよい。
+- **生きている他セッションが所有する `running` タスクは `excluded` が真**で、`actions` は空である (判断対象に入らない)。自分の飛行中タスクが他に無ければ、`start` の判定に従って `queued` / 承認へ進んでよい。**ただし孤児の強い証拠 (下記) が揃った id は例外的に `excluded` が偽になり、`actions` に `takeover{reason: "strong-evidence"}` が現れる** — 生存一覧に heartbeat が残っていることより強い証拠を優先する。
+
+## 孤児の強い証拠
+
+**入る条件**: 毎イテレーション、`sessions-alive` の後・`next` 呼び出し前 (SKILL.md「毎イテレーションの手順」手順 0)。
+
+state.json の `queue` (`state.ts get`) から `progress === "running"` かつ `session` が自分以外の項目を洗い出す。0 件なら `--dead-tasks` は省略する (何もしない)。
+
+洗い出した各項目について、次の3種の証拠をすべて**読み取り専用**で集める:
+
+1. **`run.executor` が Paseo に存在しない** — `paseo inspect <run.executor> --json` の終了コードが非ゼロ (`playbooks/agent-launch.md` の経路判別と同じ呼び出し)。**`run.executor` が現行ハーネス経路の agentId のとき (経路判別そのものが「現行」に出たとき) は、この証拠は原理的に集められない** — その場合この機構は使わず、通常の沈黙判定 (`next` の `wait`/`status-check`/`set-takeover`) に委ねる。この機構が対象にできるのは Paseo 経路の executor だけである。
+2. **run dir に成果物が1つも無い** — `runs/<id>/` が存在しないか空。
+3. **worktree に変更が無い** — `git -C <worktree> status --porcelain` が空、かつ `git -C <worktree> log <base>..HEAD --oneline` が空。
+
+**3種すべてが揃った id だけ**を `--dead-tasks <csv>` に渡す (1つでも欠けたら見送る — 読み取り専用の照会なので、見送っても損は無い。過剰検出よりも見逃しを選ぶ)。
+
+この機構が要る理由 (`paseo loop` のようにイテレーション境界がセッション境界になる環境で、所有セッションの heartbeat が失効するまで待つと着手から回復まで長時間かかる実測) と、生存一覧の判定とは独立な設計にした理由は `docs/loop-session-orphan-2026-08.md` にある。

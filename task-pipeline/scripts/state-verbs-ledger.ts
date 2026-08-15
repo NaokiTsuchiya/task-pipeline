@@ -196,6 +196,14 @@ export async function cmdNext(
   const alive = flags.has("alive") ? parseCsv(flags.get("alive")!) : [];
   const now = flags.get("now") ?? nowIso();
   const config = parseNextConfig(flags.get("config"));
+  // gh-114: --dead-tasks は空白を許容する (`"t-1, t-2"`) — trim してから空要素を落とす
+  // (`"t-1,,t-2"` → 2件)。`--alive` の parseCsv とは異なり、人手/プロンプト経由で組み立てる
+  // 値なので空白混入を素直に吸収する。
+  const deadEvidence = flags.has("dead-tasks")
+    ? parseCsv(flags.get("dead-tasks")!).map((s) => s.trim()).filter((s) =>
+      s !== ""
+    )
+    : [];
 
   const parsed = await readState(stateDir);
   const check = checkStateV2(parsed);
@@ -210,6 +218,7 @@ export async function cmdNext(
     now,
     config,
     tasksStarted: await readTasksStarted(stateDir, session),
+    deadEvidence,
   }) as unknown as Record<string, unknown>;
 }
 
