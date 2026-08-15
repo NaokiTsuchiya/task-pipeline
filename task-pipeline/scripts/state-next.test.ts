@@ -254,6 +254,7 @@ function input(overrides: Partial<NextInput> = {}): NextInput {
     now: NOW,
     config: DEFAULT_NEXT_CONFIG,
     tasksStarted: 0,
+    deadEvidence: [],
     ...overrides,
   };
 }
@@ -1868,6 +1869,174 @@ Deno.test("N-CAS-2: takeover.replaces は差し替え対象の executor (居な�
   assertEquals(action.reason, "no-executor");
   assertEquals(action.replaces, null);
 });
+// gh-114: 孤児の強い証拠 (deadEvidence) — 判定点(A) excluded の上書き / 判定点(B)
+// livenessAction の即時 takeover バイパス
+
+Deno.test("N-EVID-1: 孤児の強い証拠がある alive-other は excluded=false", () => {
+  const result = deriveNext(
+    state([item("t-1", { session: OTHER })]),
+    input({ alive: [SELF, OTHER], deadEvidence: ["t-1"] }),
+  );
+  assertEquals(taskOf(result, "t-1").excluded, false);
+});
+
+Deno.test("N-EVID-2: 証拠が無い alive-other は従来どおり excluded=true (回帰)", () => {
+  const result = deriveNext(
+    state([item("t-1", { session: OTHER })]),
+    input({ alive: [SELF, OTHER] }),
+  );
+  assertEquals(taskOf(result, "t-1").excluded, true);
+});
+
+Deno.test("N-EVID-3: self 所有に誤って証拠が付いても excluded は不変 (false)", () => {
+  const result = deriveNext(
+    state([item("t-1", { session: SELF })]),
+    input({ deadEvidence: ["t-1"] }),
+  );
+  assertEquals(taskOf(result, "t-1").excluded, false);
+});
+
+Deno.test("N-EVID-4: 証拠は id が一致するタスクにしか効かない", () => {
+  const result = deriveNext(
+    state([
+      item("t-1", { session: OTHER }),
+      item("t-2", { session: OTHER }),
+    ]),
+    input({ alive: [SELF, OTHER], deadEvidence: ["t-2"] }),
+  );
+  assertEquals(taskOf(result, "t-1").excluded, true);
+  assertEquals(taskOf(result, "t-2").excluded, false);
+});
+
+Deno.test(
+  "N-EVID-5: alive-other でも証拠が揃えば沈黙未満で即座に takeover(strong-evidence)",
+  () => {
+    const result = deriveNext(
+      state([
+        item("t-1", {
+          progress: "running",
+          session: OTHER,
+          run: run(), // executor_last_event_at は1分前 (通常なら wait{executor-alive})
+        }),
+      ]),
+      input({ alive: [SELF, OTHER], deadEvidence: ["t-1"] }),
+    );
+    const task = taskOf(result, "t-1");
+    assertEquals(task.excluded, false);
+    assertEquals(actionOf(task, "takeover").reason, "strong-evidence");
+  },
+);
+
+Deno.test(
+  "N-EVID-6: 証拠があっても自分の枠が埋まっていれば own-slot-busy で待つ",
+  () => {
+    const result = deriveNext(
+      state([
+        item("t-1", { progress: "running", session: OTHER, run: run() }),
+        item("t-mine", {
+          progress: "running",
+          session: SELF,
+          run: run({ kind: "initial" }),
+        }),
+      ]),
+      input({ alive: [SELF, OTHER], deadEvidence: ["t-1"] }),
+    );
+    assertEquals(
+      actionOf(taskOf(result, "t-1"), "wait").reason,
+      "own-slot-busy",
+    );
+  },
+);
+
+Deno.test(
+  "N-EVID-7: self 所有に証拠が付いても strong-evidence では奪わない (ガード)",
+  () => {
+    const result = deriveNext(
+      state([
+        item("t-1", { progress: "running", session: SELF, run: run() }),
+      ]),
+      input({ deadEvidence: ["t-1"] }),
+    );
+    const task = taskOf(result, "t-1");
+    assertEquals(actionKinds(task), ["wait"]);
+    assertEquals(actionOf(task, "wait").reason, "executor-alive");
+  },
+);
+
+Deno.test(
+  "N-EVID-8: 引き継ぎ待ち中でも証拠があれば即座に takeover(strong-evidence)",
+  () => {
+    const result = deriveNext(
+      state([
+        item("t-1", {
+          progress: "running",
+          session: OTHER,
+          // takeover_at は1分前 (30分未満なので通常なら wait{takeover-pending})
+          run: run({ takeover_at: isoMinutesAgo(1) }),
+        }),
+      ]),
+      input({ alive: [SELF, OTHER], deadEvidence: ["t-1"] }),
+    );
+    assertEquals(
+      actionOf(taskOf(result, "t-1"), "takeover").reason,
+      "strong-evidence",
+    );
+  },
+);
+
+Deno.test(
+  "N-EVID-9: deadEvidence 空配列は省略時と同じ結果になる (回帰)",
+  () => {
+    const q = [item("t-1", { session: OTHER })];
+    const withField = deriveNext(
+      state(q),
+      input({ alive: [SELF, OTHER], deadEvidence: [] }),
+    );
+    const withoutOverride = deriveNext(
+      state(q),
+      input({ alive: [SELF, OTHER] }),
+    );
+    assertEquals(
+      taskOf(withField, "t-1").excluded,
+      taskOf(withoutOverride, "t-1").excluded,
+    );
+    assertEquals(taskOf(withField, "t-1").excluded, true);
+  },
+);
+
+Deno.test(
+  "N-EVID-10: unowned でも証拠が揃えば即座に takeover(strong-evidence)",
+  () => {
+    const result = deriveNext(
+      state([
+        item("t-1", { progress: "running", session: null, run: run() }),
+      ]),
+      input({ deadEvidence: ["t-1"] }),
+    );
+    const task = taskOf(result, "t-1");
+    assertEquals(task.excluded, false);
+    assertEquals(actionOf(task, "takeover").reason, "strong-evidence");
+  },
+);
+
+Deno.test(
+  "N-EVID-11: dead 所有権でも証拠があれば沈黙未満で即座に takeover(strong-evidence)",
+  () => {
+    const result = deriveNext(
+      state([
+        item("t-1", {
+          progress: "running",
+          session: "session-gone",
+          run: run(),
+        }),
+      ]),
+      input({ alive: [SELF], deadEvidence: ["t-1"] }),
+    );
+    const task = taskOf(result, "t-1");
+    assertEquals(task.excluded, false);
+    assertEquals(actionOf(task, "takeover").reason, "strong-evidence");
+  },
+);
 
 // ---------------------------------------------------------------------------
 // 導出 8 分類の網羅 (モジュール読み込み時の不変条件。冒頭の nextTest を参照)

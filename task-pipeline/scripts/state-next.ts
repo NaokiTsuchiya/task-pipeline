@@ -199,10 +199,21 @@ export interface NextInput {
   readonly config: NextConfig;
   /** `task_counts/<session>` の行数 (無ければ 0)。`max_tasks` の判定に使う。 */
   readonly tasksStarted: number;
+  /**
+   * 孤児の強い証拠 (gh-114) が揃ったタスク id の列。既定は空配列。呼び出し側
+   * (オーケストレーター) が `playbooks/inflight.md` の「孤児の強い証拠」の手順で
+   * 読み取り専用の照会 (`paseo inspect`・run dir・worktree の git 差分) を済ませてから
+   * 渡す — このモジュールはその真偽を検証しない (`--session`/`--alive` と同じ、外部で
+   * 確定した値を信頼する設計)。
+   */
+  readonly deadEvidence: readonly string[];
 }
 
 export type ProbeRestartReason = "no-lease" | "owner-dead" | "expired";
-export type TakeoverReason = "takeover-elapsed" | "no-executor";
+export type TakeoverReason =
+  | "takeover-elapsed"
+  | "no-executor"
+  | "strong-evidence";
 export type WaitReason =
   | "takeover-pending"
   | "executor-alive"
@@ -583,6 +594,15 @@ function livenessAction(
         replaces: run.executor,
       };
 
+  // gh-114: 孤児の強い証拠 (呼び出し側が読み取り専用の照会で確定させた値) があれば、
+  // 沈黙 90 分 / 引き継ぎ待ち 30 分のどちらも待たずに即座に引き取る。自分が現に所有する
+  // タスク (`self`) だけは対象から外す — 自分の生きている作業を誤って奪わないため。
+  if (
+    target.ownership !== "self" && input.deadEvidence.includes(target.item.id)
+  ) {
+    return takeover("strong-evidence");
+  }
+
   if (run.takeover_at !== null) {
     const lastMs = parseIso(run.executor_last_event_at);
     const takeoverMs = parseIso(run.takeover_at);
@@ -937,7 +957,11 @@ export function deriveNext(state: V2State, input: NextInput): NextResult {
       input.session,
       input.alive,
     );
-    return { item, ownership, excluded: !isTouchable(ownership) };
+    // gh-114: 孤児の強い証拠がある非self所有のタスクは、生存一覧にまだ heartbeat が
+    // 残っていても (`alive-other`) 除外しない — `livenessAction` 側の即時引き取りに進ませる。
+    const evidenced = ownership !== "self" &&
+      input.deadEvidence.includes(item.id);
+    return { item, ownership, excluded: !isTouchable(ownership) && !evidenced };
   });
 
   const counts = countsOf(classified, input.session, input.tasksStarted);
