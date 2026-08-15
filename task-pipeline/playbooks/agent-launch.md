@@ -61,3 +61,72 @@ Paseo 経路で起こすときの `paseo` 側の引数と、起きたエージ�
 - **経路の判別** — どちらの経路で起こした executor かは、`paseo inspect <run.executor> --json` の終了コードで決める (0 = Paseo のエージェント、非ゼロ = `Agent not found` なので現行ハーネス経路)。state.json は経路を持たない (スキーマを増やさない)。
 - **二重起動の防止** — `paseo run` は冪等ではない (経路節 項 4)。重複確認は `paseo ls -a -g --label task-pipeline-task=<タスク id> --json` で行い、**`-g` を必ず付ける**: 非 global 形は、同じリポジトリの別 worktree を cwd に持つエージェントを落とすことが実測されている (このリポジトリの worktree から引いて 18 体中 11 体しか返らず、落ちた中に別 worktree の verifier 3 体が含まれていた)。
 - **`takeover` で差し替えるときの旧エージェント** — 旧 `run.executor` が Paseo のエージェントなら `paseo stop <agentId>` を **1 回だけ**試す (同じ worktree に 2 体が書き込むのを止めるため。idle なら no-op)。**`archive` は使わない** — `LastUsage` が null になって役割別コストを回収できなくなり、子を持つエージェントでは巻き添え archive も起きる。止められなくても続行してよい (`run.executor` と一致しない行を読み捨てる規則が吸収する)。現行ハーネス経路の executor には止める手段が無いので、従来どおり放置する。
+
+## Paseo invocation の usage 採取
+
+Paseo 経路の executor・verifier が 1 回の `run` または `send` を終えて停止したと検知した直後 (上記「Paseo 経路の起動パラメータと読み取り」節のポーリング、または同期起動の応答受信の直後)、および archive を呼ぶ直前に、その invocation の usage を採って `.task-pipeline/runs/<id>/usage/paseo/<event-id>.json` へ保存する。**archive の前に採る** — `LastUsage`/`snapshot.lastUsage` は archive すると null になり、しかも累積ではなく直前の run 単発の値である (`docs/paseo-notify-on-finish-2026-08.md` の「エージェントの後始末」)。
+
+- **採り方** — CLI 経路なら `paseo inspect <agentId> --json` の `.LastUsage`、MCP 経路なら `get_agent_status` の `snapshot.lastUsage`。呼び出し自体が失敗した・応答に usage が無い (junie 等) ときも、下記のとおり `usage_available: false` で記録を残す (黙って除外しない)。
+- **`event_id`** — `<task_id>:<role>:<phase>:<invocation>-<n>` (`role` は `executor`/`verifier`、`invocation` は `run`/`send`)。`<n>` は再実行しても同じ値になるよう次のとおり決める: **`verifier`** はその検証ラウンドの `tasks[].gate.attempts` (ラウンド開始前の値 + 1) をそのまま使う — 同じ FAIL ラウンドの再送では同じ `n` になり上書き保存で冪等になる。**`executor`** は `.task-pipeline/runs/<id>/usage/paseo/` 配下で `<task_id>:executor:<phase>:` に前方一致する既存ファイルを数え、件数 + 1 を `n` にする — state.json をまだ進めていない再処理は同じ既存ファイル集合を数え直すので同じ `n` になる。
+- **保存する JSON**:
+  ```json
+  {
+    "schema_version": 1,
+    "event_id": "<task_id>:<role>:<phase>:<invocation>-<n>",
+    "task_id": "<id>",
+    "role": "executor",
+    "phase": "<phase>",
+    "attempt": 1,
+    "invocation": "run",
+    "agent_id": "<agentId>",
+    "workspace_id": "<workspaceId, 無ければ null>",
+    "provider": "<provider>",
+    "model": "<model>",
+    "usage": {
+      "input_tokens": 0,
+      "cached_input_tokens": 0,
+      "output_tokens": 0,
+      "cost_usd": "0.0"
+    },
+    "usage_available": true,
+    "source": "cli",
+    "recorded_at": "<ISO8601 UTC>"
+  }
+  ```
+  `usage_available: false` のときは `usage.*` を全部 `null` にする。`workspace_id` には下記「所有 workspace の記録と安全な後始末」節が同じ invocation で確定させた値をそのまま入れる (archive 対象かどうかの正はそちら側の記録であり、この usage ファイルは監査目的の写しにすぎない)。
+- **CLI / MCP のフィールド名の正規化**:
+
+  | 正規化後のキー | CLI (`paseo inspect --json` の `LastUsage`) | MCP (`get_agent_status` の `snapshot.lastUsage`) |
+  | --- | --- | --- |
+  | `input_tokens` | `InputTokens` | `inputTokens` |
+  | `cached_input_tokens` | `CachedTokens` | `cachedTokens` |
+  | `output_tokens` | `OutputTokens` | `outputTokens` |
+  | `cost_usd` | `CostUsd` (数値。文字列化して保存する) | `totalCostUsd` (同様に文字列化) |
+
+  CLI 側のフィールド名 (`InputTokens`/`OutputTokens`/`CachedTokens`/`CostUsd`) は `docs/paseo-notify-on-finish-2026-08.md` と `docs/paseo-subagent-2026-08.md` の実測に加え、`paseo inspect <id> --json` で追加確認済み (`runs/gh-122/research.md`)。**MCP 側のフィールド名はこのリポジトリの実行環境では未実測** (`mcp__paseo__*` ツールに到達できるのは Paseo エージェントの中だけで、このオーケストレータのセッションからは呼べない) — 最初に MCP 経路でこの手順を踏むエージェントは `get_agent_status` の応答を 1 度 verbatim で確認し、上表と食い違っていたら実測に合わせて更新すること。
+
+## 所有 workspace の記録と安全な後始末
+
+top-level (オーケストレータ自身) から Paseo 経路で `paseo run -d --cwd <worktree> --json` を呼ぶと、同じ cwd に対してでも呼ぶたびに新しい local workspace を作る (`docs/paseo-notify-on-finish-2026-08.md` の「エージェントの後始末」)。**agent-scoped の呼び出し (Paseo エージェントの中から `create_agent`/`paseo run` を呼ぶ場合) は `workspaceId` を省略すると caller の workspace を継承し、新規 workspace は作らない** (`docs/paseo-subagent-2026-08.md` の実測 1、70–71 行目)。この経路のオーケストレータは top-level のハーネスセッションなので、Paseo 経路で起こす executor/verifier は毎回 owned workspace を新規に持つのが通常経路である。
+
+- **所有の判定** — `paseo run -d --json` の stdout は、新規 workspace を作ったときだけ先頭に `Created workspace <workspaceId> - <name>` の行を出す (agentId の JSON を「最初の `{` から後ろ」として読む規則があるのはこの行のため — 上記「Paseo 経路の起動パラメータと読み取り」節)。**この行があれば owned、無ければ非所有** (caller の workspace を継承)。`paseo inspect --json` の応答には `workspaceId` フィールドが無いので、この行を起動直後に (agentId を取り出すのと同じ処理で) 拾い損なうと後から所有を確定できない。
+- **記録先** — `.task-pipeline/runs/<id>/paseo-workspace.json` に、そのタスクで Paseo 経路が確保した workspace を配列で記録する (`state.schema.json` は変更しない — 揮発情報は run dir 配下に置く、既存の `runs/<id>/rebase/` 等と同じ置き場)。起動のたびに追記する (takeover 等で 1 タスクの中に複数の owned workspace が生まれることがあるため、上書きではなく追記する):
+  ```json
+  {
+    "schema_version": 1,
+    "workspaces": [
+      {
+        "workspace_id": "<wks_...>",
+        "owned": true,
+        "agent_id": "<起動した agentId>",
+        "role": "executor",
+        "recorded_at": "<ISO8601 UTC>",
+        "archived_at": null
+      }
+    ]
+  }
+  ```
+  非所有 (継承) のエントリも `owned: false` で記録する — archive 対象からは常に除外されるが、どの workspace を使ったかの監査に残す。
+- **単発完了・permission 待ち停止時の後始末** — 経路節の項 5 (verifier の PASS 確定、または executor/verifier が permission 待ちで停止して現行ハーネス経路へ落ちるとき) の `paseo archive <agentId>` を呼ぶ手順は、上の usage 採取を終えた**直後**に行う。その invocation が `paseo-workspace.json` に `owned: true` のエントリを残していれば、続けて `paseo workspace archive <workspace_id>` (MCP なら `archive_workspace`) を 1 回試し、成功したら `archived_at` を埋める。**verifier はフレッシュ起動のたびに使い捨てるので、ここで owned workspace を確実に畳む。**
+- **安全規則 (曖昧な一括 archive の禁止)** — workspace の archive は**必ず `paseo-workspace.json` に記録された exact な `workspace_id` かつ `owned: true` のエントリだけ**を対象にする。**`cwd` が一致するという理由だけで workspace を archive しない** — 同一 cwd (同じタスク worktree) に対して複数セッション・複数タスクが workspace を持ちうるため、`cwd` 一致による一括 archive は他タスクやメインセッションの workspace を巻き込む重大な危険がある。`paseo workspace ls` に `--cwd`/`--label` に相当する絞り込みは無いので、**記録済みでない workspace_id は archive の対象にしない** (記録漏れがあれば残置してユーザーに伝える — 現行ハーネス経路の permission 待ち掃除と同じ扱い)。
+- **executor (長命なバックグラウンドエージェント) の owned workspace** — executor は単発完了しないので、上の「単発完了・permission 待ち」の archive はここでは起きない。executor の owned workspace は `paseo-workspace.json` に記録されたまま残り、`playbooks/merge-recovery.md` の「マージの回収」(`retire`) と `playbooks/pr-follow.md` の `closed` 分岐 (`withdraw`) が、そのタスクの Paseo 経路への関与が終わる時点で読みに行く。
