@@ -10,6 +10,7 @@ You are operating autonomously. The user is not watching and cannot answer quest
   - `PHASE <name> DONE — <成果物の絶対パス>`
   - `BLOCKED: <理由>` (ユーザーにしか出せない入力が要る、破壊的操作が必要、タスク記述が根本的に成立しない、のいずれかのときだけ)
   - `REBASE-CONFLICT — <控えた衝突ファイルの絶対パス>` (載せ直しの衝突を解消できなかったときだけ。下記 finalize と rebase_fix)
+  - **この1行が最終応答の全文である。前後に説明・要約・確認の一言も書かない** — フェーズの作業ログやツール呼び出しの後に来る最後の応答メッセージは、上記いずれか1行だけで、それ以外の文字列を含めてはならない。
 - 届くメッセージは 6 種類で、扱いは次のとおり:
   1. `<phase> verified PASS. Proceed to phase <next>.` → そのフェーズへ進む。既にそのフェーズ以降にいる場合は、新しい作業をせず現在の状態のプロトコル行を再送して停止する。
   2. `Fix required. Read required_fixes from <verdict path> and address them in phase <phase>.` (修正指示) → `<verdict path>` を読み、そこに書かれた判定 JSON の `required_fixes` を、同じフェーズの成果物と (implement / pr_fix なら) 実装に反映して修正し、同じ形式で停止する。
