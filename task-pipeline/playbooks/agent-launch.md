@@ -16,19 +16,45 @@
 | `依存昇格` | 同期 | **指定しない** (同上) | — | 現行のみ |
 | `衝突トリアージ` | 同期 | **指定しない** (同上) | — | 現行のみ |
 
+- **`executor` / `verifier` の「解決元」の列は、prefs の `providers` のカテゴリを指している。** その 1 段手前に `providers_by_class[<class>]` が挟まる (下記「タスクの class」と解決手順の段 2)。class を引くのはこの 2 役割だけである。
 - **`adapter-list` の安いモデル固定と、`mark` に広げないことの理由**は SKILL.md「アダプタの呼び方」にある (実測は `docs/cost-analysis-2026-07.md` §10 — 下がるのは単価だけで、トークン量はむしろ増える)。
 - **判断が成果物の役割 (`triage` / `survey` / `retro`) でモデルを指定しない理由**は SKILL.md「承認」手順 2 にある (`haiku` 指定で issue の重複見落としを実測)。安いモデルで削れるのは手続きであって判断ではない。
 - **「指定しない」の役割が現行のみなのは、この規律の帰結である** — Paseo 経路は provider を必須の引数として取るので、そこへ載せること自体が provider の指定になる。
 - 表に無い役割 (新しく足す役割) は、既定として「同期 / 指定しない / 現行のみ」に置き、この表に行を足してから使う。
 
+## タスクの class (宣言からの導出)
+
+`executor` / `verifier` を起こす直前に、そのタスクの **class** をタスクファイルの frontmatter から導出する。値は 3 つだけで、**引くのはこの 2 役割だけである** (他の役割は provider を解決しない — 上の表)。
+
+| class | 導出条件 (`tasks/<id>.md` の frontmatter) | 意味 |
+|---|---|---|
+| `trivial` | `gate: light` がある | task-prep が低リスク側の事前評価を宣言した (task-prep/SKILL.md「gate 宣言 (light)」) |
+| `high` | `risk: high` がある | task-prep が高リスク側の宣言をした (同「risk-high 宣言」) |
+| `standard` | どちらも無い | 宣言なし。**これが既定である** |
+
+導出はこの 2 本の grep だけで行う (SKILL.md「タスク実行」手順 1 の gate 判定と同じ形。**終了コードだけ**を見る):
+
+```
+sed -n '2,/^---$/p' <tasks/<id>.md の絶対パス> | grep -Fxq 'gate: light'
+sed -n '2,/^---$/p' <tasks/<id>.md の絶対パス> | grep -Fxq 'risk: high'
+```
+
+- **class は state.json に書かない。** 起動のたびにここで導出し直す (`state.schema.json` は変更しない — frontmatter から必ず導けるものを状態に持たせない。宣言の正はトラッカー側にあり frontmatter はその転写、という gate 判定の規律もそのまま引き継ぐ)。タスクファイルが読めない・grep が実行できないときは `standard` に落とす。
+- **`gate: light` と `risk: high` の両方が見えたら `high` を採る** (保守側)。宣言としては背反で、これは task-prep 側の誤りである (`task-prep/SKILL.md`「risk-high 宣言」)。**history に 1 行残す** (`agent-launch: <id> は gate: light と risk: high の両方が立っている — class=high を採用 (保守側)`)。
+- **class はワークフローを動かさない。** フェーズ列とゲートの数を決めるのは SKILL.md「タスク実行」手順 1 の gate 判定 (`run.gate` / `run.phase`) だけで、上の両立ケースでも `gate: light` が立っていればフェーズ列は light のままである。class が動かすのは下記の provider・model の選択だけである。
+
 ## provider・model・mode の解決手順
 
-provider と model は次の 3 段で決める。上の段が決まればそこで止める。
+provider と model は次の 4 段で決める。上の段が決まればそこで止める。
 
 1. **起動引数**に指定があればそれ (`impl_provider=` = 実装側 = `executor`、`verify_provider=` = 検証側 = `verifier`)。値の形は `<provider>[/<model>]` で、**最初の `/` までが provider、残りが model** である (omp のモデル id は `anthropic/claude-haiku-4-5` のように `/` を含む)。
-2. 無ければ `~/.paseo/orchestration-preferences.json` の `providers` の該当カテゴリ (上の表の「解決元」の列)。**実際にファイルを読む** — 既定値の記憶や下記の設定例で代用しない (`~/.claude/skills/paseo/SKILL.md` の規定)。設定例と、このパイプラインが読むカテゴリの一覧は `docs/orchestration-preferences.md`。
-3. それも無ければ**既定の組** — **実装 = `claude` 系 / 検証 = `omp`** — に解決する。model は指定せず provider の既定に任せる (`paseo run` の `--model` は任意で、固定のモデル id はここに書き下せない — `docs/orchestration-preferences.md`)。下記の**実在確認**に通らなかったときだけ、その役割を**セッション継承** (provider も `model` も渡さない) で起動する。
+2. 無ければ `~/.paseo/orchestration-preferences.json` の **`providers_by_class[<class>]`** の該当カテゴリ (`executor` = `impl` / `verifier` = `audit`。class は上記「タスクの class」)。**代用や記憶ではなく実際に読む**規律は段 3 と同じである。**`audit` を書けるのは `high` の class だけである** — 下記「class 行の床」。**このキーが無ければ段 2 は素通りする** (置いていない環境ではこの段が無いのと同じで、解決は従来の 3 段と 1 文字も変わらない)。設定例は `docs/orchestration-preferences.md`。
+3. 無ければ `~/.paseo/orchestration-preferences.json` の `providers` の該当カテゴリ (上の表の「解決元」の列。段 2 と同じファイルなので追加の読み込みは要らない)。**実際にファイルを読む** — 既定値の記憶や下記の設定例で代用しない (`~/.claude/skills/paseo/SKILL.md` の規定)。設定例と、このパイプラインが読むカテゴリの一覧は `docs/orchestration-preferences.md`。
+4. それも無ければ**既定の組** — **実装 = `claude` 系 / 検証 = `omp`** — に解決する。model は指定せず provider の既定に任せる (`paseo run` の `--model` は任意で、固定のモデル id はここに書き下せない — `docs/orchestration-preferences.md`)。下記の**実在確認**に通らなかったときだけ、その役割を**セッション継承** (provider も `model` も渡さない) で起動する。
 
+- **class 行の床 (不変条件)** — `providers_by_class` で**検証側 (`audit`) を指定してよいのは `high` の class だけ**である。`standard.audit` / `trivial.audit` は**無視して段 3 へ落とし**、history に 1 行残す (`agent-launch: providers_by_class.<class>.audit は無視 (検証側の class 指定は high のみ) — <役割> は providers.audit で解決`)。理由は故障の質が非対称であることにある: **verifier を弱めた故障は沈黙する** — 誤 PASS はどこにも現れず、壊れた成果物がそのまま in_review へ進む。**executor を弱めた故障はうるさい** — 実装が足りなければ検証ゲートが FAIL を返し、3 回で blocked になって人に届く。だから**実装側は class で下げてよく、検証側は上げる方向 (`high`) にしか動かさない**。
+- **政策値と不変条件の置き場を分ける** — どの class にどの provider・model を割り当てるか (**政策値**) は prefs にあり、**床・方向の制限・段の順序・mode の規則 (不変条件) はこの playbook にある**。prefs にどう書かれていても、この節と経路節の規則が優先する。
+- **段 2 で解決した provider にも、下記の規律がそのまま掛かる** — 無人 mode の事前チェック (経路節 項 1)、既定の組と同じ実在確認、junie の除外。**通らなければその値を捨てて段 3 へ落ちる** (history に 1 行: `agent-launch: providers_by_class.<class>.<カテゴリ> は使えない (<理由>) — 段を下げて解決`)。class 行は選択肢を 1 つ足すだけのものなので、**フォールバックの終端 (現行ハーネス経路 / セッション継承 / `block`) を置き換えない** — 段 3・段 4 で解決した provider が通らなかったときの扱いは従来どおりである。
 - **prefs のファイルが無いときは、既定の組で進めたうえでユーザーに一度だけ伝える** (1 セッションに 1 回。history にも 1 行)。既定の組は**実装 = claude 系 / 検証 = omp** で、これが「実装と検証を別プロバイダにする」の既定である。omp を検証側に置くのは、`references/verifier.md` の契約 (指示ファイルを読む → verdict path へ書く → 最小 JSON だけを返す → target project を変更しない) を omp のエージェントが完走したことが実測されている唯一の組だからである (`docs/paseo-subagent-2026-08.md` の実測 6)。junie は応答を返しても usage が取れずコストを回収できないので既定には選ばない。
 - **既定の組は、使う前に provider の実在を確かめる** (以下「実在確認」): MCP の `list_providers` を引き、`claude` と `omp` がその環境で available かを見る (モデル id が要るときだけ `list_models`)。MCP を引けないときは CLI の `paseo provider ls` の `status` 列でも同じ確認が取れる。**実在確認が取れないか、既定の組の provider が available でないときだけ、その役割をセッション継承で起動する** — これが既定の組の唯一の落ち先である。通れば、prefs が無くても provider は解決済みなので、経路 1 (Paseo) にそのまま乗る。
 - **prefs 不在で残す history の 1 行は、経路の帰結まで書く**: 既定の組を適用できたときは `agent-launch: prefs 不在 — 既定の組で解決 (実装=<provider> / 検証=<provider>) — verifier は Paseo 経路に乗る`、落ち先に落ちたときは `agent-launch: prefs 不在 — 実在確認に通らず (<理由>) セッション継承 — verifier は Paseo 経路に乗らない (別プロバイダ検証と Paseo 側の可観測性が効かない)`。

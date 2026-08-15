@@ -190,7 +190,7 @@ state.json への書き込みはすべて上記「CLI (state.ts) の呼び出し
    argues for going first — but they do not override the ordering you are given.
    Return only JSON: {"ranked": [{"id": "...", "reason": "<日本語 40 字以内>"}, ...]}
    ```
-   - `labels` と `milestone` は `list` が返した値をそのまま渡す (無ければその項ごと省く)。**パイプラインが使うラベル (`in-review` / `blocked` / `gate-light` / `priority-*`) は渡さない** — 判断材料はプロジェクト側の語彙だけにする。
+   - `labels` と `milestone` は `list` が返した値をそのまま渡す (無ければその項ごと省く)。**パイプラインが使うラベル (`in-review` / `blocked` / `gate-light` / `risk-high` / `priority-*`) は渡さない** — 判断材料はプロジェクト側の語彙だけにする。
    - **段は `priority-*` だけが作る** (`bug` や milestone は段を作らない — 2 系統あると衝突時にどちらが勝つか毎回説明することになる)。段が 2 つ以上あるときは**段ごとに 1 体ずつではなく 1 体にまとめて渡し**、段の境界をプロンプトに書く (返った並びを段の順に連結したものが最終順位)。
    結果を `state.ts candidates-set --candidates-json <json>` で `candidates` に保存する (`title`/`priority`/`updated_at` は `list` の値をそのまま控え、次回の再利用判定に使う)。**順位と理由の全件を history に 1 行で残す** (`gh-84 > gh-86 > gh-83 (理由: …)` の形。5 位以下に沈めた判断は history にしか残らない)。**トリアージのモデルは指定しない** (判断そのものが成果物 — 安いモデルで削れるのは手続きであって判断ではない。`haiku` 指定で issue の重複見落としを実測)。
 3. 1 件を決める。`approve` の値で分岐する。
@@ -236,6 +236,11 @@ Return only what the adapter file specifies for this operation.
    sed -n '2,/^---$/p' <tasks/<id>.md の絶対パス> | grep -Fxq 'gate: light'
    ```
    ヒットしたら `state.ts set-gate --id <id>` を呼ぶ (`run.gate: "light"`, `run.phase: "research+plan"` に更新。前提は `run` が `initial/full/research` のノードにあること)。ヒットしない・ファイルが無い・コマンドが実行できないときは何もしない — **既定は full**。この判定も `mark` より前に行ってはならない (スタブに `gate:` 行は無いので必ず full に落ちる — 宣言のあるタスクでも安全側の意図した降格)。`mark in_progress` の応答の `gate_declared` と**この grep の結果が食い違ったら両方の値を history に書く** (アダプタの書き出しが宣言を落としたことを観測するため。過去に本文末尾マーカー行方式で 2/3 の宣言が静かに失われた実績があり `docs/gate-declaration-2026-08.md` に記録がある)。
+   続けて **risk 宣言の有無も同じ形で見る** (frontmatter だけ。**終了コードだけ**を見る):
+   ```
+   sed -n '2,/^---$/p' <tasks/<id>.md の絶対パス> | grep -Fxq 'risk: high'
+   ```
+   **この結果で state.json を書かない** — risk 宣言はワークフロー (フェーズ列とゲートの数) を変えず、provider・model の選択にだけ効き、その導出は起動のたびに `playbooks/agent-launch.md`「タスクの class」が同じ frontmatter からやり直す (状態に持たせない)。ここで grep するのは観測のためである: `mark in_progress` の応答の `risk_declared` と**この grep の結果が食い違ったら両方の値を history に書く** (`gate_declared` の食い違いと同じ理由 — アダプタの書き出しが宣言を落としたことを、宣言が無かった場合と区別して観測するため)。
 2. **タスク専用の worktree を作る** (`playbooks/worktree.md`)。作れなかった場合はそこに書いたとおりに扱う。
 3. 実行エージェントを **background で 1 体** 起動する (**provider・model・mode と経路と起動パラメータは起動の直前に `playbooks/agent-launch.md` で決める** — 下のプロンプト文面は変えない)。**同期起動 (完了まで呼び出し元をブロックする起動) はしない** — background 起動と、実行エージェントの停止をポーリングで検知する経路 (下記手順4) の組み合わせで、`paseo loop` のようにイテレーション境界がセッション境界になる環境でも停止検知が成立する (`playbooks/agent-launch.md` の役割の表、`docs/loop-session-orphan-2026-08.md`)。プロンプトはこの 5 行のみ:
    ```

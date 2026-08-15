@@ -152,16 +152,51 @@ const ROLES = [
   "`衝突トリアージ`",
 ] as const;
 
-/** 解決手順の 3 段。この順で現れなければならない。 */
+/** 解決手順の 4 段。この順で現れなければならない。 */
 const RESOLUTION_STEPS = [
   "**起動引数**",
+  "**`providers_by_class[<class>]`**",
   "`~/.paseo/orchestration-preferences.json` の `providers`",
   "**セッション継承**",
 ] as const;
 
+/** 既定の組が載る段の番号。class 行が入って 3 → 4 になった。 */
+const DEFAULT_SET_STEP = 4;
+
+/** class 行が載る段の番号と、その段が名指すべきキー。 */
+const CLASS_STEP = 2;
+const CLASS_ROW_NEEDLE = "`providers_by_class[<class>]`";
+
+/**
+ * class 行の床 — 検証側 (`audit`) の指定を `high` だけに限る不変条件。
+ * verifier を弱めた故障は沈黙する (誤 PASS が現れない) ので、下方向は許さない。
+ * 制限と落ち先が**同じ行**に無ければ、制限だけが残って落ち先が即興になる。
+ */
+const AUDIT_FLOOR_NEEDLE =
+  "検証側 (`audit`) を指定してよいのは `high` の class だけ";
+const AUDIT_FLOOR_EXTRAS = [
+  "`trivial.audit`",
+  "段 3 へ落とし",
+  "history に 1 行",
+] as const;
+
+/** class の 3 値と、その導出条件 (frontmatter の 1 行)。表の本文行スコープで見る。 */
+const CLASS_VALUES: readonly [string, string][] = [
+  ["`trivial`", "`gate: light`"],
+  ["`high`", "`risk: high`"],
+  ["`standard`", "どちらも無い"],
+];
+
+/** class を状態に持たない規律 (起動のたびに frontmatter から導出しなおす)。 */
+const CLASS_STATELESS_NEEDLE = "class は state.json に書かない";
+
+/** 宣言が両立したときの倒し方。保守側 (`high`) と観測 (history) が同じ行に無ければならない。 */
+const CLASS_CONFLICT_NEEDLE = "両方が見えたら `high` を採る";
+const CLASS_CONFLICT_EXTRAS = ["保守側", "history に 1 行"] as const;
+
 const PREFS_MISSING_NEEDLE = "一度だけ伝える";
 
-/** prefs 不在の帰結 (解決手順の 3 段目) が名指すべきもの — 既定の組と、その両側の provider。 */
+/** prefs 不在の帰結 (解決手順の最終段) が名指すべきもの — 既定の組と、その両側の provider。 */
 const DEFAULT_SET_NEEDLES = ["既定の組", "claude", "omp"] as const;
 
 /** 実在確認の規定。手段と落ち先が**同じ行**になければ、落ち先だけが独り歩きする。 */
@@ -257,6 +292,11 @@ const LAUNCH_SITES: readonly [string, URL, string][] = [
   ],
 ];
 
+const classSection = sedRange(
+  playbook,
+  /^## タスクの class \(宣言からの導出\)$/,
+  /^## /,
+);
 const resolutionSection = sedRange(
   playbook,
   /^## provider・model・mode の解決手順$/,
@@ -268,6 +308,34 @@ const fallbackSection = sedRange(
   /^## /,
 );
 const dispatchSection = sedRange(skillMd, DISPATCH_HEADING, /^## /);
+
+/** A2b 相当の述語 — class 行が解決手順の 2 段目にある。 */
+function classRowIsSecondStep(text: string): boolean {
+  const step = numberedStep(text, CLASS_STEP);
+  return step !== null && step.includes(CLASS_ROW_NEEDLE);
+}
+
+/** A2c 相当の述語 — 床の制限と落ち先が同じ行にある。 */
+function auditFloorHolds(text: string): boolean {
+  const line = lineWith(text, AUDIT_FLOOR_NEEDLE);
+  return line !== null &&
+    AUDIT_FLOOR_EXTRAS.every((needle) => line.includes(needle));
+}
+
+/** A2d 相当の述語 — class の 3 値が表の本文行として 1 本ずつあり、導出条件も同じ行にある。 */
+function classValuesHold(text: string): boolean {
+  return CLASS_VALUES.every(([value, condition]) => {
+    const rows = tableRowsWith(text, value);
+    return rows.length === 1 && rows[0].includes(condition);
+  });
+}
+
+/** A2f 相当の述語 — 宣言が両立したときの倒し方と観測が同じ行にある。 */
+function classConflictHolds(text: string): boolean {
+  const line = lineWith(text, CLASS_CONFLICT_NEEDLE);
+  return line !== null &&
+    CLASS_CONFLICT_EXTRAS.every((needle) => line.includes(needle));
+}
 
 const U_ROW_CASES: readonly [string, number, string][] = [
   ["| `retro` | 同期 | 指定しない |", 1, "表の本文行なら拾う"],
@@ -407,7 +475,8 @@ for (const [text, expected, label] of U_INHERITANCE_CASES) {
   });
 }
 
-Deno.test("A0 手順書の 3 節が切り出せる", () => {
+Deno.test("A0 手順書の 4 節が切り出せる", () => {
+  assertOk(classSection.length > 0, "タスクの class の節が空");
   assertOk(resolutionSection.length > 0, "解決手順の節が空");
   assertOk(fallbackSection.length > 0, "経路とフォールバックの節が空");
   assertOk(dispatchSection.length > 0, "SKILL.md のディスパッチ表の節が空");
@@ -420,10 +489,56 @@ for (const role of ROLES) {
   });
 }
 
-Deno.test("A2 解決手順が 3 段をこの順で持つ (引数 → prefs のカテゴリ → 既定)", () => {
+Deno.test(
+  "A2 解決手順が 4 段をこの順で持つ (引数 → class 行 → prefs のカテゴリ → 既定)",
+  () => {
+    assertOk(
+      inOrder(resolutionSection, RESOLUTION_STEPS),
+      `段が欠けているか順序が違う: ${JSON.stringify(RESOLUTION_STEPS)}`,
+    );
+  },
+);
+
+Deno.test(`A2b 解決手順の ${CLASS_STEP} 段目が class 行である`, () => {
   assertOk(
-    inOrder(resolutionSection, RESOLUTION_STEPS),
-    `段が欠けているか順序が違う: ${JSON.stringify(RESOLUTION_STEPS)}`,
+    classRowIsSecondStep(resolutionSection),
+    `${CLASS_STEP} 段目が ${CLASS_ROW_NEEDLE} を名指していない: ${
+      numberedStep(resolutionSection, CLASS_STEP)
+    }`,
+  );
+});
+
+Deno.test("A2c class 行の床が、検証側の指定を `high` だけに限る (行スコープ)", () => {
+  assertOk(
+    auditFloorHolds(resolutionSection),
+    `床の制限と落ち先が同じ行に無い: ${
+      JSON.stringify(lineWith(resolutionSection, AUDIT_FLOOR_NEEDLE))
+    }`,
+  );
+});
+
+Deno.test("A2d class の 3 値と導出条件が表の本文行にある", () => {
+  assertOk(
+    classValuesHold(classSection),
+    `3 値のいずれかが欠けているか導出条件が同じ行に無い: ${
+      JSON.stringify(CLASS_VALUES)
+    }`,
+  );
+});
+
+Deno.test("A2e class を state.json に持たない規律が class の節にある", () => {
+  assertOk(
+    containsFixed(classSection, CLASS_STATELESS_NEEDLE),
+    `見つからない: ${CLASS_STATELESS_NEEDLE}`,
+  );
+});
+
+Deno.test("A2f 宣言が両立したら保守側に倒し、history に残す (行スコープ)", () => {
+  assertOk(
+    classConflictHolds(classSection),
+    `倒し方と観測が同じ行に無い: ${
+      JSON.stringify(lineWith(classSection, CLASS_CONFLICT_NEEDLE))
+    }`,
   );
 });
 
@@ -434,13 +549,19 @@ Deno.test("A3 prefs が無いときの扱いが解決手順の節にある", () 
   );
 });
 
-Deno.test("A3b 解決手順の 3 段目が既定の組 (実装 = claude / 検証 = omp) に解決する", () => {
-  const step = numberedStep(resolutionSection, 3);
-  assertOk(step !== null, "3 段目の本文行が見つからない");
-  for (const needle of DEFAULT_SET_NEEDLES) {
-    assertOk(step.includes(needle), `3 段目にない (${needle}): ${step}`);
-  }
-});
+Deno.test(
+  `A3b 解決手順の ${DEFAULT_SET_STEP} 段目が既定の組 (実装 = claude / 検証 = omp) に解決する`,
+  () => {
+    const step = numberedStep(resolutionSection, DEFAULT_SET_STEP);
+    assertOk(step !== null, `${DEFAULT_SET_STEP} 段目の本文行が見つからない`);
+    for (const needle of DEFAULT_SET_NEEDLES) {
+      assertOk(
+        step.includes(needle),
+        `${DEFAULT_SET_STEP} 段目にない (${needle}): ${step}`,
+      );
+    }
+  },
+);
 
 Deno.test("A3c 解決手順の節に、セッション継承を条件なしで主張する行が無い", () => {
   const lines = unconditionalInheritanceLines(resolutionSection);
@@ -591,7 +712,20 @@ const fallbackRuleLine = lineWith(
 const prFollowMd = Deno.readTextFileSync(
   new URL("pr-follow.md", PLAYBOOKS_DIR),
 );
-const stepThreeLine = numberedStep(resolutionSection, 3) as string;
+const defaultSetLine = numberedStep(
+  resolutionSection,
+  DEFAULT_SET_STEP,
+) as string;
+const classStepLine = numberedStep(resolutionSection, CLASS_STEP) as string;
+const auditFloorLine = lineWith(
+  resolutionSection,
+  AUDIT_FLOOR_NEEDLE,
+) as string;
+const classValueRow = tableRowsWith(classSection, "`standard`")[0];
+const classConflictLine = lineWith(
+  classSection,
+  CLASS_CONFLICT_NEEDLE,
+) as string;
 const existenceLine = lineWith(
   resolutionSection,
   EXISTENCE_CHECK_NEEDLE,
@@ -715,36 +849,36 @@ const REGRESSIONS: readonly Regression[] = [
     stillHolds: implAuditDiffer,
   },
   {
-    label: "3 段目が旧文 (無条件のセッション継承) に戻る",
+    label: `${DEFAULT_SET_STEP} 段目が旧文 (無条件のセッション継承) に戻る`,
     original: resolutionSection,
     mutated: resolutionSection.replace(
-      stepThreeLine,
-      "3. それも無ければ**セッション継承** (現行どおり。Agent tool に `model` を渡さない)。",
+      defaultSetLine,
+      `${DEFAULT_SET_STEP}. それも無ければ**セッション継承** (現行どおり。Agent tool に \`model\` を渡さない)。`,
     ),
     stillHolds: (t) => unconditionalInheritanceLines(t).length === 0,
   },
   {
-    label: "3 段目から検証側の provider (omp) だけが消える",
+    label: `${DEFAULT_SET_STEP} 段目から検証側の provider (omp) だけが消える`,
     original: resolutionSection,
     mutated: resolutionSection.replace(
-      stepThreeLine,
-      stepThreeLine.replace(" / 検証 = `omp`", ""),
+      defaultSetLine,
+      defaultSetLine.replace(" / 検証 = `omp`", ""),
     ),
     stillHolds: (t) => {
-      const step = numberedStep(t, 3);
+      const step = numberedStep(t, DEFAULT_SET_STEP);
       return step !== null &&
         DEFAULT_SET_NEEDLES.every((needle) => step.includes(needle));
     },
   },
   {
-    label: "3 段目が番号付きリストから散文へ退化する",
+    label: `${DEFAULT_SET_STEP} 段目が番号付きリストから散文へ退化する`,
     original: resolutionSection,
     mutated: resolutionSection.replace(
-      stepThreeLine,
-      stepThreeLine.replace("3. ", ""),
+      defaultSetLine,
+      defaultSetLine.replace(`${DEFAULT_SET_STEP}. `, ""),
     ),
     stillHolds: (t) => {
-      const step = numberedStep(t, 3);
+      const step = numberedStep(t, DEFAULT_SET_STEP);
       return step !== null &&
         DEFAULT_SET_NEEDLES.every((needle) => step.includes(needle));
     },
@@ -753,13 +887,88 @@ const REGRESSIONS: readonly Regression[] = [
     label: "セッション継承の行から条件語だけが消える (節の別の行には残る)",
     original: resolutionSection,
     mutated: resolutionSection.replace(
-      stepThreeLine,
-      stepThreeLine.replace(
+      defaultSetLine,
+      defaultSetLine.replace(
         "下記の**実在確認**に通らなかったときだけ",
         "それでも駄目なら",
       ),
     ),
     stillHolds: (t) => unconditionalInheritanceLines(t).length === 0,
+  },
+  {
+    label: "class 行の段が消えて解決が 3 段へ戻る",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(`${classStepLine}\n`, ""),
+    stillHolds: (t) => classRowIsSecondStep(t) && inOrder(t, RESOLUTION_STEPS),
+  },
+  {
+    label: "class 行が段ではなく散文の但し書きへ退化する",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      classStepLine,
+      classStepLine.replace(`${CLASS_STEP}. `, "- 参考: "),
+    ),
+    stillHolds: classRowIsSecondStep,
+  },
+  {
+    label: "床が検証側にも class ごとの指定を許す文へ緩む",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      AUDIT_FLOOR_NEEDLE,
+      "検証側 (`audit`) も class ごとに指定してよい",
+    ),
+    stillHolds: auditFloorHolds,
+  },
+  {
+    label: "床から下方向 (`trivial.audit`) の落ち先だけが消える",
+    original: resolutionSection,
+    mutated: resolutionSection.replace(
+      auditFloorLine,
+      auditFloorLine.replace(
+        "`standard.audit` / `trivial.audit` は**無視して段 3 へ落とし**、history に 1 行残す",
+        "指定しても効かない",
+      ),
+    ),
+    stillHolds: auditFloorHolds,
+  },
+  {
+    label: "class の 3 値の 1 つが表の外の散文へ退化する",
+    original: classSection,
+    mutated: classSection.replace(
+      classValueRow,
+      classValueRow.replace("| `standard` |", "`standard`:"),
+    ),
+    stillHolds: classValuesHold,
+  },
+  {
+    label: "class を state.json に持つ文へ戻る",
+    original: classSection,
+    mutated: classSection.replace(
+      CLASS_STATELESS_NEEDLE,
+      "class は state.json に記録する",
+    ),
+    stillHolds: (t) => containsFixed(t, CLASS_STATELESS_NEEDLE),
+  },
+  {
+    label: "宣言の両立が保守側ではなく light 勝ちへ倒れる",
+    original: classSection,
+    mutated: classSection.replace(
+      classConflictLine,
+      classConflictLine.replace(
+        CLASS_CONFLICT_NEEDLE,
+        "両方が見えたら `trivial` を採る",
+      ),
+    ),
+    stillHolds: classConflictHolds,
+  },
+  {
+    label: "宣言の両立の観測 (history の 1 行) だけが消える",
+    original: classSection,
+    mutated: classSection.replace(
+      classConflictLine,
+      classConflictLine.replace("**history に 1 行残す**", "そのまま進める"),
+    ),
+    stillHolds: classConflictHolds,
   },
   {
     label: "実在確認の行から確認の手段 (list_providers) が消える",
