@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "event_id": "dummy:verifier:plan:send-12",
+  "task_id": "dummy",
+  "role": "verifier",
+  "phase": "plan",
+  "attempt": 1,
+  "invocation": "send",
+  "agent_id": "paseo-bad-6",
+  "workspace_id": null,
+  "provider": "claude",
+  "model": "claude-sonnet-5",
+  "usage": null,
+  "usage_available": true,
+  "source": "cli",
+  "recorded_at": "2026-08-10T11:55:00Z"
+}

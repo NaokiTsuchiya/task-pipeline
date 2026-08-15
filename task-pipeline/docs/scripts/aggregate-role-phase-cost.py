@@ -34,14 +34,28 @@ transcript>` を実行した値と厳密に一致する。
 
 使い方:
   aggregate-role-phase-cost.py <session.jsonl> [--model fable|opus|sonnet|sonnet-intro|haiku]
+                                                [--paseo-usage-dir DIR]
+
+  --paseo-usage-dir に `.task-pipeline/runs/<id>/usage/paseo/` 相当のディレクトリ (Paseo 経路の
+  executor/verifier invocation ごとの usage JSON 群、`playbooks/agent-launch.md` の
+  「Paseo invocation の usage 採取」節のスキーマ) を渡すと、Claude Code transcript 側の集計へ
+  役割×フェーズ×attempt バケットごとに合算する。渡さない、またはディレクトリが存在しなければ
+  Paseo 側の寄与は 0 件になるだけで、transcript 単体の集計は従来どおり。
 
 出力:
   役割×フェーズ [×verifier の attempt バケット (0 / 1+)] ごとに1行:
-    role=<role> phase=<phase|-> attempt=<0|1+|-> api_calls=<n> processed=<n> weighted=<n> output=<n>
+    role=<role> phase=<phase|-> attempt=<0|1+|-> api_calls=<n> agent_runs=<n> processed=<n>
+    weighted=<n> output=<n>
   (--model を渡すと ` cost=$<n.nnnn> (<model>)` を追記する)
+  `api_calls` は Claude Code transcript 側の message.id 重複排除済み API コール数のみ、
+  `agent_runs` は Paseo 側の invocation (1 usage JSON = 1 run/send) 件数のみ — 粒度が異なるので
+  混同しない。`weighted`/`processed`/`output`/`input`/`cache_*` は両ソースの合算値。`cost` は
+  Claude 側 (`--model` 換算) と Paseo 側 (`usage.cost_usd`、provider 実額) の合算 —
+  Paseo のトークンを `--model` 単価で再換算することはしない。
   最後に必ず `uncountable=<n>` の行を出す (0件でも出す) —
-  役割・フェーズ・attempt が解決できなかった、agentId が取れなかった、または transcript ファイルが
-  見つからなかった呼び出しの件数 (集計から黙って落とさない)。
+  役割・フェーズ・attempt が解決できなかった、agentId が取れなかった、transcript ファイルが
+  見つからなかった呼び出し、および Paseo usage JSON の読み込み・スキーマ検証に失敗した記録の
+  件数 (集計から黙って落とさない)。
 
   環境変数 DETAIL_OUT にパスを渡すと、行の内訳を JSON で書き出す
   (`{"rows": [...], "uncountable": <n>}`。テストが数値を厳密に検証する手段)。
@@ -81,6 +95,82 @@ CACHE_READ_MULT = _orch.CACHE_READ_MULT
 VERDICT_PATH_RE = re.compile(r'verdict path:\s*(\S+)')
 # collect-task-metrics.py の FAIL_ATTEMPT_RE と同じ意味論 (ファイル名末尾の attempt 数字)。
 ATTEMPT_RE = re.compile(r'-(\d+)\.json$')
+PASEO_ROLES = ('executor', 'verifier')
+
+
+def _parse_paseo_record(rec):
+    """Paseo usage JSON 1件を検証し、有効なら
+    {'event_id','role','phase','attempt_bucket','input','read','output','cost_usd'} を返す。
+    どこかで失敗したら None (呼び出し側で uncountable を数える)。
+    `playbooks/agent-launch.md` の「Paseo invocation の usage 採取」節のスキーマに従う。
+    """
+    if not isinstance(rec, dict):
+        return None
+    if rec.get('schema_version') != 1:
+        return None
+    event_id = rec.get('event_id')
+    if not event_id or not isinstance(event_id, str):
+        return None
+    role = rec.get('role')
+    if role not in PASEO_ROLES:
+        return None
+    if rec.get('usage_available') is not True:
+        return None
+    usage = rec.get('usage')
+    if not isinstance(usage, dict):
+        return None
+    try:
+        input_tokens = int(usage.get('input_tokens', 0) or 0)
+        cached_tokens = int(usage.get('cached_input_tokens', 0) or 0)
+        output_tokens = int(usage.get('output_tokens', 0) or 0)
+        cost_usd = float(usage.get('cost_usd'))
+    except (TypeError, ValueError):
+        return None
+
+    attempt_bucket = None
+    if role == 'verifier':
+        attempt = rec.get('attempt')
+        if not isinstance(attempt, int) or isinstance(attempt, bool):
+            return None
+        # Paseo の attempt は tasks[].gate.attempts 起点 (ラウンド開始前の値+1) で
+        # 初回検証が 1 になる 1-indexed 規則 — transcript 側 ATTEMPT_RE の 0-indexed
+        # (初回 verdict-0.json → attempt=0) とは食い違うため、ここでマッピングし直す。
+        attempt_bucket = '0' if attempt == 1 else '1+'
+
+    return {'event_id': event_id, 'role': role, 'phase': rec.get('phase'),
+            'attempt_bucket': attempt_bucket, 'input': input_tokens,
+            'read': cached_tokens, 'output': output_tokens, 'cost_usd': cost_usd}
+
+
+def load_paseo_events(paseo_dir):
+    """`.task-pipeline/runs/<id>/usage/paseo/` 相当のディレクトリを読み、
+    (rows, uncountable) を返す。rows は _parse_paseo_record が返す dict のリスト
+    (event_id 重複は除去済み)。ディレクトリが無ければ ([], 0)。
+    """
+    if not os.path.isdir(paseo_dir):
+        return [], 0
+    seen_event_ids = set()
+    rows = []
+    uncountable = 0
+    for name in sorted(os.listdir(paseo_dir)):
+        path = os.path.join(paseo_dir, name)
+        if not (name.endswith('.json') and os.path.isfile(path)):
+            continue
+        try:
+            with open(path) as fh:
+                rec = json.load(fh)
+        except (ValueError, OSError):
+            uncountable += 1
+            continue
+        row = _parse_paseo_record(rec)
+        if row is None:
+            uncountable += 1
+            continue
+        if row['event_id'] in seen_event_ids:
+            continue  # 上書き保存の冪等な再読み込み。二重計上しない。
+        seen_event_ids.add(row['event_id'])
+        rows.append(row)
+    return rows, uncountable
 
 
 def weighted_of(tot):
@@ -304,11 +394,14 @@ def compute_rows(resolved, session_dir):
 
 def main():
     if len(sys.argv) < 2:
-        sys.exit('usage: aggregate-role-phase-cost.py <session.jsonl> [--model M]')
+        sys.exit('usage: aggregate-role-phase-cost.py <session.jsonl> '
+                  '[--model M] [--paseo-usage-dir DIR]')
     path = sys.argv[1]
     model = sys.argv[sys.argv.index('--model') + 1] if '--model' in sys.argv else None
     if model and model not in PRICES:
         sys.exit(f"unknown model: {model} (choose from {', '.join(PRICES)})")
+    paseo_dir = (sys.argv[sys.argv.index('--paseo-usage-dir') + 1]
+                 if '--paseo-usage-dir' in sys.argv else None)
 
     with open(path) as fh:
         lines = fh.readlines()
@@ -319,29 +412,55 @@ def main():
     events = collect_stop_events(lines)
     resolved, uncountable_resolve = resolve_events(events, launches)
     buckets, calls, uncountable_missing = compute_rows(resolved, session_dir)
-    uncountable = uncountable_resolve + uncountable_missing
+
+    paseo_rows, uncountable_paseo = load_paseo_events(paseo_dir) if paseo_dir else ([], 0)
+    paseo_buckets = {}   # (role, phase, attempt_bucket) -> tot dict (Paseo 側のみ)
+    paseo_agent_runs = {}
+    paseo_cost = {}
+    for r in paseo_rows:
+        key = (r['role'], r['phase'], r['attempt_bucket'])
+        if key not in paseo_buckets:
+            paseo_buckets[key] = _empty_tot()
+            paseo_agent_runs[key] = 0
+            paseo_cost[key] = 0.0
+        paseo_buckets[key]['input'] += r['input']
+        paseo_buckets[key]['read'] += r['read']
+        paseo_buckets[key]['output'] += r['output']
+        paseo_agent_runs[key] += 1
+        paseo_cost[key] += r['cost_usd']
+
+    uncountable = uncountable_resolve + uncountable_missing + uncountable_paseo
 
     rows = []
-    for key in sorted(buckets, key=lambda k: (k[0] or '', k[1] or '', k[2] or '')):
+    all_keys = set(buckets) | set(paseo_buckets)
+    for key in sorted(all_keys, key=lambda k: (k[0] or '', k[1] or '', k[2] or '')):
         role, phase, attempt_bucket = key
-        tot = buckets[key]
-        processed = tot['input'] + tot['create_1h'] + tot['create_5m'] + tot['read'] + tot['output']
-        weighted = weighted_of(tot)
+        claude_tot = buckets.get(key, _empty_tot())
+        combined_tot = _empty_tot()
+        _add_tot(combined_tot, claude_tot)
+        _add_tot(combined_tot, paseo_buckets.get(key, _empty_tot()))
+        processed = (combined_tot['input'] + combined_tot['create_1h']
+                     + combined_tot['create_5m'] + combined_tot['read']
+                     + combined_tot['output'])
+        weighted = weighted_of(combined_tot)
+        paseo_cost_usd = paseo_cost.get(key, 0.0)
         row = {
             'role': role, 'phase': phase, 'attempt_bucket': attempt_bucket,
-            'api_calls': calls[key], 'processed': processed, 'weighted': weighted,
-            'output': tot['output'], 'input': tot['input'],
-            'cache_write_1h': tot['create_1h'], 'cache_write_5m': tot['create_5m'],
-            'cache_read': tot['read'],
+            'api_calls': calls.get(key, 0), 'agent_runs': paseo_agent_runs.get(key, 0),
+            'processed': processed, 'weighted': weighted,
+            'output': combined_tot['output'], 'input': combined_tot['input'],
+            'cache_write_1h': combined_tot['create_1h'], 'cache_write_5m': combined_tot['create_5m'],
+            'cache_read': combined_tot['read'], 'paseo_cost_usd': paseo_cost_usd,
         }
         if model:
-            row['cost'] = cost_of(tot, model)
+            row['cost'] = cost_of(claude_tot, model) + paseo_cost_usd
         rows.append(row)
 
     for row in rows:
         line = (f"role={row['role']} phase={row['phase'] if row['phase'] is not None else '-'} "
                 f"attempt={row['attempt_bucket'] if row['attempt_bucket'] is not None else '-'} "
-                f"api_calls={row['api_calls']} processed={row['processed']:,} "
+                f"api_calls={row['api_calls']} agent_runs={row['agent_runs']} "
+                f"processed={row['processed']:,} "
                 f"weighted={row['weighted']:,.0f} output={row['output']:,}")
         if model:
             line += f" cost=${row['cost']:.4f} ({model})"

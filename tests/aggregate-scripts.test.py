@@ -51,12 +51,17 @@ def main():
     cache_fixture = os.path.join(fixtures_dir, "orchestrator-cache.jsonl")
     role_phase_cost_fixture = os.path.join(fixtures_dir, "role-phase-cost-session.jsonl")
     role_phase_cost_clean_fixture = os.path.join(fixtures_dir, "role-phase-cost-clean.jsonl")
+    paseo_usage_dir = os.path.join(fixtures_dir, "paseo-usage-mixed")
+    paseo_usage_missing_dir = os.path.join(fixtures_dir, "paseo-usage-does-not-exist")
 
     for p in (session_script, orch_script, role_phase_cost_script, session_fixture,
               dedup_fixture, cache_fixture, role_phase_cost_fixture, role_phase_cost_clean_fixture):
         if not os.path.isfile(p):
             print(f"missing required path: {p}", file=sys.stderr)
             sys.exit(1)
+    if not os.path.isdir(paseo_usage_dir):
+        print(f"missing required path: {paseo_usage_dir}", file=sys.stderr)
+        sys.exit(1)
 
     # --- ケース A/B: aggregate-session-usage.py の phase 分類 (DETAIL_OUT 経由) -----------
     with tempfile.TemporaryDirectory() as tmp:
@@ -416,6 +421,125 @@ def main():
         ng("F15 uncountable な呼び出しが無いセッションでは uncountable=0 が出る",
            f"exit={proc_clean.returncode} uncountable={detail_clean.get('uncountable')} "
            f"stdout={proc_clean.stdout!r}")
+
+    # --- ケース G: aggregate-role-phase-cost.py の Paseo usage ログ取り込み (gh-123) ---
+    proc_g, detail_g = run_role_phase_cost(role_phase_cost_fixture, ["--paseo-usage-dir", paseo_usage_dir])
+    if proc_g.returncode == 0:
+        ok("G0 role-phase-cost --paseo-usage-dir: スクリプト実行 (exit 0)")
+    else:
+        ng("G0 role-phase-cost --paseo-usage-dir: スクリプト実行 (exit 0)",
+           f"exit={proc_g.returncode} stderr={proc_g.stderr!r}")
+    rows_g = detail_g.get("rows", [])
+
+    # G1 (受け入れ条件1): Claude 側に既存バケットがある executor/implement/None への Paseo 合算。
+    # claude weighted=2300 (F10) + paseo(input=1000,read=200,output=100)=1520 -> 3820。
+    # api_calls は Claude 側のみ (3、不変)。agent_runs は Paseo 側のみ (1)。
+    row = find_row(rows_g, "executor", "implement", None)
+    if row and row["weighted"] == 3820 and row["api_calls"] == 3 and row["agent_runs"] == 1:
+        ok("G1 executor/implement: Claude(2300)+Paseo(1520)=3820, api_calls=3(不変), agent_runs=1")
+    else:
+        ng("G1 executor/implement: Claude(2300)+Paseo(1520)=3820, api_calls=3, agent_runs=1", f"row={row}")
+
+    # G2 (受け入れ条件1・判定点15の前提): 既存 verifier/plan/'0' への Paseo 合算。
+    # claude weighted=400 (F11) + paseo(input=100,output=20)=200 -> 600。
+    # bad-usage-not-dict.json / bad-attempt-type.json も同じ phase=plan attempt=1 を狙っているが
+    # 両方とも拒否されるので agent_runs は 1 のまま (2 や 3 に増えない)。
+    row = find_row(rows_g, "verifier", "plan", "0")
+    if row and row["weighted"] == 600 and row["api_calls"] == 1 and row["agent_runs"] == 1:
+        ok("G2 verifier/plan/'0': Claude(400)+Paseo(200)=600, api_calls=1, agent_runs=1 "
+           "(拒否レコード2件が混入していない)")
+    else:
+        ng("G2 verifier/plan/'0': Claude(400)+Paseo(200)=600, api_calls=1, agent_runs=1", f"row={row}")
+
+    # G3 (受け入れ条件1): Paseo 専用の新規バケット verifier/rebase_fix/'0' (Claude 側に対応バケット無し)。
+    # api_calls はキー自体が calls に無いので 0。
+    row = find_row(rows_g, "verifier", "rebase_fix", "0")
+    if row and row["weighted"] == 455 and row["api_calls"] == 0 and row["agent_runs"] == 1:
+        ok("G3 verifier/rebase_fix/'0' (Paseo専用の新規バケット): weighted=455, api_calls=0, agent_runs=1")
+    else:
+        ng("G3 verifier/rebase_fix/'0': weighted=455, api_calls=0, agent_runs=1", f"row={row}")
+
+    # G4/G5 (判定点12・attempt_bucketマッピングの境界): attempt=2 (g4) と attempt=0 (g5, 境界値) は
+    # どちらも '1+' バケットに入る (attempt==1 だけが '0')。g4(600)+g5(700)=1300, agent_runs=2。
+    # g5 が誤って '0' 側 (transcript の 0-indexed 規則の取り違え) に漏れていないことも同時に検出する。
+    row = find_row(rows_g, "verifier", "rebase_fix", "1+")
+    if row and row["weighted"] == 1300 and row["agent_runs"] == 2:
+        ok("G4/G5 verifier/rebase_fix/'1+': attempt=2,0 とも '1+' に入り weighted=1300, agent_runs=2 "
+           "(attempt==1 だけが '0' になる境界を確認)")
+    else:
+        ng("G4/G5 verifier/rebase_fix/'1+': weighted=1300, agent_runs=2", f"row={row}")
+
+    # Gdup (受け入れ条件2): 同一 event_id の重複ファイル (g3 の桁違いの値の複製) が二重計上されない。
+    # 誤って両方採用されていれば rebase_fix/'0' の weighted が 999999 級に跳ね上がる。
+    row = find_row(rows_g, "verifier", "rebase_fix", "0")
+    if row and row["weighted"] < 100000:
+        ok("Gdup 同一event_idの重複ファイル: 二重計上されない (rebase_fix/'0' の weighted=455 のまま)")
+    else:
+        ng("Gdup 同一event_idの重複ファイル: 二重計上されない", f"row={row}")
+
+    # Gbad (受け入れ条件2): 拒否側フィクスチャ8件が uncountable に反映され、どのバケットにも漏れない。
+    # 既存 F9 の uncountable=4 (Claude側) + 新規8件 (Paseo側) = 12。
+    if detail_g.get("uncountable") == 12:
+        ok("Gbad uncountable=12 (Claude側4 + Paseo拒否側8) が DETAIL_OUT に出る")
+    else:
+        ng("Gbad uncountable=12 が DETAIL_OUT に出る", f"uncountable={detail_g.get('uncountable')}")
+    if "uncountable=12" in proc_g.stdout:
+        ok("Gbad stdout に 'uncountable=12' が厳密一致で出る")
+    else:
+        ng("Gbad stdout に 'uncountable=12' が厳密一致で出る", f"stdout={proc_g.stdout!r}")
+
+    # Gbad-leak: 拒否側フィクスチャの magic number (5555/4444/8888/222/7777/6666/333) が
+    # どの行の weighted にも現れない (F5/F6 と同じ漏れ検査パターン)。
+    leaked_bad = {n for n in (5555, 4444, 8888, 222, 7777, 6666, 333)
+                  if any(r["weighted"] == n for r in rows_g)}
+    if not leaked_bad:
+        ok("Gbad-leak 拒否側フィクスチャの magic number がどの行にも漏れない")
+    else:
+        ng("Gbad-leak 拒否側フィクスチャの magic number がどの行にも漏れない",
+           f"leaked={leaked_bad} rows={rows_g}")
+
+    # G-agent-runs: 有効な Paseo レコード5件 (g1〜g5) 分だけ agent_runs が積み上がる (重複・拒否は含まない)。
+    total_agent_runs = sum(r["agent_runs"] for r in rows_g)
+    if total_agent_runs == 5:
+        ok("G-agent-runs 全バケットの agent_runs 合計が5 (g1〜g5のみ、dup・拒否8件は含まない)")
+    else:
+        ng("G-agent-runs 全バケットの agent_runs 合計が5", f"total_agent_runs={total_agent_runs} rows={rows_g}")
+
+    # G-cost (判定点15・要求2): --model と --paseo-usage-dir を同時指定したときの cost 合算式
+    # cost = cost_of(claude_tot, model) + paseo_cost_usd (combined_tot に cost_of を通さない)。
+    proc_gc, detail_gc = run_role_phase_cost(
+        role_phase_cost_fixture, ["--paseo-usage-dir", paseo_usage_dir, "--model", "sonnet"])
+    rows_gc = detail_gc.get("rows", [])
+    row_gc1 = find_row(rows_gc, "executor", "implement", None)
+    row_gc2 = find_row(rows_gc, "verifier", "plan", "0")
+    expected_gc1 = 1150 * 3.0 / 1_000_000 + 230 * 15.0 / 1_000_000 + 0.05  # = 0.0069 + 0.05
+    expected_gc2 = 200 * 3.0 / 1_000_000 + 40 * 15.0 / 1_000_000 + 0.01   # = 0.0012 + 0.01
+    ok1 = row_gc1 and row_gc1.get("cost") is not None and abs(row_gc1["cost"] - expected_gc1) < 1e-9
+    ok2 = row_gc2 and row_gc2.get("cost") is not None and abs(row_gc2["cost"] - expected_gc2) < 1e-9
+    if ok1 and ok2:
+        ok("G-cost --model sonnet + --paseo-usage-dir: "
+           "cost = cost_of(claude_tot, model) + paseo_cost_usd (両バケットで一致)")
+    else:
+        ng("G-cost --model sonnet + --paseo-usage-dir: cost = cost_of(claude_tot, model) + paseo_cost_usd",
+           f"row_gc1={row_gc1} expected_gc1={expected_gc1} row_gc2={row_gc2} expected_gc2={expected_gc2}")
+
+    # 境界1b (判定点2): --paseo-usage-dir に存在しないパスを渡す (--paseo-usage-dir 未指定の短絡経路とは
+    # 別コードパス、load_paseo_events 内の isdir ガードを通る)。exit 0、Paseo 側の寄与は0件、
+    # 既存 Claude 側の集計 (uncountable=4, executor/implement/None の weighted=2300) は無変更。
+    proc_missing, detail_missing = run_role_phase_cost(
+        role_phase_cost_fixture, ["--paseo-usage-dir", paseo_usage_missing_dir])
+    rows_missing = detail_missing.get("rows", [])
+    row_missing = find_row(rows_missing, "executor", "implement", None)
+    no_rebase_fix_bucket = not any(r["phase"] == "rebase_fix" for r in rows_missing)
+    if (proc_missing.returncode == 0 and detail_missing.get("uncountable") == 4
+            and row_missing and row_missing["weighted"] == 2300 and row_missing["agent_runs"] == 0
+            and no_rebase_fix_bucket):
+        ok("境界1b --paseo-usage-dir に存在しないパス: exit 0, uncountable=4 (無変更), "
+           "Paseo由来のバケットが増えない, 既存Claude側の集計が無変更")
+    else:
+        ng("境界1b --paseo-usage-dir に存在しないパス: exit 0, uncountable=4 (無変更)",
+           f"rc={proc_missing.returncode} uncountable={detail_missing.get('uncountable')} "
+           f"row_missing={row_missing} no_rebase_fix_bucket={no_rebase_fix_bucket}")
 
     print()
     print(f"aggregate-scripts.test.py: pass={pass_count} fail={fail_count}")
