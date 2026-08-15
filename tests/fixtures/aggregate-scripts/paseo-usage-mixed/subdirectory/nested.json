@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "event_id": "dummy:executor:implement:run-10",
+  "task_id": "dummy",
+  "role": "executor",
+  "phase": "implement",
+  "attempt": 1,
+  "invocation": "run",
+  "agent_id": "paseo-nested",
+  "workspace_id": null,
+  "provider": "claude",
+  "model": "claude-sonnet-5",
+  "usage": {
+    "input_tokens": 7777,
+    "cached_input_tokens": 0,
+    "output_tokens": 0,
+    "cost_usd": "7.77"
+  },
+  "usage_available": true,
+  "source": "cli",
+  "recorded_at": "2026-08-10T11:45:00Z"
+}

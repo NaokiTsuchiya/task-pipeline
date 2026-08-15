@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "event_id": "dummy:verifier:rebase_fix:run-4",
+  "task_id": "dummy",
+  "role": "verifier",
+  "phase": "rebase_fix",
+  "attempt": 2,
+  "invocation": "run",
+  "agent_id": "paseo-g4",
+  "workspace_id": null,
+  "provider": "claude",
+  "model": "claude-sonnet-5",
+  "usage": {
+    "input_tokens": 400,
+    "cached_input_tokens": 0,
+    "output_tokens": 40,
+    "cost_usd": "0.03"
+  },
+  "usage_available": true,
+  "source": "cli",
+  "recorded_at": "2026-08-10T11:10:00Z"
+}

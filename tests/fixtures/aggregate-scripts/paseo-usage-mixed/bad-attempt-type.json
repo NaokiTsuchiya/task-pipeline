@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "event_id": "dummy:verifier:plan:send-13",
+  "task_id": "dummy",
+  "role": "verifier",
+  "phase": "plan",
+  "attempt": "one",
+  "invocation": "send",
+  "agent_id": "paseo-bad-7",
+  "workspace_id": null,
+  "provider": "claude",
+  "model": "claude-sonnet-5",
+  "usage": {
+    "input_tokens": 333,
+    "cached_input_tokens": 0,
+    "output_tokens": 0,
+    "cost_usd": "0.33"
+  },
+  "usage_available": true,
+  "source": "cli",
+  "recorded_at": "2026-08-10T12:00:00Z"
+}
