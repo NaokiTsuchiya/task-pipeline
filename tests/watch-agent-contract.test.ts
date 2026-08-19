@@ -53,7 +53,10 @@ const launchParamSection = sedRange(
 Deno.test("A0 対象の 3 節が正しく切り出せる", () => {
   assertOk(skillStep4.length > 0, "SKILL.md 手順 4 の節が空");
   assertOk(inflightWaitSection.length > 0, "inflight.md wait 節が空");
-  assertOk(launchParamSection.length > 0, "agent-launch.md 起動パラメータ節が空");
+  assertOk(
+    launchParamSection.length > 0,
+    "agent-launch.md 起動パラメータ節が空",
+  );
 });
 
 Deno.test("A1 SKILL.md 手順 4 にバックグラウンド Watcher と 0 秒起床の規定がある", () => {
@@ -100,7 +103,10 @@ Deno.test("A3 inflight.md wait 節に Watcher 終了通知による停止検知�
 Deno.test("A4 agent-launch.md 役割の表の executor 行に Watcher と 0 秒起床がある", () => {
   const row = lineWith(launchMd, "`executor`");
   assertOk(row !== null, "役割の表に executor 行が無い");
-  assertOk(row.includes("watch-agent.sh"), "executor 行に watch-agent.sh が無い");
+  assertOk(
+    row.includes("watch-agent.sh"),
+    "executor 行に watch-agent.sh が無い",
+  );
   assertOk(row.includes("0 秒起床"), "executor 行に 0 秒起床が無い");
 });
 
@@ -158,7 +164,8 @@ const REGRESSIONS: readonly Regression[] = [
     label: "agent-launch.md 役割の表から 0 秒起床が消える",
     original: launchMd,
     mutated: launchMd.replace("0 秒起床", "遅延起床"),
-    stillHolds: (t) => (lineWith(t, "`executor`") as string).includes("0 秒起床"),
+    stillHolds: (t) =>
+      (lineWith(t, "`executor`") as string).includes("0 秒起床"),
   },
   {
     label: "agent-launch.md 起動パラメータ節から責務の分離が消える",
