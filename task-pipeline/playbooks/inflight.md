@@ -7,7 +7,14 @@ wakeup がタスクの飛行中に来るのは正常である (フォールバ�
 **何をするかは `next` が返す** — 沈黙の判定も、引き継ぎ待ちの計時も、引き取ってよいかの枠の判定も、すべて `tasks[].actions` に畳まれている (判定式と閾値はこの節に書かない。一覧は `docs/state-cli-contract.md` の `next` 節)。ここに残るのは **action ごとに何をするか** だけである:
 
 - **`wait`** → 何もしない。/loop dynamic 配下ならフォールバック (1800 秒) を予約し直してターンを終える。固定間隔 cron 配下なら何も予約せず終える。`reason` は `executor-alive` (実行エージェントは稼働中とみなす) / `takeover-pending` (引き継ぎ待ちの計時が続いている) / `own-slot-busy` (自分の枠が埋まっているので引き取りを次のイテレーションに回す)。
-  - **例外 — Paseo 経路の executor を持つタスクの `executor-alive` は、この action が停止検知の受け皿である** (停止通知が来ないため。SKILL.md タスク実行 手順 4)。**まず status を読み、`idle` のときだけ** protocol 行を読む (`running` なら何もしない)。`playbooks/agent-launch.md` の鮮度規則を通った現在フェーズの protocol 行が出ていれば、SKILL.md タスク実行 手順 5 の停止の扱いへ入る。通らなければ (走行中 / 行が無い / 消費済み / 別フェーズ) 従来どおり何もしない。
+  - **例外 — Paseo 経路の executor を持つタスクの `executor-alive` は、この action が停止検知の受け皿である** (停止通知が来ないため。SKILL.md タスク実行 手順 4)。**まず status を読み、`idle` のときだけ** protocol 行を読む。`playbooks/agent-launch.md` の鮮度規則を通った現在フェーズの protocol 行が出ていれば、SKILL.md タスク実行 手順 5 の停止の扱いへ入る。**稼働中 (`running` または `timeout`) または protocol 行未達の場合**は、停止として扱わず、メインセッションに 1 行の進捗サマリー (Progress Banner) を出力してターンを終える:
+    - **進捗サマリーの書式**: `[<id>] phase: <phase> (attempt <attempts>) | status: <status> (<経過時間>) | <直近活動メッセージ>`
+      - `<id>`: タスク識別子 (例: `gh-100`)
+      - `<phase>` / `<attempts>`: 現在フェーズと attempt 回数 (例: `phase: implement (attempt 0)`)
+      - `<status>`: `paseo wait` が返したステータス (例: `status: running` または `status: timeout`)
+      - `<経過時間>`: タスク開始または `executor_last_event_at` からの経過時間
+      - `<直近活動メッセージ>`: `paseo wait` の JSON レスポンスに含まれる `message` の最新 1 行 (または要約)
+    - **コンテキスト規律の遵守**: 出力は 1 イテレーションあたり 1〜2 行の簡潔なプレーンテキストとし、冗長なログ全文を出力・保持しない (SKILL.md「コンテキスト規律」)。
 - **`status-check`** → 実行エージェントに「Status check: finish your current phase per protocol and stop with your protocol line. Do not advance phases without an explicit verified-PASS message.」を送る (**送信手段は起こした経路で決まる** — `playbooks/agent-launch.md`)。
   - 送信が成功した → `state.ts touch-executor --id <id> --expect-executor <送信先の agentId>` を呼んで `run.executor_last_event_at` を現在時刻に更新する (ping の繰り返しを防ぐ)。`--expect-executor` がずれて `conflict` になったら、同じ session id の別インスタンスが executor を差し替えているのでこのタスクを離れる。その後の停止通知が通常どおり検証ゲートを駆動する。
   - 送信がエラーになった → **`touch-executor` は呼ばず、即座に再起動もしない。扱いは経路によらず同じで、`state.ts set-takeover --id <id> --at <現在時刻>` を呼んでこのイテレーションを終える** (次の判定は `next` が行う)。**送信エラーは executor が死んだことの証明にならない**が、その理由は経路で分かれる:
