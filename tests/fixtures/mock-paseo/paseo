@@ -1,0 +1,60 @@
+#!/bin/sh
+# tests/fixtures/mock-paseo/paseo — 実 paseo の代わりに PATH の先頭に置くモック。
+#
+#   env:
+#     PASEO_MOCK_RESPONSES  (必須) — フィクスチャディレクトリ。呼び出しごとに連番ファイル
+#                            (1, 2, 3, ...) を順に読む。カウンタは
+#                            "$PASEO_MOCK_RESPONSES/.call_count" に持つ。
+#
+#   フィクスチャファイルの中身:
+#     - 文字列 "FAIL" そのもの → 失敗を模す (標準出力なし・exit 1)。
+#     - それ以外 → inspect レスポンス JSON としてそのまま標準出力へ書く。
+#
+
+set -u
+
+if [ "${1:-}" != "inspect" ]; then
+    printf 'mock paseo: unsupported command: %s\n' "$*" >&2
+    exit 1
+fi
+
+if [ -z "${PASEO_MOCK_RESPONSES:-}" ]; then
+    printf 'mock paseo: PASEO_MOCK_RESPONSES must point to a fixture directory\n' >&2
+    exit 1
+fi
+
+state_file=$PASEO_MOCK_RESPONSES/.call_count
+prev=0
+[ -f "$state_file" ] && prev=$(cat "$state_file")
+n=$((prev + 1))
+printf '%s' "$n" > "$state_file"
+
+resp_file=$PASEO_MOCK_RESPONSES/$n
+if [ ! -f "$resp_file" ]; then
+    last=
+    for cand in "$PASEO_MOCK_RESPONSES"/*; do
+        [ -f "$cand" ] || continue
+        cand_name=$(basename -- "$cand")
+        case $cand_name in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ -z "$last" ] || [ "$cand_name" -gt "$last" ]; then
+            last=$cand_name
+        fi
+    done
+    if [ -n "$last" ]; then
+        resp_file=$PASEO_MOCK_RESPONSES/$last
+    fi
+fi
+
+if [ ! -f "$resp_file" ]; then
+    printf 'mock paseo: no fixture for call %s in %s\n' "$n" "$PASEO_MOCK_RESPONSES" >&2
+    exit 1
+fi
+
+content=$(cat "$resp_file")
+if [ "$content" = FAIL ]; then
+    exit 1
+fi
+
+printf '%s\n' "$content"
