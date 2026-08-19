@@ -146,3 +146,137 @@ exit=0                                     # 全スイート PASS のまま
 いずれも実装前 (research.md 10節) の実測値と一致し、`experiments/be-state-v2/` の
 追加が `install.sh` / `tests/run.sh` / `deno task test` のいずれの実行経路にも
 影響しないことを確認した。
+
+---
+
+## 7. CLI 実装と往復の実証 (gh-88, 受け入れ条件1・2・3)
+
+上の 3・5 節が名指しした「becoming チェーンはインメモリのオブジェクト変換だけを保証し、
+JSON との往復・progress クラスの判別はフレームワークの外側にある」という唯一の構造的な
+未検証点を、`advance` の2辺 (research→plan、plan→implement) に限定して実際に検証した
+(gh-88、plan.md 0節「対象辺の選定」参照 — 1辺だけでは下記の「2回連続起動でチェーンが
+継続する」実証ができないため2辺を選んだ)。エントリポイントは `experiments/be-state-v2/
+bin/advance` (実行可能な PHP スクリプト) で、JSON を標準入力 (または `$argv[1]` の
+ファイルパス) から読み、標準出力へ書く。
+
+```
+$ echo '{"phase":"research","id":"task-1","artifact":{"type":"none"}}' | php bin/advance 2>/dev/null
+{
+    "phase": "plan",
+    "id": "task-1",
+    "artifact": {
+        "type": "none"
+    }
+}
+```
+
+**2回連続起動でのチェーン継続 (受け入れ条件2・3)**: 1回目の標準出力をそのまま2回目の
+標準入力に渡す (加工しない):
+
+```
+$ echo '{"phase":"research","id":"task-1","artifact":{"type":"none"}}' \
+  | php bin/advance 2>/dev/null \
+  | tee /tmp/gh88-r1.json \
+  | php bin/advance 2>/dev/null
+{
+    "phase": "plan",
+    "id": "task-1",
+    "artifact": {
+        "type": "none"
+    }
+}
+{
+    "phase": "implement",
+    "id": "task-1",
+    "artifact": {
+        "type": "none"
+    }
+}
+```
+(1個目のJSONは `tee` による1回目出力の表示、2個目が2回目の出力)
+
+`phase` が `research`→`plan`→`implement` と、プロセス境界をまたいで2段進んだ。
+`ArtifactOpen`+`Follow` (attention/fixAsk/ledger/probe まで含む全フィールド) を持つ
+入力でも同じ往復が成立することを手動で確認済み (implementation.md 参照)。この2段階の
+継続は `tests/CliAdvanceTest.php::testTwoConsecutiveLaunchesChainResearchThroughImplement`
+が実サブプロセス経由で自動回帰する。
+
+**stdout 汚染の罠**: becoming はこの実験の `SemanticValidator` 設定 (0節既述の
+`Prev` 未登録 Notice) により verb 呼び出しのたびに PHP Notice を出す。PHP CLI の
+既定 `display_errors` はこの環境では `STDOUT` (`php -i | grep display_errors` で確認)
+なので、対策なしでは Notice のテキストが JSON の前に混ざり、2回目の起動が
+`json_decode` に失敗する。`bin/advance` は起動直後に `ini_set('display_errors',
+'stderr')` を呼んで Notice を標準エラーへ逃がしている
+(`tests/CliAdvanceTest.php::testStdoutIsPureJsonDespiteBecomingRuntimeNotice` が
+回帰を防ぐ)。これは becoming チェーン自体の型安全性とは無関係だが、CLI として動かす
+ときに実際に踏む罠として記録する。
+
+## 8. JSON 判別コードの規模 — becoming の型保証の外側 (gh-88, 受け入れ条件4)
+
+`wc -l` の実測:
+
+```
+$ wc -l src/Cli/*.php bin/advance
+ 227 src/Cli/ArtifactCodec.php
+ 102 src/Cli/PhaseCodec.php
+  62 bin/advance
+ 391 total
+```
+
+この 391 行が「becoming の型安全性の外側」にあるコードの実測量である。内訳と、それぞれが
+外側にある理由:
+
+- **`ArtifactCodec.php` (227行)**: `ArtifactNone|ArtifactOpen|ArtifactMerged|
+  ArtifactWithdrawn` (と `ArtifactOpen->follow` の `Follow`/`Auto|Human`/
+  `Pending|Taken|null`/`Ledger`/`Probe`) を JSON の `type` 文字列から判別する。
+  becoming/Psalm はこの判別が正しいこと自体を検査しない — 検査できるのは
+  `decode()` の戻り値が宣言どおりの union 型であることだけで、「`"type":"open"` の
+  JSON から本当に `ArtifactOpen` を作ったか」はこのクラスの `match` 文と、それを
+  裏付ける `tests/ArtifactCodecTest.php` (33件) の責任である。
+- **`PhaseCodec.php` (102行)**: 2つの非自明な穴を実装した:
+  1. JSON の `phase` タグから progress クラスを判別する (`decode()`)。`PhasePlan` の
+     コンストラクタは `#[Input] PhaseResearch $prev` だけを取り (research.md 1節)、
+     `id`/`artifact` を直接渡す経路が無いため、`new PhasePlan(new PhaseResearch(id:
+     $id, artifact: $artifact))` のように**型だけを満たす捏造した前段オブジェクト**を
+     経由してしか再水和できない。Psalm はこの捏造を「型が合っている」という理由だけで
+     受理する — 捏造した `PhaseResearch` が本当に元の research 段階と同じ `id`/
+     `artifact` を持つかは、becoming ではなくこのコード (と JSON の `phase` タグを
+     信じること) が保証している。
+  2. `Becoming::__invoke(): object` (`vendor/be-framework/be/src/Becoming.php:53-54`)
+     が返す戻り値を `PhasePlan|PhaseImplement` へ絞り込む (`advance()`)。becoming の
+     公開シグネチャ自体が `object` である以上、呼び出し側は必ずこの絞り込みを自前で
+     書く必要があり、ここにも becoming 自身の型システムは関与しない。
+- **`bin/advance` (62行)**: 標準入力/ファイルの読み出し、`json_decode`、例外の
+  JSON 化、終了コードの制御。判別ロジックは持たず上記2クラスを薄く呼ぶだけだが、
+  「サブプロセス境界を JSON でまたぐ」という要求そのものを実現しているのはこの層で
+  あり、becoming の型安全性からは完全に独立している。
+
+補強材料として、`vendor/bin/psalm --no-cache --stats` の型推論率は `src/` 全体では
+ほぼ100%だが (0節の「Psalm was able to infer types for 100% of the codebase」)、
+この2ファイルだけが未達である:
+
+```
+$ vendor/bin/psalm --no-cache --stats 2>&1 | grep Cli
+98.639% src/Cli/ArtifactCodec.php (2 mixed)
+97.297% src/Cli/PhaseCodec.php (1 mixed)
+```
+
+`src/` 配下で `mixed` 型推論が残るのはこの2ファイルだけであり (他の全ファイルは
+`(0 mixed)`)、外部 JSON という「型のない入力」を受け取る境界がまさにここにあることを
+Psalm の統計が裏付けている — 判別コードの規模だけでなく、型システムがどこで手を
+離すかも数値で確認できた。
+
+## 9. ファイルロックの扱い (gh-88, 受け入れ条件5)
+
+**実装していない (範囲外とした)。** 本体 `task-pipeline/scripts/state-store.ts` の
+`withQueueLock`/`withExistingStateLock` (3節既述) に相当するファイルロック・排他制御は
+`bin/advance` に一切無い — 標準入力から読み、標準出力へ書くだけで、`state.json` 相当の
+永続ファイルを読み書きする経路自体が無い。理由は2つ: (1) タスク本文の要求1が「停止点
+1つに限定した最小の CLI」を明示的に許可しており、ファイルロックの実装を必須としていない
+(要求5「本体の withQueueLock/withExistingStateLock に相当するものを作ることは必須では
+ない」)。(2) 範囲外節が「本体 task-pipeline/ 配下への一切の変更」を除外しており、本体の
+ロック機構を移植・参照する変更はこれに抵触する。したがって、この実験は「JSON との往復と
+progress クラスの判別」という3節が名指しした未検証点のうち、ファイルロックの部分を今回も
+未検証のまま残す — 3節の記述 (「JSON をデシリアライズして適切な progress クラスを選ぶ
+→ becoming チェーンを駆動 → 結果をシリアライズ→ ロック解放」という手続きをフレームワークの
+外で別途組む必要がある) は、gh-88 で「ロック解放」を除く前半3工程を実証したことになる。

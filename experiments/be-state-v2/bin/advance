@@ -1,0 +1,61 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// This CLI's stdout must be pure JSON, since a second invocation may take a
+// first invocation's stdout as its stdin verbatim — but becoming emits a
+// runtime Notice ("Semantic variable 'Prev' not registered...") on every verb
+// call under this experiment's SemanticValidator config, and PHP's default
+// CLI `display_errors` target is STDOUT, which would otherwise interleave
+// that notice text into the JSON this script prints. Redirecting
+// display_errors to stderr keeps the notice visible (for
+// `bin/advance 2>&1 1>/dev/null`-style debugging) without corrupting stdout;
+// it must run before autoload triggers any becoming call.
+ini_set('display_errors', 'stderr');
+
+// Minimal CLI entry point driving one becoming step (research→plan or
+// plan→implement) from JSON on stdin (or a file path in $argv[1]) to JSON on
+// stdout.
+
+require __DIR__ . '/../vendor/autoload.php';
+
+use Be\Framework\Becoming;
+use Experiment\BeStateV2\Cli\PhaseCodec;
+use Ray\Di\Injector;
+use Ray\Di\NullModule;
+
+/** @param resource $stream */
+function readAll($stream): string
+{
+    $contents = stream_get_contents($stream);
+    if ($contents === false) {
+        throw new RuntimeException('failed to read input stream');
+    }
+
+    return $contents;
+}
+
+$source = $argv[1] ?? '-';
+$raw = $source === '-' ? readAll(STDIN) : file_get_contents($source);
+if ($raw === false || trim($raw) === '') {
+    fwrite(STDERR, json_encode(['error' => 'no input (expected JSON on stdin or as $1)']) . "\n");
+    exit(1);
+}
+
+try {
+    $json = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+    if (!is_array($json)) {
+        throw new DomainException('top-level JSON must be an object');
+    }
+
+    $node = PhaseCodec::decode($json);
+    $becoming = new Becoming(new Injector(new NullModule()));
+    $result = PhaseCodec::advance($node, $becoming);
+
+    fwrite(STDOUT, json_encode(PhaseCodec::encode($result), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n");
+    exit(0);
+} catch (Throwable $e) {
+    fwrite(STDERR, json_encode(['error' => $e->getMessage()]) . "\n");
+    exit(1);
+}
