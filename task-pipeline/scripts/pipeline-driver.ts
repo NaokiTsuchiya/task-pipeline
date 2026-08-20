@@ -37,10 +37,15 @@
 // (リポジトリルートの deno.json が *.test.ts を自動検出する)。
 
 import { planOperation } from "./pipeline-dispatch.ts";
-import type { TakeoverOperation } from "./pipeline-dispatch.ts";
-import type { NextResult } from "./state-next.ts";
+import type {
+  DeferredKind,
+  DeferredOperation,
+  DriverOperation,
+  TakeoverOperation,
+} from "./pipeline-dispatch.ts";
+import type { NextResult, NextTask } from "./state-next.ts";
 import type { V2Item, V2State } from "./state-transitions-v2.ts";
-import { intFlag, parseFlags, requireFlag } from "./state-flags.ts";
+import { boolFlag, intFlag, parseFlags, requireFlag } from "./state-flags.ts";
 
 // ---------------------------------------------------------------------------
 // タスクの class (agent-launch.md「タスクの class」)
@@ -1045,6 +1050,243 @@ async function handleLiveness(
 }
 
 // ---------------------------------------------------------------------------
+// observe モード (副作用ゼロの観測モード + next 応答リプレイ。gh-142 Phase2 Task 2-2a)
+// ---------------------------------------------------------------------------
+
+export type ObserveSource = "live" | "replay";
+
+/** `NextTask.actions[]` の各要素に `planOperation` の分類結果をそのまま乗せたもの
+ * (`actions[0]` だけを見る現行 `runCycle` と異なり全要素を対象にする)。 */
+export type ObserveActionResult = { readonly index: number } & DriverOperation;
+
+export interface ObserveTask {
+  readonly id: string;
+  readonly actions: readonly ObserveActionResult[];
+}
+
+/** 現行 `CycleResult` と同じ形だが、実行していないことが名前から分かるよう
+ * `outcome` を `would-*`/`skipped-out-of-scope`/`idle` に限定する。 */
+export interface ObserveSelected {
+  readonly op: string;
+  readonly id: string | null;
+  readonly outcome: string;
+  readonly detail?: Record<string, unknown>;
+}
+
+export interface ObserveRecord {
+  readonly schema_version: 1;
+  readonly sequence: number;
+  readonly observed_at: string;
+  readonly source: ObserveSource;
+  readonly next_now: string;
+  readonly session: string;
+  readonly alive: string | null;
+  readonly config: string | null;
+  readonly dead_tasks: string | null;
+  readonly payload_digest: string;
+  readonly tasks: readonly ObserveTask[];
+  readonly selected: ObserveSelected;
+}
+
+export function planObserveTasks(
+  tasks: readonly NextTask[],
+): readonly ObserveTask[] {
+  return tasks.map((task) => ({
+    id: task.id,
+    actions: task.actions.map((action, index) => ({
+      index,
+      ...planOperation(action),
+    })),
+  }));
+}
+
+type ExecutableOperation = Exclude<DriverOperation, DeferredOperation>;
+
+/** 選択ロジック本体 — due の先頭が deferred (この issue の非目標の9 kind) でも、後続に
+ * claim/takeover/status-check/wait があればそちらを優先する。deferred が先頭に居るという
+ * だけで実行可能な後続タスクへ永久に到達できなくなってはならない。deferred しか無い
+ * ときは、最初に見つけた deferred を報告する。`runCycle` (実行) と `selectObserveOperation`
+ * (observe モードの記録) が同じ優先順位を共有するための唯一の実装。 */
+function selectDriverAction(tasks: readonly NextTask[]): {
+  readonly selected:
+    | { readonly id: string; readonly op: ExecutableOperation }
+    | null;
+  readonly firstDeferred:
+    | { readonly id: string; readonly kind: DeferredKind }
+    | null;
+} {
+  let firstDeferred:
+    | { readonly id: string; readonly kind: DeferredKind }
+    | null = null;
+  for (const task of tasks) {
+    if (task.actions.length === 0) continue;
+    const op = planOperation(task.actions[0]);
+    if (op.op === "deferred") {
+      if (firstDeferred === null) {
+        firstDeferred = { id: task.id, kind: op.kind };
+      }
+      continue;
+    }
+    return { selected: { id: task.id, op }, firstDeferred };
+  }
+  return { selected: null, firstDeferred };
+}
+
+export function selectObserveOperation(
+  tasks: readonly NextTask[],
+): ObserveSelected {
+  const { selected, firstDeferred } = selectDriverAction(tasks);
+  if (selected !== null) {
+    switch (selected.op.op) {
+      case "claim":
+        return { op: "claim", id: selected.id, outcome: "would-claim" };
+      case "takeover":
+        return {
+          op: "takeover",
+          id: selected.id,
+          outcome: "would-set-executor",
+          detail: {
+            reason: selected.op.reason,
+            resume_phase: selected.op.resume_phase,
+            recheck_gate: selected.op.recheck_gate,
+            needs_worktree: selected.op.needs_worktree,
+            replaces: selected.op.replaces,
+          },
+        };
+      case "status-check":
+        return {
+          op: "status-check",
+          id: selected.id,
+          outcome: "would-touch-executor",
+        };
+      case "wait":
+        return {
+          op: "wait",
+          id: selected.id,
+          outcome: "would-touch-executor",
+          detail: { reason: selected.op.reason },
+        };
+    }
+  }
+  if (firstDeferred !== null) {
+    return {
+      op: "deferred",
+      id: firstDeferred.id,
+      outcome: "skipped-out-of-scope",
+      detail: { kind: firstDeferred.kind },
+    };
+  }
+  return { op: "none", id: null, outcome: "idle" };
+}
+
+/** `payload_digest` — 同じ `NextResult` 生 JSON テキストなら毎回同じ値になることだけが
+ * 要件 (replay の再現性検証)。`SubtleCrypto` は Deno permission 不要。 */
+export async function sha256Hex(text: string): Promise<string> {
+  const bytes = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text),
+  );
+  return Array.from(new Uint8Array(bytes))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+export function buildObserveRecord(params: {
+  readonly sequence: number;
+  readonly observedAt: string;
+  readonly source: ObserveSource;
+  readonly nextResult: NextResult;
+  readonly payloadDigest: string;
+  readonly session: string;
+  readonly alive: string | null;
+  readonly config: string | null;
+  readonly deadTasks: string | null;
+}): ObserveRecord {
+  return {
+    schema_version: 1,
+    sequence: params.sequence,
+    observed_at: params.observedAt,
+    source: params.source,
+    next_now: params.nextResult.now,
+    session: params.session,
+    alive: params.alive,
+    config: params.config,
+    dead_tasks: params.deadTasks,
+    payload_digest: params.payloadDigest,
+    tasks: planObserveTasks(params.nextResult.tasks),
+    selected: selectObserveOperation(params.nextResult.tasks),
+  };
+}
+
+export interface ObserveCycleParams {
+  /** live (`replayNextText` 省略) のときだけ使う — replay は `state.ts` へのサブプロセス
+   * 呼び出しを完全に0回にするため、渡されていてもこのフィールドは参照しない。 */
+  readonly runner: CommandRunner;
+  readonly stateDir: string;
+  readonly nextOpts: NextStateOpts;
+  readonly sequence: number;
+  readonly observedAt: string;
+  /** 指定すると replay: `state.ts next` の代わりにこの生 JSON テキストをそのまま使う。 */
+  readonly replayNextText?: string;
+}
+
+export async function runObserveCycle(
+  params: ObserveCycleParams,
+): Promise<ObserveRecord> {
+  const source: ObserveSource = params.replayNextText === undefined
+    ? "live"
+    : "replay";
+  let rawText: string;
+  if (source === "replay") {
+    rawText = params.replayNextText!;
+  } else {
+    const flags = buildNextStateFlags(params.stateDir, params.nextOpts);
+    const args = buildStateArgs(STATE_TS_PATH, params.stateDir, "next", flags);
+    const result = await params.runner.run(Deno.execPath(), args);
+    const json = parseJsonSafe(result.stdout);
+    if (result.code !== 0) {
+      const detail = json !== null
+        ? JSON.stringify(json)
+        : result.stderr.trim();
+      throw new DriverError(
+        `state.ts next failed (exit ${result.code}): ${detail}`,
+      );
+    }
+    rawText = result.stdout;
+  }
+  const nextResult = JSON.parse(rawText) as NextResult;
+  const payloadDigest = await sha256Hex(rawText);
+  return buildObserveRecord({
+    sequence: params.sequence,
+    observedAt: params.observedAt,
+    source,
+    nextResult,
+    payloadDigest,
+    session: params.nextOpts.session ?? "",
+    alive: params.nextOpts.alive ?? null,
+    config: params.nextOpts.config ?? null,
+    deadTasks: params.nextOpts.deadTasks ?? null,
+  });
+}
+
+/** live observe 1サイクル分を証跡として `.task-pipeline/driver/observe-<run-id>.jsonl`
+ * に追記する。`runId` はプロセス起動ごとに1回だけ生成し、そのプロセスの全サイクルで
+ * 固定するのが呼び出し側 (`main`) の責務。 */
+export async function appendObserveRecord(
+  stateDir: string,
+  runId: string,
+  record: ObserveRecord,
+): Promise<void> {
+  const dir = `${stateDir}/driver`;
+  await Deno.mkdir(dir, { recursive: true });
+  await Deno.writeTextFile(
+    `${dir}/observe-${runId}.jsonl`,
+    `${JSON.stringify(record)}\n`,
+    { append: true, create: true },
+  );
+}
+
+// ---------------------------------------------------------------------------
 // 1 サイクル: next → due な1件を実行 → 終了
 // ---------------------------------------------------------------------------
 
@@ -1055,37 +1297,28 @@ export async function runCycle(ctx: DriverContext): Promise<CycleResult> {
   });
   const nextResult = await callStateCli(ctx, "next", nextFlags) as NextResult;
 
-  // due の先頭が deferred (この issue の非目標の9 kind) でも、後続に claim/takeover/
-  // status-check/wait があればそちらを優先して実行する — deferred が先頭に居るという
-  // だけで実行可能な後続タスクへ永久に到達できなくなってはならない。deferred しか無い
-  // ときは、最初に見つけた deferred を報告する。
-  let firstDeferred: CycleResult | null = null;
-  for (const task of nextResult.tasks) {
-    if (task.actions.length === 0) continue;
-    const op = planOperation(task.actions[0]);
-    switch (op.op) {
+  const { selected, firstDeferred } = selectDriverAction(nextResult.tasks);
+  if (selected !== null) {
+    switch (selected.op.op) {
       case "claim":
-        return await handleClaim(ctx, task.id);
+        return await handleClaim(ctx, selected.id);
       case "takeover":
-        return await handleTakeover(ctx, task.id, op);
+        return await handleTakeover(ctx, selected.id, selected.op);
       case "status-check":
-        return await handleLiveness(ctx, task.id, "status-check");
+        return await handleLiveness(ctx, selected.id, "status-check");
       case "wait":
-        return await handleLiveness(ctx, task.id, "wait");
-      case "deferred":
-        // #135 の DeferredOperation 9 kind — この issue の非目標 (Task 2-2/2-3 以降)。
-        if (firstDeferred === null) {
-          firstDeferred = {
-            op: "deferred",
-            id: task.id,
-            outcome: "skipped-out-of-scope",
-            detail: { kind: op.kind },
-          };
-        }
-        continue;
+        return await handleLiveness(ctx, selected.id, "wait");
     }
   }
-  return firstDeferred ?? { op: "none", id: null, outcome: "idle" };
+  if (firstDeferred !== null) {
+    return {
+      op: "deferred",
+      id: firstDeferred.id,
+      outcome: "skipped-out-of-scope",
+      detail: { kind: firstDeferred.kind },
+    };
+  }
+  return { op: "none", id: null, outcome: "idle" };
 }
 
 // ---------------------------------------------------------------------------
@@ -1097,9 +1330,42 @@ const DEFAULT_WAIT_TIMEOUT_SEC = 30;
 export async function main(argv: string[]): Promise<number> {
   try {
     const flags = parseFlags(argv);
+    const observe = boolFlag(flags, "observe");
+    const replayNextPath = flags.get("replay-next");
+    if (replayNextPath !== undefined && !observe) {
+      throw new DriverError("--replay-next requires --observe");
+    }
+
     const stateDir = requireFlag(flags, "state-dir");
     const session = flags.get("session") ??
       Deno.env.get("CLAUDE_CODE_SESSION_ID") ?? "";
+    const nextStateOpts: NextStateOpts = {
+      session,
+      alive: flags.get("alive"),
+      now: flags.get("now"),
+      config: flags.get("config"),
+      deadTasks: flags.get("dead-tasks"),
+    };
+
+    if (observe) {
+      const replayNextText = replayNextPath !== undefined
+        ? await Deno.readTextFile(replayNextPath)
+        : undefined;
+      const record = await runObserveCycle({
+        runner: new SubprocessRunner(),
+        stateDir,
+        nextOpts: nextStateOpts,
+        sequence: 0,
+        observedAt: new Date().toISOString(),
+        replayNextText,
+      });
+      console.log(JSON.stringify(record));
+      if (record.source === "live") {
+        await appendObserveRecord(stateDir, crypto.randomUUID(), record);
+      }
+      return 0;
+    }
+
     const waitTimeoutSec = intFlag(
       flags,
       "wait-timeout-sec",
@@ -1122,10 +1388,10 @@ export async function main(argv: string[]): Promise<number> {
       },
       prefs,
       nextOpts: {
-        alive: flags.get("alive"),
-        now: flags.get("now"),
-        config: flags.get("config"),
-        deadTasks: flags.get("dead-tasks"),
+        alive: nextStateOpts.alive,
+        now: nextStateOpts.now,
+        config: nextStateOpts.config,
+        deadTasks: nextStateOpts.deadTasks,
       },
       paseoNewWorkspace: flags.get("paseo-new-workspace"),
       resolveProjectRoot: makeProjectRootResolver(runner, stateDir),
