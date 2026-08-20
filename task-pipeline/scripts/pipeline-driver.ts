@@ -729,7 +729,11 @@ async function resolveWorktree(
   { worktree: string; base: string; recoveredFromRace: boolean }
 > {
   if (item.worktree !== null && item.base !== null) {
-    return { worktree: item.worktree, base: item.base, recoveredFromRace: false };
+    return {
+      worktree: item.worktree,
+      base: item.base,
+      recoveredFromRace: false,
+    };
   }
 
   const projectRoot = await ctx.resolveProjectRoot();

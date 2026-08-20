@@ -987,7 +987,10 @@ Deno.test("runCycle/takeover: worktree add が二重に競合したら重複起�
     if (cmd === "paseo") {
       if (args[0] === "ls") return ok([]);
       if (args[0] === "run") {
-        return ok({ agentId: "agent-loser-should-not-launch", status: "running" });
+        return ok({
+          agentId: "agent-loser-should-not-launch",
+          status: "running",
+        });
       }
       throw new Error(`unexpected paseo call: ${args.join(" ")}`);
     }
@@ -1039,7 +1042,11 @@ Deno.test("runCycle/takeover: worktree add が二重に競合したら重複起�
       });
     }
     if (verb === "set-executor") {
-      return ok({ ok: true, id: "gh-4", executor: "agent-loser-should-not-launch" });
+      return ok({
+        ok: true,
+        id: "gh-4",
+        executor: "agent-loser-should-not-launch",
+      });
     }
     throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
   });
