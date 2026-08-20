@@ -29,7 +29,8 @@
 //     task-pipeline/scripts/pipeline-driver.ts --state-dir <dir> [--session <id>] \
 //     [--alive <csv>] [--now <iso>] [--config <k=v,...>] [--dead-tasks <csv>] \
 //     [--wait-timeout-sec <n>] [--paseo-bin <path>] \
-//     [--impl-provider <provider>[/<model>]] [--verify-provider <provider>[/<model>]]
+//     [--impl-provider <provider>[/<model>]] [--verify-provider <provider>[/<model>]] \
+//     [--paseo-new-workspace <local|worktree>]
 //
 // テスト: pipeline-driver.test.ts (state.ts / paseo / git をスタブ化した CommandRunner
 // で 4 kind それぞれの組み立てを検証)。実行は deno task test
@@ -348,7 +349,10 @@ export function buildTouchExecutorStateFlags(
 }
 
 /** agent-launch.md「Paseo 経路の起動パラメータと読み取り」の起動パラメータ規則。
- * `executor` には `--output-schema` を付けない (background で複数回停止するため)。 */
+ * `executor` には `--output-schema` を付けない (background で複数回停止するため)。
+ * `newWorkspace` は既定では省略する (top-level セッションからの `--cwd` は自動で owned
+ * workspace を新規に持つ — 「所有 workspace の記録と安全な後始末」節)。agent-scoped の
+ * 呼び出しから強制的に独立した workspace を切りたいときだけ明示する (テスト用途)。 */
 export function buildPaseoRunArgs(params: {
   readonly id: string;
   readonly worktree: string;
@@ -356,6 +360,7 @@ export function buildPaseoRunArgs(params: {
   readonly model: string | null;
   readonly mode: string | undefined;
   readonly prompt: string;
+  readonly newWorkspace?: string;
 }): string[] {
   const args = [
     "run",
@@ -372,9 +377,23 @@ export function buildPaseoRunArgs(params: {
     "--provider",
     params.model ? `${params.provider}/${params.model}` : params.provider,
   ];
+  if (params.newWorkspace) args.push("--new-workspace", params.newWorkspace);
   if (params.mode) args.push("--mode", params.mode);
   args.push(params.prompt);
   return args;
+}
+
+/** agent-launch.md「takeover で差し替えるときの旧エージェント」— 旧 `run.executor` が
+ * Paseo のエージェントなら 1 回だけ試す (同じ worktree に 2 体が書き込むのを止めるため。
+ * idle なら no-op)。`archive` は使わない (LastUsage が null になり役割別コスト回収が
+ * できなくなるため)。 */
+export function buildPaseoStopArgs(agentId: string): string[] {
+  return ["stop", agentId, "--json"];
+}
+
+/** 所有 workspace の後始末 (「所有 workspace の記録と安全な後始末」節) で使う。 */
+export function buildPaseoWorkspaceArchiveArgs(workspaceId: string): string[] {
+  return ["workspace", "archive", workspaceId, "--json"];
 }
 
 /** agent-launch.md「二重起動の防止」— `-g` を必ず付ける。 */
@@ -484,6 +503,24 @@ export function extractAgentId(stdout: string): string {
     );
   }
   return agentId;
+}
+
+const CREATED_WORKSPACE_RE = /^Created workspace (\S+)/;
+
+/**
+ * `paseo run -d --json` の stdout の先頭に `Created workspace <id> - <name>` の行が
+ * あれば、新規に owned workspace を作ったということ (無ければ非所有 = caller の
+ * workspace を継承)。「所有 workspace の記録と安全な後始末」節。
+ */
+export function extractOwnedWorkspaceId(stdout: string): string | null {
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "") continue;
+    const match = trimmed.match(CREATED_WORKSPACE_RE);
+    if (match) return match[1];
+    if (trimmed.startsWith("{")) break;
+  }
+  return null;
 }
 
 export interface PaseoLsEntry {
@@ -622,6 +659,11 @@ export interface DriverContext {
   readonly launchArgs: LaunchArgs;
   readonly prefs: OrchestrationPrefs | null;
   readonly nextOpts: Omit<NextStateOpts, "session">;
+  /** `paseo run` の `--new-workspace` に明示的に渡す値。既定 (undefined) は省略し、
+   * top-level セッションの通常経路 (自動で owned workspace を作る) に任せる。
+   * agent-scoped 呼び出しから独立した workspace を強制したいときだけ指定する
+   * (テスト用途)。 */
+  readonly paseoNewWorkspace?: string;
   /** git rev-parse で求めるプロジェクトルート。takeover が worktree を新規に作る
    * ときだけ呼ぶ (claim/status-check/wait では git を一切呼ばない)。 */
   readonly resolveProjectRoot: () => Promise<string>;
@@ -787,6 +829,17 @@ async function handleTakeover(
     };
   }
 
+  // agent-launch.md「takeover で差し替えるときの旧エージェント」— 旧 executor が Paseo
+  // のエージェントなら 1 回だけ止める。落ちても続行してよい (`run.executor` と一致しない
+  // 行を読み捨てる規則が吸収する)。
+  if (op.replaces !== null) {
+    try {
+      await callPaseoCli(ctx, buildPaseoStopArgs(op.replaces));
+    } catch {
+      // 失敗は無視して続行する。
+    }
+  }
+
   const taskClass = await readTaskClass(`${ctx.stateDir}/tasks/${id}.md`);
   const resolved = resolveProviderModel(
     "executor",
@@ -806,6 +859,7 @@ async function handleTakeover(
       model: resolved.model,
       mode,
       prompt,
+      newWorkspace: ctx.paseoNewWorkspace,
     }),
   );
   if (runResult.code !== 0) {
@@ -816,6 +870,12 @@ async function handleTakeover(
     );
   }
   const agentId = extractAgentId(runResult.stdout);
+  // 「Created workspace ...」通知行は agent-launch.md の記述では起動応答の先頭 (stdout)
+  // だが、実測 (paseo 0.4.0) では stderr に出ることを確認した。両方の版に対応するため
+  // 両ストリームを対象に探す。
+  const workspaceId = extractOwnedWorkspaceId(
+    `${runResult.stderr}\n${runResult.stdout}`,
+  );
 
   await callStateCli(
     ctx,
@@ -839,6 +899,7 @@ async function handleTakeover(
       model: resolved.model,
       providerSource: resolved.source,
       worktree,
+      workspaceId,
     },
   };
 }
@@ -934,6 +995,11 @@ export async function runCycle(ctx: DriverContext): Promise<CycleResult> {
   });
   const nextResult = await callStateCli(ctx, "next", nextFlags) as NextResult;
 
+  // due の先頭が deferred (この issue の非目標の9 kind) でも、後続に claim/takeover/
+  // status-check/wait があればそちらを優先して実行する — deferred が先頭に居るという
+  // だけで実行可能な後続タスクへ永久に到達できなくなってはならない。deferred しか無い
+  // ときは、最初に見つけた deferred を報告する。
+  let firstDeferred: CycleResult | null = null;
   for (const task of nextResult.tasks) {
     if (task.actions.length === 0) continue;
     const op = planOperation(task.actions[0]);
@@ -948,15 +1014,18 @@ export async function runCycle(ctx: DriverContext): Promise<CycleResult> {
         return await handleLiveness(ctx, task.id, "wait");
       case "deferred":
         // #135 の DeferredOperation 9 kind — この issue の非目標 (Task 2-2/2-3 以降)。
-        return {
-          op: "deferred",
-          id: task.id,
-          outcome: "skipped-out-of-scope",
-          detail: { kind: op.kind },
-        };
+        if (firstDeferred === null) {
+          firstDeferred = {
+            op: "deferred",
+            id: task.id,
+            outcome: "skipped-out-of-scope",
+            detail: { kind: op.kind },
+          };
+        }
+        continue;
     }
   }
-  return { op: "none", id: null, outcome: "idle" };
+  return firstDeferred ?? { op: "none", id: null, outcome: "idle" };
 }
 
 // ---------------------------------------------------------------------------
@@ -998,6 +1067,7 @@ export async function main(argv: string[]): Promise<number> {
         config: flags.get("config"),
         deadTasks: flags.get("dead-tasks"),
       },
+      paseoNewWorkspace: flags.get("paseo-new-workspace"),
       resolveProjectRoot: makeProjectRootResolver(runner, stateDir),
     };
 

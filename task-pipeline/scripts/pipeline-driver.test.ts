@@ -23,7 +23,9 @@ import {
   buildPaseoDuplicateCheckArgs,
   buildPaseoInspectArgs,
   buildPaseoRunArgs,
+  buildPaseoStopArgs,
   buildPaseoWaitArgs,
+  buildPaseoWorkspaceArchiveArgs,
   buildSetExecutorStateFlags,
   buildSetWorktreeStateFlags,
   buildStateArgs,
@@ -33,6 +35,7 @@ import {
   deriveTaskClass,
   type DriverContext,
   extractAgentId,
+  extractOwnedWorkspaceId,
   findActiveDuplicates,
   isExecutorFresh,
   main,
@@ -334,6 +337,61 @@ Deno.test("buildPaseoRunArgs: model が無ければ --provider は provider だ�
   });
   assert(!args.includes("--mode"));
   assertEquals(args[args.indexOf("--provider") + 1], "junie");
+});
+
+Deno.test("buildPaseoRunArgs: newWorkspace が指定されたときだけ --new-workspace を付ける", () => {
+  const withNewWorkspace = buildPaseoRunArgs({
+    id: "gh-1",
+    worktree: "/scratch",
+    provider: "omp",
+    model: null,
+    mode: "full",
+    prompt: "go",
+    newWorkspace: "local",
+  });
+  assertEquals(
+    withNewWorkspace[withNewWorkspace.indexOf("--new-workspace") + 1],
+    "local",
+  );
+  const withoutNewWorkspace = buildPaseoRunArgs({
+    id: "gh-1",
+    worktree: "/scratch",
+    provider: "omp",
+    model: null,
+    mode: "full",
+    prompt: "go",
+  });
+  assert(!withoutNewWorkspace.includes("--new-workspace"));
+});
+
+Deno.test("buildPaseoStopArgs", () => {
+  assertEquals(buildPaseoStopArgs("agent-old"), [
+    "stop",
+    "agent-old",
+    "--json",
+  ]);
+});
+
+Deno.test("buildPaseoWorkspaceArchiveArgs", () => {
+  assertEquals(buildPaseoWorkspaceArchiveArgs("wks_abc"), [
+    "workspace",
+    "archive",
+    "wks_abc",
+    "--json",
+  ]);
+});
+
+Deno.test("extractOwnedWorkspaceId: Created workspace 行があれば workspace id を返す", () => {
+  const stdout =
+    'Created workspace wks_abc123 - myproj\n{"agentId":"agent-1","status":"running"}\n';
+  assertEquals(extractOwnedWorkspaceId(stdout), "wks_abc123");
+});
+
+Deno.test("extractOwnedWorkspaceId: 通知行が無ければ null (非所有 = caller の workspace を継承)", () => {
+  assertEquals(
+    extractOwnedWorkspaceId('{"agentId":"agent-1","status":"running"}'),
+    null,
+  );
 });
 
 Deno.test("buildPaseoDuplicateCheckArgs: -a -g --label task-pipeline-task=<id>", () => {
@@ -714,6 +772,78 @@ Deno.test("runCycle/takeover: worktree 済みタスクを paseo run で起動し
   );
 });
 
+Deno.test("runCycle/takeover: owned workspace id は stdout/stderr どちらの Created workspace 行からも拾う", async () => {
+  const runner = new StubRunner((cmd, args) => {
+    if (cmd === "paseo") {
+      if (args[0] === "ls") return ok([]);
+      if (args[0] === "run") {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            agentId: "agent-new-owned",
+            status: "running",
+          }),
+          // 実測 (paseo 0.4.0): Created workspace 通知は stderr に出る。
+          stderr: "Created workspace wks_owned123 - proj\nTip: ...\n",
+        };
+      }
+      throw new Error(`unexpected paseo call: ${args.join(" ")}`);
+    }
+    const verb = stateVerbOf(args);
+    if (verb === "next") {
+      return ok({
+        tasks: [{
+          id: "gh-14",
+          actions: [{
+            kind: "takeover",
+            reason: "no-executor",
+            resume_phase: "research",
+            recheck_gate: false,
+            needs_worktree: false,
+            replaces: null,
+          }],
+        }],
+      });
+    }
+    if (verb === "get") {
+      return ok({
+        queue: [{
+          id: "gh-14",
+          title: "t",
+          progress: "running",
+          run: {
+            kind: "initial",
+            gate: "full",
+            phase: "research",
+            attempts: 0,
+            executor: null,
+            executor_last_event_at: null,
+            takeover_at: null,
+            verifier: null,
+            verifier_session: null,
+          },
+          blocked_reason: null,
+          artifact: { state: "none" },
+          worktree: "/wt/gh-14",
+          base: "main",
+          session: "sess-self",
+        }],
+      });
+    }
+    if (verb === "set-executor") {
+      return ok({ ok: true, id: "gh-14", executor: "agent-new-owned" });
+    }
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+
+  const result = await runCycle(baseCtx(runner));
+  assertEquals(result.outcome, "launched");
+  assertEquals(
+    (result.detail as Record<string, unknown>).workspaceId,
+    "wks_owned123",
+  );
+});
+
 Deno.test("runCycle/takeover: worktree が無ければ git worktree add してから launch する", async () => {
   const runner = new StubRunner((cmd, args) => {
     if (cmd === "git") {
@@ -820,6 +950,82 @@ Deno.test("runCycle/takeover: worktree が無ければ git worktree add して�
   assertEquals(
     runCall!.args[runCall!.args.indexOf("--cwd") + 1],
     "/fake/project/.claude/worktrees/task-pipeline/gh-3",
+  );
+});
+
+Deno.test("runCycle/takeover: replaces が非null なら旧executorをpaseo stopしてから起動する (失敗しても続行)", async () => {
+  const runner = new StubRunner((cmd, args) => {
+    if (cmd === "paseo") {
+      if (args[0] === "ls") return ok([]);
+      if (args[0] === "stop") return fail("agent not reachable", 1);
+      if (args[0] === "run") {
+        return ok({ agentId: "agent-new-3", status: "running" });
+      }
+      throw new Error(`unexpected paseo call: ${args.join(" ")}`);
+    }
+    const verb = stateVerbOf(args);
+    if (verb === "next") {
+      return ok({
+        tasks: [{
+          id: "gh-9",
+          actions: [{
+            kind: "takeover",
+            reason: "takeover-elapsed",
+            resume_phase: "implement",
+            recheck_gate: false,
+            needs_worktree: false,
+            replaces: "agent-old",
+          }],
+        }],
+      });
+    }
+    if (verb === "get") {
+      return ok({
+        queue: [{
+          id: "gh-9",
+          title: "t",
+          progress: "running",
+          run: {
+            kind: "initial",
+            gate: "full",
+            phase: "implement",
+            attempts: 0,
+            executor: "agent-old",
+            executor_last_event_at: "2026-08-20T08:00:00.000Z",
+            takeover_at: "2026-08-20T08:30:00.000Z",
+            verifier: null,
+            verifier_session: null,
+          },
+          blocked_reason: null,
+          artifact: { state: "none" },
+          worktree: "/wt/gh-9",
+          base: "main",
+          session: "sess-self",
+        }],
+      });
+    }
+    if (verb === "set-executor") {
+      return ok({ ok: true, id: "gh-9", executor: "agent-new-3" });
+    }
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+
+  const result = await runCycle(baseCtx(runner));
+  assertEquals(result.outcome, "launched");
+
+  const stopCall = runner.calls.find((c) =>
+    c.cmd === "paseo" && c.args[0] === "stop"
+  );
+  assert(stopCall, "paseo stop が呼ばれているべき");
+  assertEquals(stopCall!.args, ["stop", "agent-old", "--json"]);
+
+  const setExecCall = runner.calls.find((c) =>
+    stateVerbOf(c.args) === "set-executor"
+  );
+  assert(setExecCall, "stop が失敗しても set-executor は呼ばれるべき");
+  assertEquals(
+    setExecCall!.args[setExecCall!.args.indexOf("--expect-executor") + 1],
+    "agent-old",
   );
 });
 
@@ -1027,6 +1233,52 @@ Deno.test("runCycle/deferred: 範囲外の9 kindは実行せず素通りする",
   });
 });
 
+Deno.test("runCycle/deferred: 先頭が deferred でも後続の claim を実行する (deferred で永久に遮らない)", async () => {
+  const runner = new StubRunner((cmd, args) => {
+    const verb = stateVerbOf(args);
+    if (verb === "next") {
+      return ok({
+        tasks: [
+          {
+            id: "gh-10",
+            actions: [{ kind: "fix-give-up", reason: "fix_stagnant" }],
+          },
+          { id: "gh-11", actions: [{ kind: "claim" }] },
+        ],
+      });
+    }
+    if (verb === "claim") return ok({ ok: true, id: "gh-11" });
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+  const result = await runCycle(baseCtx(runner));
+  assertEquals(result, { op: "claim", id: "gh-11", outcome: "claimed" });
+});
+
+Deno.test("runCycle/deferred: deferred しか無ければ最初の deferred を報告する", async () => {
+  const runner = new StubRunner((cmd, args) => {
+    const verb = stateVerbOf(args);
+    if (verb === "next") {
+      return ok({
+        tasks: [
+          { id: "gh-12", actions: [{ kind: "clear-takeover" }] },
+          {
+            id: "gh-13",
+            actions: [{ kind: "set-takeover", reason: "owner-dead-silent" }],
+          },
+        ],
+      });
+    }
+    throw new Error(`next 以外は呼ばれてはならない: ${cmd} ${args.join(" ")}`);
+  });
+  const result = await runCycle(baseCtx(runner));
+  assertEquals(result, {
+    op: "deferred",
+    id: "gh-12",
+    outcome: "skipped-out-of-scope",
+    detail: { kind: "clear-takeover" },
+  });
+});
+
 Deno.test("runCycle: due なタスクが無ければ idle で終える", async () => {
   const runner = new StubRunner((_cmd, args) => {
     const verb = stateVerbOf(args);
@@ -1063,14 +1315,31 @@ Deno.test("main: --state-dir が無ければ usage エラーで exit 1", async (
 });
 
 // ---------------------------------------------------------------------------
-// E2E: 実環境に paseo が在れば実エージェントを起動する統合テスト
+// E2E: 実 paseo で takeover サイクルを1回実行する統合テスト
 //
-// 実行不能 (paseo が無い / daemon 到達不能 / 無人実行できる provider が無い) な環境では
-// スキップする。このリポジトリの CI 環境には通常 paseo は無いためスキップされる —
-// 手元で `which paseo` が通り、`paseo provider ls --json` に available な provider
-// (claude か omp) があるときだけ実行される。実行された場合は実際に
-// `paseo run -d --json` でエージェントを起動し、`paseo inspect` で存在を確認し、
-// 最後に archive して片付ける。
+// **既定では実行しない** — 実際に Paseo エージェントを1体起動する (課金・実行時間を伴い、
+// daemon の認証状態にも依存する) ため、明示的に環境変数 `TASK_PIPELINE_E2E=1` を立てた
+// ときだけ実行する。それ以外 (未設定 / paseo が無い / daemon 到達不能 / 無人実行できる
+// provider が無い) では常にスキップする — このリポジトリの CI 環境には通常 paseo は
+// 無いため、既定では常にスキップされる。
+//
+// 手元で明示して回す例:
+//   TASK_PIPELINE_E2E=1 deno test --allow-all \
+//     task-pipeline/scripts/pipeline-driver.test.ts
+//
+// 実行された場合は実際に `paseo run -d --json` でエージェントを起動し、
+// `paseo inspect` で存在と Cwd を確認し、`run.executor` が state.json に記録された
+// ことを検証してから、起動したエージェントと (作られていれば) owned workspace を
+// archive で片付ける。
+//
+// `--paseo-new-workspace local` を明示しているのは、このテストの実行環境自体が
+// Paseo エージェントの中 (agent-scoped) であることがあり、その場合 `--new-workspace`
+// を指定しない `--cwd` は caller の workspace を継承してしまい `--cwd` の値が無視される
+// ことを実機で確認したため (Cwd の検証ができなくなる)。pipeline-driver.ts の既定
+// (`paseoNewWorkspace` 省略) はそのまま — 本来の経路 (top-level セッションからの
+// `--cwd` は毎回 owned workspace を自動生成する。agent-launch.md「所有 workspace の
+// 記録と安全な後始末」) を変えない。`--paseo-new-workspace` はこのテストが実行環境の
+// 制約を吸収するためだけに使う。
 // ---------------------------------------------------------------------------
 
 interface PaseoAvailability {
@@ -1146,11 +1415,14 @@ async function detectPaseoAvailability(): Promise<PaseoAvailability> {
   }
 }
 
-const PASEO_AVAILABILITY = await detectPaseoAvailability();
+const TASK_PIPELINE_E2E = Deno.env.get("TASK_PIPELINE_E2E") === "1";
+const PASEO_AVAILABILITY: PaseoAvailability = TASK_PIPELINE_E2E
+  ? await detectPaseoAvailability()
+  : { available: false, provider: null, reason: "TASK_PIPELINE_E2E is not 1" };
 
 Deno.test({
   name:
-    "e2e/smoke: 実 paseo で takeover サイクルを1回実行し、実エージェント起動と run.executor 記録を確認する",
+    "e2e/smoke: 実 paseo で takeover サイクルを1回実行し、実エージェント起動・Cwd・run.executor 記録を確認する",
   ignore: !PASEO_AVAILABILITY.available,
   fn: async () => {
     const provider = PASEO_AVAILABILITY.provider!;
@@ -1203,6 +1475,7 @@ Deno.test({
     await Deno.writeTextFile(`${stateDir}/state.json`, JSON.stringify(state));
 
     let agentId: string | null = null;
+    let workspaceId: string | null = null;
     try {
       const args = [
         new URL("./pipeline-driver.ts", import.meta.url).pathname,
@@ -1210,8 +1483,10 @@ Deno.test({
         stateDir,
         "--session",
         "e2e-smoke-session",
-        `--impl-provider`,
+        "--impl-provider",
         provider,
+        "--paseo-new-workspace",
+        "local",
       ];
       const cmd = new Deno.Command(Deno.execPath(), {
         args: [
@@ -1236,9 +1511,11 @@ Deno.test({
       const cycleResult = JSON.parse(stdoutText.trim().split("\n").pop()!);
       assertEquals(cycleResult.outcome, "launched");
       agentId = cycleResult.detail.agentId as string;
+      workspaceId = (cycleResult.detail.workspaceId as string | null) ?? null;
       assert(typeof agentId === "string" && agentId.length > 0);
 
-      // 実際に Paseo エージェントが起動されたことを確認する。
+      // 実際に Paseo エージェントが起動され、指定した --cwd で走っていることを確認する
+      // (agent-scoped 実行環境でも --paseo-new-workspace local が --cwd を確実に効かせる)。
       const inspectCmd = new Deno.Command("paseo", {
         args: ["inspect", agentId, "--json"],
         stdout: "piped",
@@ -1249,6 +1526,10 @@ Deno.test({
         inspectResult.code === 0,
         "paseo inspect が起動したエージェントを見つけられるべき",
       );
+      const inspected = JSON.parse(
+        new TextDecoder().decode(inspectResult.stdout),
+      );
+      assertEquals(inspected.Cwd, scratch);
 
       // run.executor が state.json に記録されたことを確認する。
       const written = JSON.parse(
@@ -1273,6 +1554,17 @@ Deno.test({
           // 片付けられなければ手動確認に委ねる (agentId をログに残す)。
           console.error(
             `e2e smoke: could not archive agent ${agentId}, please clean up manually`,
+          );
+        }
+      }
+      if (workspaceId) {
+        try {
+          await new Deno.Command("paseo", {
+            args: ["workspace", "archive", workspaceId, "--json"],
+          }).output();
+        } catch {
+          console.error(
+            `e2e smoke: could not archive workspace ${workspaceId}, please clean up manually`,
           );
         }
       }
