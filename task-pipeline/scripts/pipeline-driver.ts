@@ -725,9 +725,15 @@ async function resolveWorktree(
   ctx: DriverContext,
   id: string,
   item: V2Item,
-): Promise<{ worktree: string; base: string }> {
+): Promise<
+  { worktree: string; base: string; recoveredFromRace: boolean }
+> {
   if (item.worktree !== null && item.base !== null) {
-    return { worktree: item.worktree, base: item.base };
+    return {
+      worktree: item.worktree,
+      base: item.base,
+      recoveredFromRace: false,
+    };
   }
 
   const projectRoot = await ctx.resolveProjectRoot();
@@ -752,6 +758,45 @@ async function resolveWorktree(
     );
   }
   if (addResult.code !== 0) {
+    // 競合レース (gh-140 dogfood 実測): 2プロセスが同一 id へ同時に takeover し、
+    // 先勝ちが `-b` 付きで worktree を作った直後に後発が `already exists` を踏んで
+    // reuseBranch 再試行に落ちると、再試行は「ブランチは在るが path は空」を前提に
+    // `-b` を落として `add <path> <branch>` するが、path も既に先勝ちの worktree で
+    // 埋まっているため `fatal: '<path>' already exists` で二重に失敗する。この二重
+    // 失敗は「自分が負けた」ことの証拠であって、先勝ちが `set-worktree` まで完了して
+    // いれば `state.ts get` に worktree/base が現れているはずなので、それを採用して
+    // 続行する (先勝ちの実行と衝突する新規 worktree 作成は行わない)。
+    //
+    // ただし先勝ちの `git worktree add` 成功と `state.ts set-worktree` 完了の間には
+    // 実プロセスの遅延 (ブランチ名解決・state.ts の起動コスト) があり、負けた側が
+    // その隙間で `get` を呼ぶと worktree がまだ null に見えることを実機のレースで
+    // 確認した (gh-140 dogfood, 単発 get では再現的に失敗する)。短い間隔で有限回
+    // ポーリングし、先勝ちの記録が追いつくのを待つ。
+    const POLL_DELAYS_MS = [100, 200, 400, 800, 1500];
+    let winner: V2Item | null = null;
+    for (let attempt = 0; attempt <= POLL_DELAYS_MS.length; attempt++) {
+      const stateJson = await callStateCli(
+        ctx,
+        "get",
+        buildGetStateFlags(ctx.stateDir),
+      ) as V2State;
+      winner = stateJson.queue.find((i) => i.id === id) ?? null;
+      if (winner !== null && winner.worktree !== null && winner.base !== null) {
+        // 自分は worktree 作成で負けている — 先勝ちが既に takeover を進行中の証拠
+        // なので、呼び出し元 (handleTakeover) はここで実際の paseo run へは進まず
+        // 重複起動として扱う (`paseo ls` の TOCTOU では捕まらない。下記コメント参照)。
+        return {
+          worktree: winner.worktree,
+          base: winner.base,
+          recoveredFromRace: true,
+        };
+      }
+      if (attempt < POLL_DELAYS_MS.length) {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, POLL_DELAYS_MS[attempt]);
+        await promise;
+      }
+    }
     throw new DriverError(
       `git worktree add failed for ${id}: ${
         addResult.stderr.trim() || addResult.stdout.trim()
@@ -772,7 +817,7 @@ async function resolveWorktree(
     "set-worktree",
     buildSetWorktreeStateFlags(ctx.stateDir, id, worktreePath, base),
   );
-  return { worktree: worktreePath, base };
+  return { worktree: worktreePath, base, recoveredFromRace: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -813,7 +858,22 @@ async function handleTakeover(
     throw new DriverError(`takeover: task not found in state.json: ${id}`);
   }
 
-  const { worktree } = await resolveWorktree(ctx, id, item);
+  const { worktree, recoveredFromRace } = await resolveWorktree(ctx, id, item);
+
+  if (recoveredFromRace) {
+    // gh-140 dogfood 実測: worktree 作成のレースで負けた = 別プロセスが同じ id へ
+    // 今まさに takeover 中である確定的な証拠。`paseo ls` の重複検知 (下記) は自分の
+    // 起動と相手の記録の間に TOCTOU の隙間があり、両方が「重複なし」と誤認して
+    // 実エージェントを二重起動しうることを実機で確認した (2体が同一 worktree に
+    // 同時に書き込み得る)。ここで確定しているなら `paseo ls`/`paseo run` へ進まず
+    // 即座に重複起動として扱う。
+    return {
+      op: "takeover",
+      id,
+      outcome: "skipped-duplicate",
+      detail: { reason: "worktree-race" },
+    };
+  }
 
   const lsResult = await callPaseoCli(ctx, buildPaseoDuplicateCheckArgs(id));
   const duplicates = findActiveDuplicates(

@@ -953,6 +953,130 @@ Deno.test("runCycle/takeover: worktree が無ければ git worktree add して�
   );
 });
 
+Deno.test("runCycle/takeover: worktree add が二重に競合したら重複起動せず skipped-duplicate で退く (gh-140 dogfood 実測)", async () => {
+  let addAttempts = 0;
+  let getCalls = 0;
+  const runner = new StubRunner((cmd, args) => {
+    if (cmd === "git") {
+      if (args.includes("rev-parse") && args.includes("--git-common-dir")) {
+        return ok(undefined); // unused: resolveProjectRoot はスタブ済み
+      }
+      if (args.includes("worktree")) {
+        addAttempts += 1;
+        if (addAttempts === 1) {
+          // 1回目 (-b 付き): 相手が同時に同じブランチ名で先勝ちした。
+          return {
+            code: 1,
+            stdout: "",
+            stderr: "fatal: a branch named 'task-pipeline/gh-4' already exists",
+          };
+        }
+        // 2回目 (-b を落として再試行): 相手の worktree が既に path を占有している。
+        return {
+          code: 1,
+          stdout: "",
+          stderr:
+            "fatal: '/fake/project/.claude/worktrees/task-pipeline/gh-4' already exists",
+        };
+      }
+      if (args.includes("fetch") || args.includes("merge")) {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    if (cmd === "paseo") {
+      if (args[0] === "ls") return ok([]);
+      if (args[0] === "run") {
+        return ok({
+          agentId: "agent-loser-should-not-launch",
+          status: "running",
+        });
+      }
+      throw new Error(`unexpected paseo call: ${args.join(" ")}`);
+    }
+    const verb = stateVerbOf(args);
+    if (verb === "next") {
+      return ok({
+        tasks: [{
+          id: "gh-4",
+          actions: [{
+            kind: "takeover",
+            reason: "no-executor",
+            resume_phase: "research",
+            recheck_gate: false,
+            needs_worktree: true,
+            replaces: null,
+          }],
+        }],
+      });
+    }
+    if (verb === "get") {
+      getCalls += 1;
+      // 1回目の get (handleTakeover 冒頭) は worktree 未確定のまま、レース後の
+      // resolveWorktree からの2回目の get で初めて先勝ちの記録が見える。
+      const winnerRecorded = getCalls >= 2;
+      return ok({
+        queue: [{
+          id: "gh-4",
+          title: "t",
+          progress: "running",
+          run: {
+            kind: "initial",
+            gate: "full",
+            phase: "research",
+            attempts: 0,
+            executor: null,
+            executor_last_event_at: null,
+            takeover_at: null,
+            verifier: null,
+            verifier_session: null,
+          },
+          blocked_reason: null,
+          artifact: { state: "none" },
+          worktree: winnerRecorded
+            ? "/fake/project/.claude/worktrees/task-pipeline/gh-4"
+            : null,
+          base: winnerRecorded ? "main" : null,
+          session: "sess-self",
+        }],
+      });
+    }
+    if (verb === "set-executor") {
+      return ok({
+        ok: true,
+        id: "gh-4",
+        executor: "agent-loser-should-not-launch",
+      });
+    }
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+
+  const result = await runCycle(baseCtx(runner));
+  assertEquals(result.outcome, "skipped-duplicate");
+  assertEquals(addAttempts, 2, "-b 付きと reuseBranch の2回とも試みているべき");
+
+  const runCall = runner.calls.find((c) =>
+    c.cmd === "paseo" && c.args[0] === "run"
+  );
+  assert(
+    !runCall,
+    "worktree レースに負けたと確定したら paseo run へは進まず、実エージェントを二重起動してはならない",
+  );
+
+  const setExecutorCall = runner.calls.find((c) =>
+    stateVerbOf(c.args) === "set-executor"
+  );
+  assert(!setExecutorCall, "重複起動を諦めた側は set-executor も呼ばない");
+
+  const setWorktreeCall = runner.calls.find((c) =>
+    stateVerbOf(c.args) === "set-worktree"
+  );
+  assert(
+    !setWorktreeCall,
+    "先勝ちの記録を採用した側は set-worktree を呼び直してはならない (二重記録の防止)",
+  );
+});
+
 Deno.test("runCycle/takeover: replaces が非null なら旧executorをpaseo stopしてから起動する (失敗しても続行)", async () => {
   const runner = new StubRunner((cmd, args) => {
     if (cmd === "paseo") {
