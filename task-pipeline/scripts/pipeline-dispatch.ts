@@ -1,9 +1,5 @@
 import type { FlagName } from "./state-dispatch.ts";
-import type {
-  NextAction,
-  TakeoverReason,
-  WaitReason,
-} from "./state-next.ts";
+import type { NextAction, TakeoverReason, WaitReason } from "./state-next.ts";
 
 export type DeferredKind =
   | "probe-run"

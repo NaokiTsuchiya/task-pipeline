@@ -1,6 +1,4 @@
-import {
-  planOperation,
-} from "./pipeline-dispatch.ts";
+import { planOperation } from "./pipeline-dispatch.ts";
 import {
   DEFAULT_NEXT_CONFIG,
   deriveNext,
@@ -360,7 +358,10 @@ Deno.test("dispatch/integrity: pipeline-dispatch.ts does not use Deno APIs", asy
       new URL("./pipeline-dispatch.ts", import.meta.url),
     );
   } catch (e) {
-    if (e instanceof Deno.errors.NotCapable || e instanceof Deno.errors.PermissionDenied) {
+    if (
+      e instanceof Deno.errors.NotCapable ||
+      e instanceof Deno.errors.PermissionDenied
+    ) {
       return;
     }
     throw e;
