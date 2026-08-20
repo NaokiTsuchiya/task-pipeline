@@ -14,6 +14,7 @@
 // 実行: deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
 
 import {
+  appendObserveRecord,
   buildClaimStateFlags,
   buildExecutorPrompt,
   buildGetStateFlags,
@@ -41,14 +42,19 @@ import {
   main,
   matchesProtocolLine,
   normalizeMessageLines,
+  type ObserveRecord,
   parentDir,
   parsePaseoLs,
+  planObserveTasks,
   providerModeOf,
   resolveProviderModel,
   runCycle,
+  runObserveCycle,
+  selectObserveOperation,
   splitProviderModel,
 } from "./pipeline-driver.ts";
 import type { TakeoverOperation } from "./pipeline-dispatch.ts";
+import type { NextTask } from "./state-next.ts";
 
 function assert(cond: unknown, msg?: string): asserts cond {
   if (!cond) throw new Error(msg ?? "assert failed");
@@ -1436,6 +1442,349 @@ Deno.test("runCycle: state.ts の非ゼロ終了は DriverError として伝播�
 Deno.test("main: --state-dir が無ければ usage エラーで exit 1", async () => {
   const code = await main([]);
   assertEquals(code, 1);
+});
+
+Deno.test("main --replay-next without --observe: usage エラー (受け入れ条件7)", async () => {
+  const lines = await captureConsoleLog(async () => {
+    const code = await main(["--replay-next", "/tmp/whatever.json"]);
+    assertEquals(code, 1);
+  });
+  assertEquals(lines.length, 1);
+  const parsed = JSON.parse(lines[0]) as { error: string };
+  assert(
+    typeof parsed.error === "string" && parsed.error.length > 0,
+    "error メッセージが含まれるべき",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// O: observe モード (gh-142 Phase2 Task 2-2a) — 副作用ゼロの観測と next 応答リプレイ
+// ---------------------------------------------------------------------------
+
+async function captureConsoleLog(fn: () => Promise<void>): Promise<string[]> {
+  const original = console.log;
+  const lines: string[] = [];
+  console.log = (msg?: unknown) => {
+    lines.push(String(msg));
+  };
+  try {
+    await fn();
+  } finally {
+    console.log = original;
+  }
+  return lines;
+}
+
+const OBSERVE_NEXT_NOW = "2026-08-21T00:00:00.000Z";
+
+Deno.test("runObserveCycle/live: state.ts の書き込み系 verb を一切呼ばない (受け入れ条件1)", async () => {
+  const runner = new StubRunner((_cmd, args) => {
+    const verb = stateVerbOf(args);
+    if (verb === "next") {
+      return ok({
+        now: OBSERVE_NEXT_NOW,
+        tasks: [
+          { id: "gh-o1", actions: [{ kind: "claim" }] },
+          {
+            id: "gh-o2",
+            actions: [{
+              kind: "takeover",
+              reason: "owner-dead-silent",
+              resume_phase: "research",
+              recheck_gate: false,
+              needs_worktree: false,
+              replaces: null,
+            }],
+          },
+        ],
+      });
+    }
+    throw new Error(
+      `observe は next 以外を呼んではならない: ${args.join(" ")}`,
+    );
+  });
+  const record = await runObserveCycle({
+    runner,
+    stateDir: "/fake/.task-pipeline",
+    nextOpts: {},
+    sequence: 0,
+    observedAt: "2026-08-21T00:00:01.000Z",
+  });
+  assertEquals(record.source, "live");
+  // 呼ばれた state.ts 呼び出しが `next` の1回だけであることを直接確認する
+  // (= claim/set-executor/touch-executor/set-worktree のいずれも呼ばれていない)。
+  assertEquals(runner.calls.length, 1);
+  assertEquals(stateVerbOf(runner.calls[0].args), "next");
+});
+
+Deno.test("runObserveCycle/live: paseo/git サブプロセスを一切呼ばない (受け入れ条件2)", async () => {
+  const runner = new StubRunner((cmd, args) => {
+    if (cmd === "paseo" || cmd === "git") {
+      throw new Error(`observe は ${cmd} を呼んではならない`);
+    }
+    const verb = stateVerbOf(args);
+    if (verb === "next") {
+      return ok({
+        now: OBSERVE_NEXT_NOW,
+        tasks: [{
+          id: "gh-o3",
+          actions: [{ kind: "wait", reason: "executor-alive" }],
+        }],
+      });
+    }
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+  const record = await runObserveCycle({
+    runner,
+    stateDir: "/fake/.task-pipeline",
+    nextOpts: {},
+    sequence: 0,
+    observedAt: "2026-08-21T00:00:01.000Z",
+  });
+  assertEquals(record.selected, {
+    op: "wait",
+    id: "gh-o3",
+    outcome: "would-touch-executor",
+    detail: { reason: "executor-alive" },
+  });
+  assert(runner.calls.every((c) => c.cmd !== "paseo" && c.cmd !== "git"));
+});
+
+Deno.test("runObserveCycle/replay: state.ts へのサブプロセス呼び出しが完全に0回になる (受け入れ条件3)", async () => {
+  const runner = new StubRunner((cmd, args) => {
+    throw new Error(
+      `replay は subprocess を一切呼んではならない: ${cmd} ${args.join(" ")}`,
+    );
+  });
+  const replayText = JSON.stringify({
+    now: OBSERVE_NEXT_NOW,
+    tasks: [{ id: "gh-o4", actions: [{ kind: "claim" }] }],
+  });
+  const record = await runObserveCycle({
+    runner,
+    stateDir: "/fake/.task-pipeline",
+    nextOpts: {},
+    sequence: 0,
+    observedAt: "2026-08-21T00:00:01.000Z",
+    replayNextText: replayText,
+  });
+  assertEquals(record.source, "replay");
+  assertEquals(runner.calls.length, 0);
+});
+
+Deno.test("runObserveCycle/replay: 同じ入力を複数回渡すと payload_digest が毎回同一 (受け入れ条件3)", async () => {
+  const runner = new StubRunner(() => {
+    throw new Error("replay は subprocess を呼んではならない");
+  });
+  const replayText = JSON.stringify({
+    now: OBSERVE_NEXT_NOW,
+    tasks: [{ id: "gh-o5", actions: [] }],
+  });
+  const first = await runObserveCycle({
+    runner,
+    stateDir: "/fake",
+    nextOpts: {},
+    sequence: 0,
+    observedAt: "t1",
+    replayNextText: replayText,
+  });
+  const second = await runObserveCycle({
+    runner,
+    stateDir: "/fake",
+    nextOpts: {},
+    sequence: 1,
+    observedAt: "t2",
+    replayNextText: replayText,
+  });
+  assertEquals(first.payload_digest, second.payload_digest);
+  assertEquals(first.payload_digest.length, 64, "sha256 hex は64文字");
+});
+
+Deno.test("planObserveTasks: actions[] の全要素 (actions[1] 以降も含む) を分類する (受け入れ条件4)", () => {
+  const tasks = planObserveTasks([
+    {
+      id: "gh-o6",
+      actions: [
+        { kind: "wait", reason: "executor-alive" },
+        { kind: "claim" },
+        { kind: "fix-give-up", reason: "fix_stagnant" },
+      ],
+    },
+  ] as unknown as NextTask[]);
+  assertEquals(tasks.length, 1);
+  assertEquals(tasks[0].actions.length, 3);
+  assertEquals(tasks[0].actions[0], {
+    index: 0,
+    op: "wait",
+    verb: null,
+    flags: [],
+    reason: "executor-alive",
+  });
+  assertEquals(tasks[0].actions[1], {
+    index: 1,
+    op: "claim",
+    verb: "claim",
+    flags: ["state-dir", "id", "session"],
+  });
+  assertEquals(tasks[0].actions[2], {
+    index: 2,
+    op: "deferred",
+    kind: "fix-give-up",
+  });
+});
+
+Deno.test("selectObserveOperation: deferred を後回しにしつつ claim/takeover/status-check/wait から選ぶ (受け入れ条件5)", () => {
+  const claimAfterDeferred = selectObserveOperation([
+    { id: "gh-o7", actions: [{ kind: "clear-takeover" }] },
+    { id: "gh-o8", actions: [{ kind: "claim" }] },
+  ] as unknown as NextTask[]);
+  assertEquals(claimAfterDeferred, {
+    op: "claim",
+    id: "gh-o8",
+    outcome: "would-claim",
+  });
+
+  const onlyDeferred = selectObserveOperation(
+    [{
+      id: "gh-o9",
+      actions: [{ kind: "clear-takeover" }],
+    }] as unknown as NextTask[],
+  );
+  assertEquals(onlyDeferred, {
+    op: "deferred",
+    id: "gh-o9",
+    outcome: "skipped-out-of-scope",
+    detail: { kind: "clear-takeover" },
+  });
+
+  const idle = selectObserveOperation(
+    [{ id: "gh-o10", actions: [] }] as unknown as NextTask[],
+  );
+  assertEquals(idle, { op: "none", id: null, outcome: "idle" });
+
+  const takeover = selectObserveOperation([{
+    id: "gh-o11",
+    actions: [{
+      kind: "takeover",
+      reason: "owner-dead-silent",
+      resume_phase: "research",
+      recheck_gate: true,
+      needs_worktree: false,
+      replaces: "agent-old",
+    }],
+  }] as unknown as NextTask[]);
+  assertEquals(takeover, {
+    op: "takeover",
+    id: "gh-o11",
+    outcome: "would-set-executor",
+    detail: {
+      reason: "owner-dead-silent",
+      resume_phase: "research",
+      recheck_gate: true,
+      needs_worktree: false,
+      replaces: "agent-old",
+    },
+  });
+
+  const statusCheck = selectObserveOperation(
+    [{
+      id: "gh-o13",
+      actions: [{ kind: "status-check" }],
+    }] as unknown as NextTask[],
+  );
+  assertEquals(statusCheck, {
+    op: "status-check",
+    id: "gh-o13",
+    outcome: "would-touch-executor",
+  });
+
+  const wait = selectObserveOperation(
+    [{
+      id: "gh-o14",
+      actions: [{ kind: "wait", reason: "executor-alive" }],
+    }] as unknown as NextTask[],
+  );
+  assertEquals(wait, {
+    op: "wait",
+    id: "gh-o14",
+    outcome: "would-touch-executor",
+    detail: { reason: "executor-alive" },
+  });
+});
+
+Deno.test("appendObserveRecord: .task-pipeline/driver/observe-<run-id>.jsonl に追記する (受け入れ条件6)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const record = {
+      schema_version: 1,
+      sequence: 0,
+      observed_at: "2026-08-21T00:00:00.000Z",
+      source: "live",
+      next_now: OBSERVE_NEXT_NOW,
+      session: "sess-1",
+      alive: null,
+      config: null,
+      dead_tasks: null,
+      payload_digest: "abc123",
+      tasks: [],
+      selected: { op: "none", id: null, outcome: "idle" },
+    } as unknown as ObserveRecord;
+    await appendObserveRecord(dir, "run-xyz", record);
+    const filePath = `${dir}/driver/observe-run-xyz.jsonl`;
+    const content = await Deno.readTextFile(filePath);
+    assertEquals(content, `${JSON.stringify(record)}\n`);
+
+    // 同一 run-id への2回目の呼び出しは追記になる (1プロセスの全サイクルで同じファイルへ書く)。
+    await appendObserveRecord(dir, "run-xyz", { ...record, sequence: 1 });
+    const appended = await Deno.readTextFile(filePath);
+    assertEquals(appended.split("\n").filter((l) => l !== "").length, 2);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("main --observe --replay-next: 標準出力にのみ書き、.task-pipeline/driver/ を作らない (受け入れ条件3,6)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const replayFile = `${dir}/replay-next.json`;
+    await Deno.writeTextFile(
+      replayFile,
+      JSON.stringify({
+        now: OBSERVE_NEXT_NOW,
+        tasks: [{ id: "gh-o12", actions: [{ kind: "claim" }] }],
+      }),
+    );
+    const stateDir = `${dir}/.task-pipeline`;
+    let code = -1;
+    const lines = await captureConsoleLog(async () => {
+      code = await main([
+        "--observe",
+        "true",
+        "--replay-next",
+        replayFile,
+        "--state-dir",
+        stateDir,
+      ]);
+    });
+    assertEquals(code, 0);
+    assertEquals(lines.length, 1);
+    const record = JSON.parse(lines[0]) as ObserveRecord;
+    assertEquals(record.source, "replay");
+    assertEquals(record.selected, {
+      op: "claim",
+      id: "gh-o12",
+      outcome: "would-claim",
+    });
+    let driverDirExists = true;
+    try {
+      await Deno.stat(`${stateDir}/driver`);
+    } catch {
+      driverDirExists = false;
+    }
+    assert(!driverDirExists, ".task-pipeline/driver/ は replay では作られない");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
