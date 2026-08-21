@@ -50,6 +50,7 @@ import {
   resolveProviderModel,
   runCycle,
   runObserveCycle,
+  runObserveLoop,
   selectObserveOperation,
   splitProviderModel,
 } from "./pipeline-driver.ts";
@@ -1743,6 +1744,178 @@ Deno.test("appendObserveRecord: .task-pipeline/driver/observe-<run-id>.jsonl に
   }
 });
 
+// ---------------------------------------------------------------------------
+// L: runObserveLoop — observe の常駐ループ
+// ---------------------------------------------------------------------------
+
+Deno.test("runObserveLoop: --max-cycles 3 でちょうど3サイクル実行され、直列に完走する (受け入れ条件1,2)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    let nextCalls = 0;
+    const runner = new StubRunner((_cmd, args) => {
+      if (stateVerbOf(args) === "next") {
+        nextCalls += 1;
+        return ok({ now: OBSERVE_NEXT_NOW, tasks: [] });
+      }
+      throw new Error(
+        `observe ループは next 以外を呼んではならない: ${args.join(" ")}`,
+      );
+    });
+    const records = await runObserveLoop({
+      runner,
+      stateDir: dir,
+      nextOpts: {},
+      intervalSec: 0,
+      maxCycles: 3,
+      signal: new AbortController().signal,
+    });
+    assertEquals(nextCalls, 3);
+    assertEquals(records.length, 3);
+    // 各サイクルが直列に完走している証拠: sequence が重複せず 0,1,2 の連番になっている
+    // (ループ本体は await で直列化されているので、2サイクルが同時に走ることは構造的に無い)。
+    assertEquals(records.map((r) => r.sequence), [0, 1, 2]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("runObserveLoop: --max-cycles 1 で1サイクルだけ実行される (境界)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    let nextCalls = 0;
+    const runner = new StubRunner((_cmd, args) => {
+      if (stateVerbOf(args) === "next") {
+        nextCalls += 1;
+        return ok({ now: OBSERVE_NEXT_NOW, tasks: [] });
+      }
+      throw new Error("next 以外は呼ばれてはならない");
+    });
+    const records = await runObserveLoop({
+      runner,
+      stateDir: dir,
+      nextOpts: {},
+      intervalSec: 0,
+      maxCycles: 1,
+      signal: new AbortController().signal,
+    });
+    assertEquals(nextCalls, 1);
+    assertEquals(records.length, 1);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("runObserveLoop: 2サイクル目で例外が起きるとそこで終了し3サイクル目は呼ばれない (受け入れ条件4)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    let nextCalls = 0;
+    const runner = new StubRunner((_cmd, args) => {
+      if (stateVerbOf(args) === "next") {
+        nextCalls += 1;
+        if (nextCalls === 2) return fail("boom", 7);
+        return ok({ now: OBSERVE_NEXT_NOW, tasks: [] });
+      }
+      throw new Error("next 以外は呼ばれてはならない");
+    });
+    let threw: unknown = null;
+    try {
+      await runObserveLoop({
+        runner,
+        stateDir: dir,
+        nextOpts: {},
+        intervalSec: 0,
+        signal: new AbortController().signal,
+      });
+    } catch (e) {
+      threw = e;
+    }
+    assert(
+      threw instanceof Error,
+      "2サイクル目の失敗が呼び出し元へ伝播するべき",
+    );
+    assertEquals(nextCalls, 2, "3サイクル目の next は呼ばれてはならない");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("runObserveLoop: 1サイクル完走直後に abort されていれば次のサイクルへ入らない (受け入れ条件5 単体a)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const controller = new AbortController();
+    let nextCalls = 0;
+    const runner = new StubRunner((_cmd, args) => {
+      if (stateVerbOf(args) === "next") {
+        nextCalls += 1;
+        return ok({ now: OBSERVE_NEXT_NOW, tasks: [] });
+      }
+      throw new Error("next 以外は呼ばれてはならない");
+    });
+    const records = await runObserveLoop({
+      runner,
+      stateDir: dir,
+      nextOpts: {},
+      intervalSec: 0,
+      signal: controller.signal,
+      onRecord: () => controller.abort(),
+    });
+    assertEquals(nextCalls, 1);
+    assertEquals(records.length, 1);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("runObserveLoop: interval 待機中の abort は interval 満了を待たずに解決する (受け入れ条件5 単体b)", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const controller = new AbortController();
+    let nextCalls = 0;
+    const runner = new StubRunner((_cmd, args) => {
+      if (stateVerbOf(args) === "next") {
+        nextCalls += 1;
+        return ok({ now: OBSERVE_NEXT_NOW, tasks: [] });
+      }
+      throw new Error("next 以外は呼ばれてはならない");
+    });
+    const start = performance.now();
+    const records = await runObserveLoop({
+      runner,
+      stateDir: dir,
+      nextOpts: {},
+      intervalSec: 3600, // 満了まで待てば1時間かかる長い interval
+      signal: controller.signal,
+      // 1回目の record を受け取った直後 (= sleepAbortable に入る直前) に abort を予約する。
+      // 実際に発火するのは sleepAbortable が addEventListener した後 (マイクロタスク後)。
+      onRecord: () => {
+        queueMicrotask(() => controller.abort());
+      },
+    });
+    const elapsedMs = performance.now() - start;
+    assertEquals(nextCalls, 1);
+    assertEquals(records.length, 1);
+    assert(
+      elapsedMs < 1000,
+      `sleepAbortable が abort を待たずに interval 満了 (3600秒) まで待ってしまった (${elapsedMs}ms)`,
+    );
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("main --loop without --observe: usage エラー、値トークン省略は先に別の usage エラーで落ちるので明示する (受け入れ条件3)", async () => {
+  const lines = await captureConsoleLog(async () => {
+    const code = await main(["--loop", "true"]);
+    assertEquals(code, 1);
+  });
+  assertEquals(lines.length, 1);
+  const parsed = JSON.parse(lines[0]) as { error: string };
+  assert(
+    typeof parsed.error === "string" && parsed.error.length > 0,
+    "error メッセージが含まれるべき",
+  );
+});
+
 Deno.test("main --observe --replay-next: 標準出力にのみ書き、.task-pipeline/driver/ を作らない (受け入れ条件3,6)", async () => {
   const dir = await Deno.makeTempDir();
   try {
@@ -2042,6 +2215,105 @@ async function runE2eSmokeTest(provider: string): Promise<void> {
     await Deno.remove(scratch, { recursive: true }).catch(() => {});
   }
 }
+
+// ---------------------------------------------------------------------------
+// L: --observe --loop の SIGINT による安全な終了 (常時登録)
+//
+// `--observe` は `state.ts` のサブプロセス呼び出ししかしない (paseo 不要) ため、
+// 既存 E2E 節 (実 paseo エージェントを起動する) と異なり TASK_PIPELINE_E2E のゲートは
+// 付けない — Deno とこのリポジトリ自身の CLI だけで完結する。
+// ---------------------------------------------------------------------------
+
+Deno.test("main --observe --loop: SIGINT を送ると進行中のサイクル完了後に正常終了する (受け入れ条件5 統合)", async () => {
+  const scratch = await Deno.makeTempDir({
+    prefix: "pipeline-driver-sigint-",
+  });
+  const stateDir = `${scratch}/.task-pipeline`;
+  await Deno.mkdir(stateDir, { recursive: true });
+  const state = {
+    tracker: "gh",
+    source: "",
+    updated_at: new Date().toISOString(),
+    queue: [],
+    candidates: [],
+    relisted: [],
+    promoted: [],
+    completed: [],
+    withdrawn_branches: [],
+    history: [],
+    history_archived: 0,
+    schema_version: 2,
+  };
+  await Deno.writeTextFile(`${stateDir}/state.json`, JSON.stringify(state));
+  try {
+    const args = [
+      new URL("./pipeline-driver.ts", import.meta.url).pathname,
+      "--state-dir",
+      stateDir,
+      "--session",
+      "sigint-smoke-session",
+      "--observe",
+      "true",
+      "--loop",
+      "true",
+      "--interval-sec",
+      "5",
+    ];
+    const cmd = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "--allow-read",
+        "--allow-write",
+        "--allow-env",
+        "--allow-run",
+        ...args,
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const child = cmd.spawn();
+
+    // 最初のサイクルが完走するまで待つ (--loop はサイクルが完走するたびに1行 console.log
+    // する設計 — main() のストリーミング出力仕様どおり)。
+    const reader = child.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    while (!buffered.includes("\n")) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("最初のサイクル完了前に stdout が閉じた");
+      buffered += decoder.decode(value, { stream: true });
+    }
+    reader.releaseLock();
+
+    child.kill("SIGINT");
+
+    // 実プロセスの終了をハングせずに待つためのタイムアウト・ガードであり、
+    // sleepAbortable 自体の時間制御はテストしていない (それは受け入れ条件5 単体b が
+    // フェイク不要な形で検証済み)。実プロセス境界を跨ぐ以上フェイクタイマーは効かない
+    // ので、実時間のタイムアウトを使う (上記ルールの「実タイマー挙動をテストする
+    // 統合テスト」の例外に該当)。
+    const { promise: timeoutPromise, reject: rejectTimeout } = Promise
+      .withResolvers<never>();
+    const timer = setTimeout(
+      () =>
+        rejectTimeout(
+          new Error("SIGINT 後 3 秒以内にプロセスが終了しなかった"),
+        ),
+      3000,
+    );
+    try {
+      const status = await Promise.race([child.status, timeoutPromise]);
+      assertEquals(status.success, true);
+      assertEquals(status.code, 0);
+    } finally {
+      clearTimeout(timer);
+      await child.stdout.cancel().catch(() => {});
+      await child.stderr.cancel().catch(() => {});
+    }
+  } finally {
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+  }
+});
 
 if (TASK_PIPELINE_E2E) {
   const availability = await detectPaseoAvailability();

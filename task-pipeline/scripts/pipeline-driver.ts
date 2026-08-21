@@ -30,7 +30,8 @@
 //     [--alive <csv>] [--now <iso>] [--config <k=v,...>] [--dead-tasks <csv>] \
 //     [--wait-timeout-sec <n>] [--paseo-bin <path>] \
 //     [--impl-provider <provider>[/<model>]] [--verify-provider <provider>[/<model>]] \
-//     [--paseo-new-workspace <local|worktree>]
+//     [--paseo-new-workspace <local|worktree>] \
+//     [--observe [--replay-next <path>] [--loop [--interval-sec <n>] [--max-cycles <n>]]]
 //
 // テスト: pipeline-driver.test.ts (state.ts / paseo / git をスタブ化した CommandRunner
 // で 4 kind それぞれの組み立てを検証)。実行は deno task test
@@ -45,7 +46,13 @@ import type {
 } from "./pipeline-dispatch.ts";
 import type { NextResult, NextTask } from "./state-next.ts";
 import type { V2Item, V2State } from "./state-transitions-v2.ts";
-import { boolFlag, intFlag, parseFlags, requireFlag } from "./state-flags.ts";
+import {
+  boolFlag,
+  intFlag,
+  parseFlags,
+  requireFlag,
+  requireIntFlag,
+} from "./state-flags.ts";
 
 // ---------------------------------------------------------------------------
 // タスクの class (agent-launch.md「タスクの class」)
@@ -1287,6 +1294,85 @@ export async function appendObserveRecord(
 }
 
 // ---------------------------------------------------------------------------
+// observe の常駐ループ
+// ---------------------------------------------------------------------------
+
+/** `ms` 経過 or `signal` の abort のどちらか早い方で解決する。abort 側は setTimeout を
+ * 確実に片付けてから解決し、タイマーが残ってプロセス終了を妨げないようにする
+ * (`SIGINT`/`SIGTERM` 到達時に `--interval-sec` の満了を待たずに中断できるのはこの race のため)。 */
+function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  const { promise, resolve } = Promise.withResolvers<void>();
+  const onAbort = () => {
+    clearTimeout(timer);
+    resolve();
+  };
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", onAbort);
+    resolve();
+  }, ms);
+  signal.addEventListener("abort", onAbort, { once: true });
+  return promise;
+}
+
+/** observe 常駐ループの既定間隔 (`watch-agent.sh` の 0 秒起床監視と同じ 5 秒 —
+ * observe サイクルは `state.ts next` を 1 回呼ぶだけの軽いポーリングなので、
+ * `watch-pr.sh` の 60 秒 (GitHub API を伴う重い監視向け) ではなくこちら側に揃える)。 */
+export const DEFAULT_OBSERVE_LOOP_INTERVAL_SEC = 5;
+
+export interface ObserveLoopParams {
+  readonly runner: CommandRunner;
+  readonly stateDir: string;
+  readonly nextOpts: NextStateOpts;
+  /** 省略時は DEFAULT_OBSERVE_LOOP_INTERVAL_SEC。 */
+  readonly intervalSec?: number;
+  /** 省略時は無期限。 */
+  readonly maxCycles?: number;
+  /** abort されたら、進行中のサイクル完了後にループを終了する (interval 待機中でも即座に)。 */
+  readonly signal: AbortSignal;
+  /** 1 サイクル完走するたびに呼ばれる (`main` はここで console.log してストリーミング出力する)。 */
+  readonly onRecord?: (record: ObserveRecord) => void;
+  /** テストで固定するための注入点。省略時は crypto.randomUUID()。 */
+  readonly runId?: string;
+  /** テストで固定するための注入点。省略時は Date.now ベースで進める。 */
+  readonly now?: () => Date;
+}
+
+/** #142 の observe サイクルを、single-flight (前サイクル完走後にだけ次を始める) で
+ * 繰り返す常駐ループ。1サイクルの例外はここで捕まえず呼び出し元 (`main`) の
+ * `try/catch` へそのまま伝播させる — 後続サイクルを実行せずにループごと終了する。 */
+export async function runObserveLoop(
+  params: ObserveLoopParams,
+): Promise<readonly ObserveRecord[]> {
+  const runId = params.runId ?? crypto.randomUUID();
+  const intervalMs = (params.intervalSec ?? DEFAULT_OBSERVE_LOOP_INTERVAL_SEC) *
+    1000;
+  const records: ObserveRecord[] = [];
+  let sequence = 0;
+  while (true) {
+    const observedAt = (params.now?.() ?? new Date()).toISOString();
+    const record = await runObserveCycle({
+      runner: params.runner,
+      stateDir: params.stateDir,
+      nextOpts: params.nextOpts,
+      sequence,
+      observedAt,
+    });
+    await appendObserveRecord(params.stateDir, runId, record);
+    records.push(record);
+    params.onRecord?.(record);
+    sequence += 1;
+    if (params.maxCycles !== undefined && sequence >= params.maxCycles) {
+      break;
+    }
+    if (params.signal.aborted) break;
+    await sleepAbortable(intervalMs, params.signal);
+    if (params.signal.aborted) break;
+  }
+  return records;
+}
+
+// ---------------------------------------------------------------------------
 // 1 サイクル: next → due な1件を実行 → 終了
 // ---------------------------------------------------------------------------
 
@@ -1335,6 +1421,10 @@ export async function main(argv: string[]): Promise<number> {
     if (replayNextPath !== undefined && !observe) {
       throw new DriverError("--replay-next requires --observe");
     }
+    const loop = boolFlag(flags, "loop");
+    if (loop && !observe) {
+      throw new DriverError("--loop requires --observe");
+    }
 
     const stateDir = requireFlag(flags, "state-dir");
     const session = flags.get("session") ??
@@ -1346,6 +1436,36 @@ export async function main(argv: string[]): Promise<number> {
       config: flags.get("config"),
       deadTasks: flags.get("dead-tasks"),
     };
+
+    if (observe && loop) {
+      const intervalSec = intFlag(
+        flags,
+        "interval-sec",
+        DEFAULT_OBSERVE_LOOP_INTERVAL_SEC,
+      );
+      const maxCycles = flags.has("max-cycles")
+        ? requireIntFlag(flags, "max-cycles")
+        : undefined;
+      const controller = new AbortController();
+      const onSignal = () => controller.abort();
+      Deno.addSignalListener("SIGINT", onSignal);
+      Deno.addSignalListener("SIGTERM", onSignal);
+      try {
+        await runObserveLoop({
+          runner: new SubprocessRunner(),
+          stateDir,
+          nextOpts: nextStateOpts,
+          intervalSec,
+          maxCycles,
+          signal: controller.signal,
+          onRecord: (record) => console.log(JSON.stringify(record)),
+        });
+      } finally {
+        Deno.removeSignalListener("SIGINT", onSignal);
+        Deno.removeSignalListener("SIGTERM", onSignal);
+      }
+      return 0;
+    }
 
     if (observe) {
       const replayNextText = replayNextPath !== undefined
