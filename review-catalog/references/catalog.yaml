@@ -1,0 +1,235 @@
+# review-catalog 共通カタログ (L0-L3)。L4 は各プロジェクトの review-catalog.yaml に置く。
+# スキーマと操作は SKILL.md、層の定義は layers.md。行の追加・変更は promote/demote で行う。
+
+l0: # 普遍 — 言語・ドメインを問わず真
+  - id: L0-advisory-zero
+    layer: L0
+    statement: 決定的ゲートは最大厳格度で、全違反が blocking である
+    check: deterministic
+    rubric: linter/formatter/静的解析が最低重要度の違反でも fail する設定になっている
+    status: blocking
+    evidence: advisory はボット無視を学習させ、運用で必ず腐る
+
+  - id: L0-structural-rules
+    layer: L0
+    statement: アーキテクチャ不変条件 (final/継承/命名/依存方向) は宣言的ルールで執行される
+    check: deterministic
+    rubric: 不変条件が guard/arch ルールとして書かれ、CI で fail する
+    status: blocking
+    params: [rules]
+    evidence: レビュー指摘の約 75% は構造・慣習 (Mäntylä & Lassenius 2009) — 機械化可能な領域
+
+  - id: L0-mutation-floor
+    layer: L0
+    statement: テストスイートは変異を殺せる
+    check: deterministic
+    rubric: mutation score が floor 以上
+    status: blocking
+    params: [msi_floor]
+    evidence: line coverage は殺傷力の弱い代理指標 (94% line / 41% MSI の実例あり)
+
+  - id: L0-new-code-tested
+    layer: L0
+    statement: 変更されたコードはテストに実行される
+    check: deterministic
+    rubric: diff coverage またはクラス単位カバレッジが基準を満たす
+    status: blocking
+    params: [coverage_rule]
+
+  - id: L0-contract-pin
+    layer: L0
+    statement: 公開契約 (API シグネチャ・CLI exit code・スキーマ・ワイヤ形式) は契約テストで固定される
+    check: deterministic
+    rubric: 契約の変更が契約テストと利用者向け文書の同時変更を伴う
+    status: blocking
+    params: [contracts]
+
+  - id: L0-silent-failure
+    layer: L0
+    statement: エラーは伝播・記録・理由明示のいずれかで扱われ、握り潰されない
+    check: agent
+    rubric: catch・fallback・デフォルト値適用の各箇所が「伝播 / 記録 / 理由付き無視」のどれかを満たす。FAIL は file:line を示す
+    executor: "agent: silent-failure-hunter 相当"
+    status: blocking
+
+  - id: L0-test-validity
+    layer: L0
+    statement: 各テストは対象の観測可能な挙動を検証し、対象が壊れたら落ちる
+    check: agent
+    rubric: assertion が実装の写経や plumbing 検証でなく、境界・遷移・実エラーを突いている。定量版は L0-mutation-floor
+    executor: "agent: pr-test-analyzer 相当"
+    status: blocking
+
+  - id: L0-no-speculative
+    layer: L0
+    statement: 現在の要求に不要な抽象・汎用化・設定項目が導入されていない
+    check: agent
+    rubric: 新規の抽象それぞれに、現用の利用箇所が 2 つ以上あるか要求への明記がある
+    status: blocking
+    evidence: over-engineering は Google eng-practices が特に監視せよと挙げる項目
+
+  - id: L0-naming-honest
+    layer: L0
+    statement: 名前が挙動と一致し、誤解を生まない
+    check: agent
+    rubric: 名前から推測される契約と実際の挙動が食い違う箇所がない
+    status: blocking
+
+  - id: L0-comment-sync
+    layer: L0
+    statement: コメント・docblock は実装と一致し、why を語る
+    check: agent
+    rubric: 実装と矛盾する記述、コードの言い換え、根拠のない断定がない
+    executor: "agent: comment-analyzer 相当"
+    status: blocking
+
+  - id: L0-doc-sync
+    layer: L0
+    statement: 観測可能な挙動の変更は利用者向け文書の更新を伴う
+    check: deterministic
+    rubric: changelog/README の更新がゲートで強制される (changelog-check 型)
+    status: blocking
+    params: [docs]
+
+  - id: L0-config-coherence
+    layer: L0
+    statement: 複数箇所に重複して現れる設定値の整合は機械検証される
+    check: deterministic
+    rubric: CI matrix・ツール設定・文書中の数値の突き合わせスクリプトが CI にある
+    status: blocking
+    params: [pairs]
+
+  - id: L0-dep-justified
+    layer: L0
+    statement: 依存の追加・更新は正当化され、脆弱性/secret スキャンを通る
+    check: deterministic
+    rubric: 依存監査と secret スキャンが CI にあり、新規依存の理由が変更に記される
+    status: blocking
+
+  - id: L0-fix-repro
+    layer: L0
+    statement: バグ修正は再現テストを伴う
+    check: agent
+    rubric: 修正差分に、修正前の実装では fail するテストが含まれる
+    status: blocking
+
+  - id: L0-spec-first
+    layer: L0
+    statement: スコープと受け入れ条件は実装前に固定され、検証は仕様に対して行われる
+    check: human
+    rubric: 受け入れ条件が実装開始前の成果物として存在する
+    status: blocking
+    evidence: 設計・スコープ妥当性はレビューでも検出困難 (Bacchelli & Bird 2013) — 事前固定でしか担保できない
+
+  - id: L0-twice-rule
+    layer: L0
+    statement: 同一指摘の 2 回目はカタログ行またはルールへ昇格される
+    check: human
+    rubric: 指摘の再演が promote の起票につながっている
+    status: blocking
+
+  - id: L0-override-logged
+    layer: L0
+    statement: 一般則を破る決定は理由付きで記録される
+    check: agent
+    rubric: 下位層ルールへの逸脱に decisions log の対応エントリがある
+    status: blocking
+    evidence: 記録なき逸脱は汎用レビュアの恒久 FP 源になる
+
+l1: # 個人/組織ポリシー — 全 repo に課したい選好。convention の昇格先
+  rows: []
+  # 昇格候補 (現在 ray-di-context の L4 convention):
+  #   - テスト名は対象クラスを主語とする三人称現在の文
+  #   - コメントは docblock のみ。why は docs/ へ
+
+bindings: # L2 — L0 行の executor を言語ツールチェーンで具体化
+  php:
+    L0-advisory-zero: "mago lint/fmt/analyze (minimum-fail-level=note) + composer validate --strict"
+    L0-structural-rules: "mago.toml [[guard.structural.rules]]"
+    L0-mutation-floor: "infection (floor は infection.json5)"
+    L0-new-code-tested: "phpunit --coverage + クラスごとの #[CoversClass] テスト"
+    L0-doc-sync: "changelog-check 型スクリプト"
+    L0-dep-justified: "composer audit"
+
+l3: # 成果物アーキタイプ — applies_to がプロジェクトの archetypes と交差する行のみ適用
+  - id: L3-lib-consumer-install
+    layer: L3
+    applies_to: [library]
+    statement: パッケージは実消費者と同じ経路 (実インストール + 実行) で検証される
+    check: deterministic
+    rubric: 実 fixture へのインストールと実バイナリ/実 import の実行が CI にある (composer dist / npm pack 型)
+    status: blocking
+
+  - id: L3-lib-lowest
+    layer: L3
+    applies_to: [library]
+    statement: 宣言した依存下限で解決してテストが通る
+    check: deterministic
+    rubric: prefer-lowest 相当の解決とテスト実行が CI にある
+    status: blocking
+
+  - id: L3-lib-matrix
+    layer: L3
+    applies_to: [library]
+    statement: サポートを宣言する全ランタイムバージョンでテストされる
+    check: deterministic
+    rubric: CI matrix が宣言 (params.versions) と一致する。整合検証は L0-config-coherence とペア
+    status: blocking
+    params: [versions]
+
+  - id: L3-lib-export-hygiene
+    layer: L3
+    applies_to: [library]
+    statement: 配布物に開発用ファイルが混入しない
+    check: deterministic
+    rubric: export-ignore 相当の検証が CI にある
+    status: blocking
+
+  - id: L3-lib-bc
+    layer: L3
+    applies_to: [library]
+    statement: 破壊的変更は検出され、バージョニング判断に反映される
+    check: agent
+    rubric: 公開シンボルの削除・シグネチャ変更が changelog のバージョン判断と整合する
+    status: blocking
+
+  - id: L3-cli-exit-contract
+    layer: L3
+    applies_to: [cli]
+    statement: exit code は公開契約として文書とテストの両方に固定される
+    check: deterministic
+    rubric: exit code 表 (params.codes) が契約テストと利用者向け文書の双方に存在し一致する
+    status: blocking
+    params: [codes]
+
+  - id: L3-svc-flag
+    layer: L3
+    applies_to: [service]
+    statement: 未完成の機能はフラグの裏でマージされる
+    check: agent
+    rubric: ユーザー可視の未完成経路がフラグ無しで露出しない
+    status: blocking
+
+  - id: L3-svc-rollout
+    layer: L3
+    applies_to: [service]
+    statement: 変更は段階的に露出され、戻し条件を持つ
+    check: human
+    rubric: ロールアウト手順に露出段階と自動/手動ロールバック条件が明記されている
+    status: blocking
+
+  - id: L3-svc-observability
+    layer: L3
+    applies_to: [service]
+    statement: 変更した経路の失敗はメトリクス/アラートで観測できる
+    check: agent
+    rubric: 変更領域に対応するメトリクスまたはアラート定義が存在する
+    status: blocking
+
+  - id: L3-svc-smoke
+    layer: L3
+    applies_to: [service]
+    statement: デプロイ後スモークが変更経路を実際に通す
+    check: deterministic
+    rubric: デプロイ後に主要経路を実行する自動スモークがある
+    status: blocking

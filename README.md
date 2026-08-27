@@ -10,6 +10,7 @@
 
 | skill | 内容 |
 |---|---|
+| [review-catalog](review-catalog/SKILL.md) | レビュー/QA 観点カタログの管理。 |
 | [task-cost](task-cost/SKILL.md) | task-pipeline のセッション transcript から、役割 (adapter/triage/verifier/executor/pr-watcher) × フェーズ × attempt (verifier の初回/再検証) 別の課金換算コスト (weighted・実費) を 1 コマンドで出す。 |
 | [task-pipeline](task-pipeline/SKILL.md) | 承認済みタスクの自動消化パイプライン。 |
 | [task-prep](task-prep/SKILL.md) | 要望を task-pipeline が消化できる issue 群に変える準備 skill。 |
