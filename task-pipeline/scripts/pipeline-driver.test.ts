@@ -2155,7 +2155,11 @@ Deno.test("runDispatchLoop: interval 待機中の abort は満了を待たずに
 Deno.test("runDispatchLoop: intervalSec 未指定でも既定の待機を適用する", async () => {
   const delays: number[] = [];
   const originalSetTimeout = globalThis.setTimeout;
-  globalThis.setTimeout = ((handler, timeout, ...args) => {
+  globalThis.setTimeout = ((
+    handler: Parameters<typeof setTimeout>[0],
+    timeout: Parameters<typeof setTimeout>[1],
+    ...args: unknown[]
+  ) => {
     delays.push(timeout ?? 0);
     queueMicrotask(() => {
       if (typeof handler === "function") {
@@ -2163,7 +2167,7 @@ Deno.test("runDispatchLoop: intervalSec 未指定でも既定の待機を適用�
       }
     });
     return 0;
-  }) as typeof setTimeout;
+  }) as unknown as typeof setTimeout;
   try {
     let nextCalls = 0;
     const runner = new StubRunner((_cmd, args) => {
@@ -2189,7 +2193,11 @@ Deno.test("runDispatchLoop: intervalSec 未指定でも既定の待機を適用�
 Deno.test("runDispatchLoop: 明示的な正の interval を待機してから次サイクルへ進む", async () => {
   const delays: number[] = [];
   const originalSetTimeout = globalThis.setTimeout;
-  globalThis.setTimeout = ((handler, timeout, ...args) => {
+  globalThis.setTimeout = ((
+    handler: Parameters<typeof setTimeout>[0],
+    timeout: Parameters<typeof setTimeout>[1],
+    ...args: unknown[]
+  ) => {
     delays.push(timeout ?? 0);
     queueMicrotask(() => {
       if (typeof handler === "function") {
@@ -2197,7 +2205,7 @@ Deno.test("runDispatchLoop: 明示的な正の interval を待機してから次
       }
     });
     return 0;
-  }) as typeof setTimeout;
+  }) as unknown as typeof setTimeout;
   try {
     const order: string[] = [];
     const runner = new StubRunner((_cmd, args) => {
