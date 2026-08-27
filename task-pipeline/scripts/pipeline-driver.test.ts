@@ -327,6 +327,8 @@ Deno.test("buildPaseoRunArgs: agent-launch.md の起動パラメータ規則ど�
     "/wt/gh-42",
     "--provider",
     "claude/claude-opus-4-1",
+    "--new-workspace",
+    "local",
     "--mode",
     "bypassPermissions",
     'Resume from phase "research". Check existing artifacts in the run dir first.',
@@ -346,29 +348,32 @@ Deno.test("buildPaseoRunArgs: model が無ければ --provider は provider だ�
   assertEquals(args[args.indexOf("--provider") + 1], "junie");
 });
 
-Deno.test("buildPaseoRunArgs: newWorkspace が指定されたときだけ --new-workspace を付ける", () => {
-  const withNewWorkspace = buildPaseoRunArgs({
+Deno.test("buildPaseoRunArgs: newWorkspace は既定で local、明示指定で上書き可能", () => {
+  const defaultArgs = buildPaseoRunArgs({
     id: "gh-1",
     worktree: "/scratch",
     provider: "omp",
     model: null,
     mode: "full",
     prompt: "go",
-    newWorkspace: "local",
   });
   assertEquals(
-    withNewWorkspace[withNewWorkspace.indexOf("--new-workspace") + 1],
+    defaultArgs[defaultArgs.indexOf("--new-workspace") + 1],
     "local",
   );
-  const withoutNewWorkspace = buildPaseoRunArgs({
+  const withCustomWorkspace = buildPaseoRunArgs({
     id: "gh-1",
     worktree: "/scratch",
     provider: "omp",
     model: null,
     mode: "full",
     prompt: "go",
+    newWorkspace: "worktree",
   });
-  assert(!withoutNewWorkspace.includes("--new-workspace"));
+  assertEquals(
+    withCustomWorkspace[withCustomWorkspace.indexOf("--new-workspace") + 1],
+    "worktree",
+  );
 });
 
 Deno.test("buildPaseoStopArgs", () => {
@@ -764,6 +769,11 @@ Deno.test("runCycle/takeover: worktree 済みタスクを paseo run で起動し
       runCall!.args[runCall!.args.indexOf("--mode") + 1],
     "bypassPermissions",
   );
+  assertEquals(
+    runCall!.args.includes("--new-workspace") &&
+      runCall!.args[runCall!.args.indexOf("--new-workspace") + 1],
+    "local",
+  );
 
   const setExecCall = runner.calls.find((c) =>
     stateVerbOf(c.args) === "set-executor"
@@ -776,6 +786,73 @@ Deno.test("runCycle/takeover: worktree 済みタスクを paseo run で起動し
   assertEquals(
     setExecCall!.args[setExecCall!.args.indexOf("--executor") + 1],
     "agent-new-1",
+  );
+});
+Deno.test("runCycle/takeover: ctx.paseoNewWorkspace で --new-workspace を上書きできる", async () => {
+  const runner = new StubRunner((cmd, args) => {
+    if (cmd === "paseo") {
+      if (args[0] === "ls") return ok([]);
+      if (args[0] === "run") {
+        return ok({ agentId: "agent-custom-ws", status: "running" });
+      }
+      throw new Error(`unexpected paseo call: ${args.join(" ")}`);
+    }
+    const verb = stateVerbOf(args);
+    if (verb === "next") {
+      return ok({
+        tasks: [{
+          id: "gh-30",
+          actions: [{
+            kind: "takeover",
+            reason: "no-executor",
+            resume_phase: "research",
+            recheck_gate: false,
+            needs_worktree: false,
+          }],
+        }],
+      });
+    }
+    if (verb === "get") {
+      return ok({
+        queue: [{
+          id: "gh-30",
+          status: "in_progress",
+          run: {
+            kind: "initial",
+            gate: "full",
+            phase: "research",
+            attempts: 0,
+            executor: null,
+            executor_last_event_at: null,
+            takeover_at: null,
+            verifier: null,
+            verifier_session: null,
+          },
+          blocked_reason: null,
+          artifact: { state: "none" },
+          worktree: "/wt/gh-30",
+          base: "main",
+          session: "sess-self",
+        }],
+      });
+    }
+    if (verb === "set-executor") {
+      return ok({ ok: true, id: "gh-30", executor: "agent-custom-ws" });
+    }
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+
+  const result = await runCycle(
+    baseCtx(runner, { paseoNewWorkspace: "worktree" }),
+  );
+  assertEquals(result.outcome, "launched");
+  const runCall = runner.calls.find((c) =>
+    c.cmd === "paseo" && c.args[0] === "run"
+  );
+  assert(runCall, "paseo run が呼ばれているべき");
+  assertEquals(
+    runCall!.args[runCall!.args.indexOf("--new-workspace") + 1],
+    "worktree",
   );
 });
 
@@ -1978,14 +2055,9 @@ Deno.test("main --observe --replay-next: 標準出力にのみ書き、.task-pip
 // ことを検証してから、起動したエージェントと (作られていれば) owned workspace を
 // archive で片付ける。
 //
-// `--paseo-new-workspace local` を明示しているのは、このテストの実行環境自体が
-// Paseo エージェントの中 (agent-scoped) であることがあり、その場合 `--new-workspace`
-// を指定しない `--cwd` は caller の workspace を継承してしまい `--cwd` の値が無視される
-// ことを実機で確認したため (Cwd の検証ができなくなる)。pipeline-driver.ts の既定
-// (`paseoNewWorkspace` 省略) はそのまま — 本来の経路 (top-level セッションからの
-// `--cwd` は毎回 owned workspace を自動生成する。agent-launch.md「所有 workspace の
-// 記録と安全な後始末」) を変えない。`--paseo-new-workspace` はこのテストが実行環境の
-// 制約を吸収するためだけに使う。
+// pipeline-driver.ts の既定値は "local" (#148, #150 整合: agent-scoped 実行環境でも
+// --cwd の隔離を確実に効かせるため)。この E2E テストでは明示指定の動作確認を兼ねて
+// `--paseo-new-workspace local` を渡している。
 // ---------------------------------------------------------------------------
 
 interface PaseoAvailability {
