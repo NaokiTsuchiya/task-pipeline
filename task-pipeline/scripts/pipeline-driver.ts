@@ -30,7 +30,7 @@
 //     [--alive <csv>] [--now <iso>] [--config <k=v,...>] [--dead-tasks <csv>] \
 //     [--wait-timeout-sec <n>] [--paseo-bin <path>] \
 //     [--impl-provider <provider>[/<model>]] [--verify-provider <provider>[/<model>]] \
-//     [--paseo-new-workspace <local|worktree>] \
+//     [--paseo-new-workspace <local|worktree>] (既定値: local; #148 整合) \
 //     [--observe [--replay-next <path>] [--loop [--interval-sec <n>] [--max-cycles <n>]]]
 //
 // テスト: pipeline-driver.test.ts (state.ts / paseo / git をスタブ化した CommandRunner
@@ -362,9 +362,8 @@ export function buildTouchExecutorStateFlags(
 
 /** agent-launch.md「Paseo 経路の起動パラメータと読み取り」の起動パラメータ規則。
  * `executor` には `--output-schema` を付けない (background で複数回停止するため)。
- * `newWorkspace` は既定では省略する (top-level セッションからの `--cwd` は自動で owned
- * workspace を新規に持つ — 「所有 workspace の記録と安全な後始末」節)。agent-scoped の
- * 呼び出しから強制的に独立した workspace を切りたいときだけ明示する (テスト用途)。 */
+ * `newWorkspace` は既定で "local" とする (#148 整合: top-level / agent-scoped を問わず
+ * --cwd の隔離を確実に効かせるため)。明示的に指定された場合はその値を使う。 */
 export function buildPaseoRunArgs(params: {
   readonly id: string;
   readonly worktree: string;
@@ -389,7 +388,8 @@ export function buildPaseoRunArgs(params: {
     "--provider",
     params.model ? `${params.provider}/${params.model}` : params.provider,
   ];
-  if (params.newWorkspace) args.push("--new-workspace", params.newWorkspace);
+  const newWorkspace = params.newWorkspace ?? "local";
+  if (newWorkspace) args.push("--new-workspace", newWorkspace);
   if (params.mode) args.push("--mode", params.mode);
   args.push(params.prompt);
   return args;
@@ -671,10 +671,9 @@ export interface DriverContext {
   readonly launchArgs: LaunchArgs;
   readonly prefs: OrchestrationPrefs | null;
   readonly nextOpts: Omit<NextStateOpts, "session">;
-  /** `paseo run` の `--new-workspace` に明示的に渡す値。既定 (undefined) は省略し、
-   * top-level セッションの通常経路 (自動で owned workspace を作る) に任せる。
-   * agent-scoped 呼び出しから独立した workspace を強制したいときだけ指定する
-   * (テスト用途)。 */
+  /** `paseo run` の `--new-workspace` に渡す値。既定は "local" (#148 整合:
+   * agent-scoped / top-level セッションを問わず --cwd の隔離を確実に効かせるため)。
+   * CLI の `--paseo-new-workspace <val>` で上書き可能。 */
   readonly paseoNewWorkspace?: string;
   /** git rev-parse で求めるプロジェクトルート。takeover が worktree を新規に作る
    * ときだけ呼ぶ (claim/status-check/wait では git を一切呼ばない)。 */
@@ -931,7 +930,7 @@ async function handleTakeover(
       model: resolved.model,
       mode,
       prompt,
-      newWorkspace: ctx.paseoNewWorkspace,
+      newWorkspace: ctx.paseoNewWorkspace ?? "local",
     }),
   );
   if (runResult.code !== 0) {
@@ -1513,7 +1512,7 @@ export async function main(argv: string[]): Promise<number> {
         config: nextStateOpts.config,
         deadTasks: nextStateOpts.deadTasks,
       },
-      paseoNewWorkspace: flags.get("paseo-new-workspace"),
+      paseoNewWorkspace: flags.get("paseo-new-workspace") ?? "local",
       resolveProjectRoot: makeProjectRootResolver(runner, stateDir),
     };
 
