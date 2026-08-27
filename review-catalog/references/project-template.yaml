@@ -1,0 +1,39 @@
+# <project>/docs/review-catalog.yaml — このプロジェクトの L4 層。
+# 上位層 (L0-L3) は ~/.claude/skills/review-catalog/references/catalog.yaml を参照。
+# このファイルを他プロジェクトへコピーしない。共有したい行は promote で上位層へ移す。
+
+language: php # bindings のキー
+archetypes: [library, cli] # l3 の applies_to を選ぶ
+
+params: # 上位層行の穴を埋める
+  L0-structural-rules:
+    rules: "" # 例: mago.toml [[guard.structural.rules]]
+  L0-mutation-floor:
+    msi_floor: "" # 例: infection.json5 の minMsi
+  L0-new-code-tested:
+    coverage_rule: ""
+  L0-contract-pin:
+    contracts: []
+  L0-doc-sync:
+    docs: []
+  L0-config-coherence:
+    pairs: []
+  L3-lib-matrix:
+    versions: []
+  L3-cli-exit-contract:
+    codes: ""
+
+overrides: [] # 上位層行の上書き。reason 必須 (無ければ audit violation)
+# - id: L0-doc-sync
+#   status: advisory
+#   reason: ""
+
+additions: [] # L4 行。kind: invariant (ドメインが強制、コピー・昇格禁止) | convention (選んだ規約、L1 昇格候補)
+# - id: P-example
+#   layer: L4
+#   kind: invariant
+#   statement: ""
+#   check: agent
+#   rubric: ""
+#   status: blocking
+#   evidence: "docs/decisions.md #NN"
