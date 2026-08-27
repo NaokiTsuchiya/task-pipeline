@@ -5,7 +5,6 @@
 // を実行 → 終了」の 1 サイクルだけを行う CLI である (常駐化・多重ポーリング・デッドマン
 // スイッチは Task 2-2/2-3 の範囲。verifier 起動・PASS/FAIL 分岐・advance・
 // pr-follow/merge-recovery/rebase 系の kind もこの issue の範囲外)。
-//
 // 実行する DriverOperation は 4 kind だけである (残りは "deferred" として素通りする):
 //   - claim         … `state.ts claim --id <id> --session <self>`
 //   - takeover      … `playbooks/agent-launch.md`「Paseo 経路の起動パラメータと読み取り」
@@ -31,7 +30,7 @@
 //     [--wait-timeout-sec <n>] [--paseo-bin <path>] \
 //     [--impl-provider <provider>[/<model>]] [--verify-provider <provider>[/<model>]] \
 //     [--paseo-new-workspace <local|worktree>] (既定値: local; #148 整合) \
-//     [--observe [--replay-next <path>] [--loop [--interval-sec <n>] [--max-cycles <n>]]]
+//     [--loop [--interval-sec <n>] [--max-cycles <n>]] [--observe [--replay-next <path>]]
 //
 // テスト: pipeline-driver.test.ts (state.ts / paseo / git をスタブ化した CommandRunner
 // で 4 kind それぞれの組み立てを検証)。実行は deno task test
@@ -1371,6 +1370,81 @@ export async function runObserveLoop(
   return records;
 }
 
+export const DEFAULT_DISPATCH_LOOP_INTERVAL_SEC = 5;
+
+export interface DispatchLoopParams {
+  readonly context?: DriverContext;
+  readonly runner?: CommandRunner;
+  readonly stateDir?: string;
+  readonly session?: string;
+  readonly waitTimeoutSec?: number;
+  readonly paseoBin?: string;
+  readonly launchArgs?: LaunchArgs;
+  readonly prefs?: OrchestrationPrefs | null;
+  readonly nextOpts?: Omit<NextStateOpts, "session">;
+  readonly paseoNewWorkspace?: string;
+  readonly resolveProjectRoot?: () => Promise<string>;
+  readonly intervalSec?: number;
+  readonly maxCycles?: number;
+  readonly signal: AbortSignal;
+  readonly onResult?: (result: CycleResult) => void;
+}
+
+function dispatchContextOf(params: DispatchLoopParams): DriverContext {
+  if (params.context !== undefined) return params.context;
+  if (params.runner === undefined || params.stateDir === undefined) {
+    throw new DriverError(
+      "runDispatchLoop requires context or runner and stateDir",
+    );
+  }
+  const runner = params.runner;
+  const stateDir = params.stateDir;
+  return {
+    runner,
+    stateDir,
+    session: params.session ?? "",
+    waitTimeoutSec: params.waitTimeoutSec ?? DEFAULT_WAIT_TIMEOUT_SEC,
+    paseoBin: params.paseoBin ?? "paseo",
+    launchArgs: params.launchArgs ?? {},
+    prefs: params.prefs ?? null,
+    nextOpts: params.nextOpts ?? {},
+    paseoNewWorkspace: params.paseoNewWorkspace ?? "local",
+    resolveProjectRoot: params.resolveProjectRoot ??
+      makeProjectRootResolver(runner, stateDir),
+  };
+}
+
+export async function runDispatchLoop(
+  params: DispatchLoopParams,
+): Promise<readonly CycleResult[]> {
+  const ctx = dispatchContextOf(params);
+  const intervalMs =
+    (params.intervalSec ?? DEFAULT_DISPATCH_LOOP_INTERVAL_SEC) * 1000;
+  const results: CycleResult[] = [];
+  let sequence = 0;
+  while (true) {
+    if (
+      params.signal.aborted ||
+      (params.maxCycles !== undefined && sequence >= params.maxCycles)
+    ) {
+      break;
+    }
+    const result = await runCycle(ctx);
+    results.push(result);
+    params.onResult?.(result);
+    sequence += 1;
+    if (
+      params.signal.aborted ||
+      (params.maxCycles !== undefined && sequence >= params.maxCycles)
+    ) {
+      break;
+    }
+    await sleepAbortable(intervalMs, params.signal);
+    if (params.signal.aborted) break;
+  }
+  return results;
+}
+
 // ---------------------------------------------------------------------------
 // 1 サイクル: next → due な1件を実行 → 終了
 // ---------------------------------------------------------------------------
@@ -1421,9 +1495,6 @@ export async function main(argv: string[]): Promise<number> {
       throw new DriverError("--replay-next requires --observe");
     }
     const loop = boolFlag(flags, "loop");
-    if (loop && !observe) {
-      throw new DriverError("--loop requires --observe");
-    }
 
     const stateDir = requireFlag(flags, "state-dir");
     const session = flags.get("session") ??
@@ -1515,6 +1586,33 @@ export async function main(argv: string[]): Promise<number> {
       paseoNewWorkspace: flags.get("paseo-new-workspace") ?? "local",
       resolveProjectRoot: makeProjectRootResolver(runner, stateDir),
     };
+    if (loop) {
+      const intervalSec = intFlag(
+        flags,
+        "interval-sec",
+        DEFAULT_DISPATCH_LOOP_INTERVAL_SEC,
+      );
+      const maxCycles = flags.has("max-cycles")
+        ? requireIntFlag(flags, "max-cycles")
+        : undefined;
+      const controller = new AbortController();
+      const onSignal = () => controller.abort();
+      Deno.addSignalListener("SIGINT", onSignal);
+      Deno.addSignalListener("SIGTERM", onSignal);
+      try {
+        await runDispatchLoop({
+          context: ctx,
+          intervalSec,
+          maxCycles,
+          signal: controller.signal,
+          onResult: (cycleResult) => console.log(JSON.stringify(cycleResult)),
+        });
+      } finally {
+        Deno.removeSignalListener("SIGINT", onSignal);
+        Deno.removeSignalListener("SIGTERM", onSignal);
+      }
+      return 0;
+    }
 
     const result = await runCycle(ctx);
     console.log(JSON.stringify(result));

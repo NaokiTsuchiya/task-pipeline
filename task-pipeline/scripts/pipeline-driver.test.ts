@@ -33,7 +33,9 @@ import {
   buildTouchExecutorStateFlags,
   type CommandResult,
   type CommandRunner,
+  DEFAULT_DISPATCH_LOOP_INTERVAL_SEC,
   deriveTaskClass,
+  type DispatchLoopParams,
   type DriverContext,
   extractAgentId,
   extractOwnedWorkspaceId,
@@ -49,6 +51,7 @@ import {
   providerModeOf,
   resolveProviderModel,
   runCycle,
+  runDispatchLoop,
   runObserveCycle,
   runObserveLoop,
   selectObserveOperation,
@@ -622,7 +625,7 @@ class StubRunner implements CommandRunner {
     private readonly handler: (
       cmd: string,
       args: readonly string[],
-    ) => CommandResult,
+    ) => CommandResult | Promise<CommandResult>,
   ) {}
   run(cmd: string, args: readonly string[]): Promise<CommandResult> {
     this.calls.push({ cmd, args: [...args] });
@@ -1980,7 +1983,265 @@ Deno.test("runObserveLoop: interval 待機中の abort は interval 満了を待
   }
 });
 
-Deno.test("main --loop without --observe: usage エラー、値トークン省略は先に別の usage エラーで落ちるので明示する (受け入れ条件3)", async () => {
+Deno.test("runDispatchLoop: --max-cycles 3 でちょうど3サイクル実行され、結果を通知する", async () => {
+  let nextCalls = 0;
+  const notified: unknown[] = [];
+  const runner = new StubRunner((_cmd, args) => {
+    if (stateVerbOf(args) === "next") {
+      nextCalls += 1;
+      return ok({ tasks: [] });
+    }
+    throw new Error(`next 以外は呼ばれてはならない: ${args.join(" ")}`);
+  });
+  const params: DispatchLoopParams = {
+    context: baseCtx(runner),
+    intervalSec: 0,
+    maxCycles: 3,
+    signal: new AbortController().signal,
+    onResult: (result) => notified.push(result),
+  };
+  const results = await runDispatchLoop(params);
+  assertEquals(nextCalls, 3);
+  assertEquals(results.length, 3);
+  assertEquals(notified, results);
+});
+
+Deno.test("runDispatchLoop: --max-cycles 0 では0サイクルで即時終了する", async () => {
+  let nextCalls = 0;
+  const runner = new StubRunner((_cmd, args) => {
+    if (stateVerbOf(args) === "next") nextCalls += 1;
+    return ok({ tasks: [] });
+  });
+  const results = await runDispatchLoop({
+    context: baseCtx(runner),
+    maxCycles: 0,
+    signal: new AbortController().signal,
+  });
+  assertEquals(nextCalls, 0);
+  assertEquals(results, []);
+});
+
+Deno.test("runDispatchLoop: --max-cycles 1 では1サイクルだけ実行される", async () => {
+  let nextCalls = 0;
+  const runner = new StubRunner((_cmd, args) => {
+    if (stateVerbOf(args) === "next") {
+      nextCalls += 1;
+      return ok({ tasks: [] });
+    }
+    throw new Error("next 以外は呼ばれてはならない");
+  });
+  const results = await runDispatchLoop({
+    context: baseCtx(runner),
+    intervalSec: 0,
+    maxCycles: 1,
+    signal: new AbortController().signal,
+  });
+  assertEquals(nextCalls, 1);
+  assertEquals(results.length, 1);
+});
+
+Deno.test("runDispatchLoop: 前サイクル完了まで次サイクルを開始しない", async () => {
+  let cycle = 0;
+  let active = 0;
+  let maxActive = 0;
+  const order: string[] = [];
+  const runner = new StubRunner((_cmd, args) => {
+    if (stateVerbOf(args) !== "next") {
+      throw new Error("next 以外は呼ばれてはならない");
+    }
+    const current = cycle++;
+    order.push(`start-${current}`);
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    return new Promise<CommandResult>((resolve) => {
+      queueMicrotask(() => {
+        order.push(`end-${current}`);
+        active -= 1;
+        resolve(ok({ tasks: [] }));
+      });
+    });
+  });
+  await runDispatchLoop({
+    context: baseCtx(runner),
+    intervalSec: 0,
+    maxCycles: 2,
+    signal: new AbortController().signal,
+  });
+  assertEquals(order, ["start-0", "end-0", "start-1", "end-1"]);
+  assertEquals(maxActive, 1);
+});
+
+Deno.test("runDispatchLoop: サイクルの例外を伝播させ後続サイクルを実行しない", async () => {
+  let nextCalls = 0;
+  const runner = new StubRunner((_cmd, args) => {
+    if (stateVerbOf(args) !== "next") {
+      throw new Error("next 以外は呼ばれてはならない");
+    }
+    nextCalls += 1;
+    return nextCalls === 2 ? fail("boom", 7) : ok({ tasks: [] });
+  });
+  let threw: unknown = null;
+  try {
+    await runDispatchLoop({
+      context: baseCtx(runner),
+      intervalSec: 0,
+      signal: new AbortController().signal,
+    });
+  } catch (error) {
+    threw = error;
+  }
+  assert(threw instanceof Error);
+  assertEquals(nextCalls, 2);
+});
+
+Deno.test("runDispatchLoop: 開始前から AbortSignal が aborted なら空の結果で終了する", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let nextCalls = 0;
+  const runner = new StubRunner((_cmd, args) => {
+    if (stateVerbOf(args) === "next") nextCalls += 1;
+    return ok({ tasks: [] });
+  });
+  const results = await runDispatchLoop({
+    context: baseCtx(runner),
+    signal: controller.signal,
+  });
+  assertEquals(nextCalls, 0);
+  assertEquals(results, []);
+});
+
+Deno.test("runDispatchLoop: サイクル完走後の signal.aborted で次サイクルを開始しない", async () => {
+  const controller = new AbortController();
+  let nextCalls = 0;
+  const runner = new StubRunner((_cmd, args) => {
+    if (stateVerbOf(args) === "next") {
+      nextCalls += 1;
+      return ok({ tasks: [] });
+    }
+    throw new Error("next 以外は呼ばれてはならない");
+  });
+  const results = await runDispatchLoop({
+    context: baseCtx(runner),
+    signal: controller.signal,
+    onResult: () => controller.abort(),
+  });
+  assertEquals(nextCalls, 1);
+  assertEquals(results.length, 1);
+});
+
+Deno.test("runDispatchLoop: interval 待機中の abort は満了を待たずに解決する", async () => {
+  const controller = new AbortController();
+  let nextCalls = 0;
+  const runner = new StubRunner((_cmd, args) => {
+    if (stateVerbOf(args) === "next") {
+      nextCalls += 1;
+      return ok({ tasks: [] });
+    }
+    throw new Error("next 以外は呼ばれてはならない");
+  });
+  const start = performance.now();
+  const results = await runDispatchLoop({
+    context: baseCtx(runner),
+    intervalSec: 3600,
+    signal: controller.signal,
+    onResult: () => queueMicrotask(() => controller.abort()),
+  });
+  const elapsedMs = performance.now() - start;
+  assertEquals(nextCalls, 1);
+  assertEquals(results.length, 1);
+  assert(elapsedMs < 1000, `abort 後も interval を待機した (${elapsedMs}ms)`);
+});
+
+Deno.test("runDispatchLoop: intervalSec 未指定でも既定の待機を適用する", async () => {
+  const delays: number[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((handler, timeout, ...args) => {
+    delays.push(timeout ?? 0);
+    queueMicrotask(() => {
+      if (typeof handler === "function") {
+        (handler as (...callbackArgs: unknown[]) => void)(...args);
+      }
+    });
+    return 0;
+  }) as typeof setTimeout;
+  try {
+    let nextCalls = 0;
+    const runner = new StubRunner((_cmd, args) => {
+      if (stateVerbOf(args) === "next") {
+        nextCalls += 1;
+        return ok({ tasks: [] });
+      }
+      throw new Error("next 以外は呼ばれてはならない");
+    });
+    const results = await runDispatchLoop({
+      context: baseCtx(runner),
+      maxCycles: 2,
+      signal: new AbortController().signal,
+    });
+    assertEquals(nextCalls, 2);
+    assertEquals(results.length, 2);
+    assertEquals(delays, [DEFAULT_DISPATCH_LOOP_INTERVAL_SEC * 1000]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+Deno.test("runDispatchLoop: 明示的な正の interval を待機してから次サイクルへ進む", async () => {
+  const delays: number[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((handler, timeout, ...args) => {
+    delays.push(timeout ?? 0);
+    queueMicrotask(() => {
+      if (typeof handler === "function") {
+        (handler as (...callbackArgs: unknown[]) => void)(...args);
+      }
+    });
+    return 0;
+  }) as typeof setTimeout;
+  try {
+    const order: string[] = [];
+    const runner = new StubRunner((_cmd, args) => {
+      if (stateVerbOf(args) === "next") {
+        order.push(`next-${order.length}`);
+        return ok({ tasks: [] });
+      }
+      throw new Error("next 以外は呼ばれてはならない");
+    });
+    const results = await runDispatchLoop({
+      context: baseCtx(runner),
+      intervalSec: 1,
+      maxCycles: 2,
+      signal: new AbortController().signal,
+    });
+    assertEquals(results.length, 2);
+    assertEquals(order, ["next-0", "next-1"]);
+    assertEquals(delays, [1000]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+Deno.test("runDispatchLoop: runner と stateDir の直接指定で動作する", async () => {
+  let nextCalls = 0;
+  const runner = new StubRunner((_cmd, args) => {
+    if (stateVerbOf(args) === "next") {
+      nextCalls += 1;
+      return ok({ tasks: [] });
+    }
+    throw new Error("next 以外は呼ばれてはならない");
+  });
+  const results = await runDispatchLoop({
+    runner,
+    stateDir: "/fake/.task-pipeline",
+    intervalSec: 0,
+    maxCycles: 1,
+    signal: new AbortController().signal,
+  });
+  assertEquals(nextCalls, 1);
+  assertEquals(results.length, 1);
+});
+
+Deno.test("main: --loop 指定時でも --state-dir 欠落は usage エラーになる", async () => {
   const lines = await captureConsoleLog(async () => {
     const code = await main(["--loop", "true"]);
     assertEquals(code, 1);
@@ -1991,6 +2252,105 @@ Deno.test("main --loop without --observe: usage エラー、値トークン省�
     typeof parsed.error === "string" && parsed.error.length > 0,
     "error メッセージが含まれるべき",
   );
+});
+
+Deno.test("main: loop && !observe で複数サイクルを実行し結果をストリーミングする", async () => {
+  const dir = await Deno.makeTempDir();
+  const stateDir = `${dir}/.task-pipeline`;
+  try {
+    await Deno.mkdir(stateDir, { recursive: true });
+    await Deno.writeTextFile(
+      `${stateDir}/state.json`,
+      JSON.stringify({
+        tracker: "gh",
+        source: "",
+        updated_at: new Date().toISOString(),
+        queue: [],
+        candidates: [],
+        relisted: [],
+        promoted: [],
+        completed: [],
+        withdrawn_branches: [],
+        history: [],
+        history_archived: 0,
+        schema_version: 2,
+      }),
+    );
+    let code = -1;
+    const lines = await captureConsoleLog(async () => {
+      code = await main([
+        "--loop",
+        "true",
+        "--interval-sec",
+        "0",
+        "--max-cycles",
+        "2",
+        "--state-dir",
+        stateDir,
+        "--session",
+        "dispatch-test-session",
+      ]);
+    });
+    assertEquals(code, 0);
+    assertEquals(lines.length, 2);
+    assertEquals(JSON.parse(lines[0]).outcome, "idle");
+    assertEquals(JSON.parse(lines[1]).outcome, "idle");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("main: loop && !observe で --max-cycles 0 は exit 0", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    let code = -1;
+    const lines = await captureConsoleLog(async () => {
+      code = await main([
+        "--loop",
+        "true",
+        "--max-cycles",
+        "0",
+        "--state-dir",
+        `${dir}/.task-pipeline`,
+      ]);
+    });
+    assertEquals(code, 0);
+    assertEquals(lines, []);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("main: loop && !observe で --max-cycles の非整数は usage エラー", async () => {
+  const lines = await captureConsoleLog(async () => {
+    const code = await main([
+      "--loop",
+      "true",
+      "--max-cycles",
+      "abc",
+      "--state-dir",
+      "/fake/.task-pipeline",
+    ]);
+    assertEquals(code, 1);
+  });
+  assertEquals(lines.length, 1);
+  assert(JSON.parse(lines[0]).error.includes('invalid --max-cycles: "abc"'));
+});
+
+Deno.test("main: loop && !observe で --interval-sec の非整数は usage エラー", async () => {
+  const lines = await captureConsoleLog(async () => {
+    const code = await main([
+      "--loop",
+      "true",
+      "--interval-sec",
+      "abc",
+      "--state-dir",
+      "/fake/.task-pipeline",
+    ]);
+    assertEquals(code, 1);
+  });
+  assertEquals(lines.length, 1);
+  assert(JSON.parse(lines[0]).error.includes('invalid --interval-sec: "abc"'));
 });
 
 Deno.test("main --observe --replay-next: 標準出力にのみ書き、.task-pipeline/driver/ を作らない (受け入れ条件3,6)", async () => {
@@ -2371,6 +2731,85 @@ Deno.test("main --observe --loop: SIGINT を送ると進行中のサイクル完
         rejectTimeout(
           new Error("SIGINT 後 3 秒以内にプロセスが終了しなかった"),
         ),
+      3000,
+    );
+    try {
+      const status = await Promise.race([child.status, timeoutPromise]);
+      assertEquals(status.success, true);
+      assertEquals(status.code, 0);
+    } finally {
+      clearTimeout(timer);
+      await child.stdout.cancel().catch(() => {});
+      await child.stderr.cancel().catch(() => {});
+    }
+  } finally {
+    await Deno.remove(scratch, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("main --loop without --observe: SIGINT で進行中のサイクル完了後に正常終了する", async () => {
+  const scratch = await Deno.makeTempDir({
+    prefix: "pipeline-driver-dispatch-sigint-",
+  });
+  const stateDir = `${scratch}/.task-pipeline`;
+  await Deno.mkdir(stateDir, { recursive: true });
+  await Deno.writeTextFile(
+    `${stateDir}/state.json`,
+    JSON.stringify({
+      tracker: "gh",
+      source: "",
+      updated_at: new Date().toISOString(),
+      queue: [],
+      candidates: [],
+      relisted: [],
+      promoted: [],
+      completed: [],
+      withdrawn_branches: [],
+      history: [],
+      history_archived: 0,
+      schema_version: 2,
+    }),
+  );
+  try {
+    const args = [
+      new URL("./pipeline-driver.ts", import.meta.url).pathname,
+      "--state-dir",
+      stateDir,
+      "--session",
+      "dispatch-sigint-session",
+      "--loop",
+      "true",
+      "--interval-sec",
+      "5",
+    ];
+    const cmd = new Deno.Command(Deno.execPath(), {
+      args: [
+        "run",
+        "--allow-read",
+        "--allow-write",
+        "--allow-env",
+        "--allow-run",
+        ...args,
+      ],
+      stdout: "piped",
+      stderr: "piped",
+    });
+    const child = cmd.spawn();
+    const reader = child.stdout.getReader();
+    const decoder = new TextDecoder();
+    let buffered = "";
+    while (!buffered.includes("\n")) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("最初のサイクル完了前に stdout が閉じた");
+      buffered += decoder.decode(value, { stream: true });
+    }
+    reader.releaseLock();
+    child.kill("SIGINT");
+
+    const { promise: timeoutPromise, reject: rejectTimeout } = Promise
+      .withResolvers<never>();
+    const timer = setTimeout(
+      () => rejectTimeout(new Error("SIGINT 後3秒以内に終了しなかった")),
       3000,
     );
     try {
