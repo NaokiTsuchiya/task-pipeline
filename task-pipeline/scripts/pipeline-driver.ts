@@ -85,46 +85,8 @@ import {
   requireFlag,
   requireIntFlag,
 } from "./state-flags.ts";
-
-// ---------------------------------------------------------------------------
-// タスクの class (agent-launch.md「タスクの class」)
-// ---------------------------------------------------------------------------
-
-export type TaskClass = "trivial" | "standard" | "high";
-
-/**
- * frontmatter ブロック (`sed -n '2,/^---$/p'` に相当する行の並び) から class を導く。
- * 両方立っていたら `high` を採る (保守側)。**Deno API を呼ばない純粋関数**。
- */
-export function deriveTaskClass(frontmatterBlock: string): TaskClass {
-  const lines = frontmatterBlock.split("\n").map((line) => line.trim());
-  const hasHigh = lines.includes("risk: high");
-  const hasLight = lines.includes("gate: light");
-  if (hasHigh) return "high";
-  if (hasLight) return "trivial";
-  return "standard";
-}
-
-/**
- * タスクファイルを読んで class を導く。frontmatter が読めない・閉じていないときは
- * `standard` に落とす (agent-launch.md「タスクの class」の規定どおり)。
- */
-export async function readTaskClass(taskMdPath: string): Promise<TaskClass> {
-  let text: string;
-  try {
-    text = await Deno.readTextFile(taskMdPath);
-  } catch {
-    return "standard";
-  }
-  const lines = text.split("\n");
-  if (lines[0]?.trim() !== "---") return "standard";
-  const closingOffset = lines.slice(1).findIndex((line) =>
-    line.trim() === "---"
-  );
-  if (closingOffset === -1) return "standard";
-  const block = lines.slice(1, 1 + closingOffset).join("\n");
-  return deriveTaskClass(block);
-}
+import { readTaskClass } from "./task-policy.ts";
+import type { TaskClass } from "./task-policy.ts";
 
 // ---------------------------------------------------------------------------
 // provider・model の解決 (agent-launch.md「provider・model・mode の解決手順」)

@@ -17,6 +17,11 @@ None) でも同じ `None` を返すため、区別しないと「フィールド
 JSON null として書いた」が集計上取り違えられる。値として null を書くのは仕様上の
 持ち越し無し (`status: "none"`) の表現ではないので、これは書式違反として malformed に落とす。
 
+シェル判定 (`audit.mode == "shell"`) を分母から外す理由: あれはコマンドの終了コードだけで決まる
+機械判定で、一括性の規律も持ち越しの概念も持たない。分母に混ぜると「LLM 検証エージェントが
+持ち越しの理由を書いたか」という指標が、書きようのない判定で薄まる。件数は `shell-check` として
+別に出す。
+
 phase の束ね方は判定 JSON 本文の "phase" キーを使う (ファイル名の phase 部分は使わない)。
 `collect-task-metrics.py` の list_fail_verdicts と同じ理由 — pr_fix/rebase_fix はファイル名が
 `<phase>-<seq>-<attempt>.json` の3要素になり、ファイル名 basename の先頭トークンだけでは
@@ -82,6 +87,13 @@ def scan(repo_root):
             if attempt == 0:
                 counts['first_attempt'] += 1
                 continue
+            # シェル判定 (audit.mode == "shell") はコマンドの終了コードだけで決まる機械判定で、
+            # 一括性の規律も carryover の概念も持たない。分母に入れると
+            # 「LLM 検証エージェントが持ち越しの理由を書いたか」という指標が汚れる。
+            audit = data.get('audit')
+            if isinstance(audit, dict) and audit.get('mode') == 'shell':
+                counts['shell_check'] += 1
+                continue
 
             counts['denominator'] += 1
             phase = data.get('phase')
@@ -106,6 +118,7 @@ def scan(repo_root):
         'unnumbered': counts['unnumbered'],
         'first_attempt': counts['first_attempt'],
         'denominator': counts['denominator'],
+        'shell_check': counts['shell_check'],
         'no_field': counts['no_field'],
         'malformed': counts['malformed'],
         'status_counts': dict(status_counts),
@@ -120,6 +133,7 @@ def format_report(result):
     lines.append(f"not-FAIL:       {result['not_fail']}")
     lines.append(f"unnumbered:     {result['unnumbered']}")
     lines.append(f"first-attempt:  {result['first_attempt']}")
+    lines.append(f"shell-check:    {result['shell_check']}")
     lines.append(f"denominator (attempt>0 FAIL): {result['denominator']}")
     lines.append(f"no-carryover-field: {result['no_field']}")
     lines.append(f"malformed:      {result['malformed']}")

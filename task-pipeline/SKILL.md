@@ -222,7 +222,7 @@ Return only what the adapter file specifies for this operation.
    ```
    sed -n '2,/^---$/p' <tasks/<id>.md の絶対パス> | grep -Fxq 'risk: high'
    ```
-   **この結果で state.json を書かない** — risk 宣言はワークフロー (フェーズ列とゲートの数) を変えず、provider・model の選択にだけ効き、その導出は起動のたびに `playbooks/agent-launch.md`「タスクの class」が同じ frontmatter からやり直す (状態に持たせない)。ここで grep するのは観測のためである: `mark in_progress` の応答の `risk_declared` と**この grep の結果が食い違ったら両方の値を history に書く** (`gate_declared` の食い違いと同じ理由)。
+   **この結果で state.json を書かない** — risk 宣言はワークフロー (フェーズ列とゲートの数) を変えず、provider・model の選択と `audit_mode` の床 (上記「シェル判定 (Shell-Check ゲート)」) にだけ効き、その導出は起動のたびに `playbooks/agent-launch.md`「タスクの class」と `scripts/task-policy.ts` が同じ frontmatter からやり直す (状態に持たせない)。ここで grep するのは観測のためである: `mark in_progress` の応答の `risk_declared` と**この grep の結果が食い違ったら両方の値を history に書く** (`gate_declared` の食い違いと同じ理由)。
 2. **タスク専用の worktree を作る** (`playbooks/worktree.md`)。作れなかった場合はそこに書いたとおりに扱う。
 3. 実行エージェントを **background で 1 体** 起動する (**provider・model・mode と経路と起動パラメータは起動の直前に `playbooks/agent-launch.md` で決める** — 下のプロンプト文面は変えない)。**同期起動 (完了まで呼び出し元をブロックする起動) はしない** — background 起動と、実行エージェントの停止をポーリングで検知する経路 (下記手順4) の組み合わせで、`paseo loop` のようにイテレーション境界がセッション境界になる環境でも停止検知が成立する (`playbooks/agent-launch.md` の役割の表、`docs/loop-session-orphan-2026-08.md`)。プロンプトはこの 5 行のみ:
    ```
@@ -247,7 +247,7 @@ Return only what the adapter file specifies for this operation.
    - `BLOCKED` → 即座にタスクを blocked にする (リトライしない)。`state.ts block --id <id> --reason <理由>` を呼び (`run` は消え `session` は null に戻る — 実行エージェントはもう居ない)、アダプタで `mark <id> blocked <理由>`、次のタスクは次イテレーションに回す。
    - `DONE` で、`<name>` が state.json の `run.phase` と一致 → 検証ゲートへ。不一致 (プロトコル行の重複再送など) → 無視する。
    - `REBASE-CONFLICT — <パス>` → 載せ直しが衝突で止まった。`run.phase` が `finalize` なら (PR を出す・押し直す直前の載せ直し) `playbooks/merge-recovery.md` の「コンフリクトのトリアージ」の**手順 3 だけ**を行い、その結果を持って同じ手順書の「解決サイクル」の**「finalize から入る経路」**へ合流する (**手順 4・5 の `rebase-request` は呼ばない** — 前提が `progress==resting` なので、running のタスクでは必ず `conflict` で失敗する。理由と代わりの手順は同節)。`run.phase` が `rebase_fix` なら同じ手順書の「解決サイクル」の諦め方に入る。**どちらでも blocked にはしない。**
-6. **検証ゲート**: 検証エージェントを同期起動する (**provider・model・mode と経路は起動・再開の直前に `playbooks/agent-launch.md` で決める** — この役割だけは Paseo 経路が第一候補で、現行ハーネス経路での subagent_type は `task-pipeline-verifier` である。Paseo 経路で起動・再開した際はメインセッションに開始通知を 1 行出力する — `playbooks/agent-launch.md`)。**`next` の `tasks[].gate.reuse_verifier` が agentId を返せば、その検証エージェントを再開する** (下記「再開時のプロンプト」と「再開の経路」)。**null なら、次のとおりフレッシュに新規起動する。** 起動前に `state.ts verdict-path --id <id>` を 1 回呼び、返る `path` をそのまま verifier に渡す (**このパスを自分で作らない** — フェーズ・試行回数・修正/解決サイクルの連番からの導出はすべて CLI の内側にある)。読み取り専用なので state.json は変わらない:
+6. **検証ゲート**: まず **シェル判定** を 1 回試す — `state.ts verdict-path --id <id>` の後に `shell-check.ts` を呼び (下記「シェル判定 (Shell-Check ゲート)」)、応答の `route` で分岐する。`shell` なら判定はそこで確定し、この手順の残り (検証エージェントの起動・再開) は行わない。`llm` なら以下のとおり検証エージェントを同期起動する (**provider・model・mode と経路は起動・再開の直前に `playbooks/agent-launch.md` で決める** — この役割だけは Paseo 経路が第一候補で、現行ハーネス経路での subagent_type は `task-pipeline-verifier` である。Paseo 経路で起動・再開した際はメインセッションに開始通知を 1 行出力する — `playbooks/agent-launch.md`)。**`next` の `tasks[].gate.reuse_verifier` が agentId を返せば、その検証エージェントを再開する** (下記「再開時のプロンプト」と「再開の経路」)。**null なら、次のとおりフレッシュに新規起動する。** 起動前に `state.ts verdict-path --id <id>` を 1 回呼び、返る `path` をそのまま verifier に渡す (**このパスを自分で作らない** — フェーズ・試行回数・修正/解決サイクルの連番からの導出はすべて CLI の内側にある)。読み取り専用なので state.json は変わらない:
    ```
    You are a fresh, independent verifier.
    Read ~/.claude/skills/task-pipeline/references/verifier.md and follow it.
@@ -298,8 +298,23 @@ Return only what the adapter file specifies for this operation.
          - **更新時の通知** (`notify` が `update`): 最初の 1 回と同じ制約 (`PushNotification`, `status: "proactive"`, 200 字未満・1 行・markdown 無し、**CI の状態や検証の結果は書かない**) を引き継いだうえで、次を満たす: 先頭付近に**更新であって新規作成ではないと判別できる語**を置く (例: `更新`。レビュアーが「もう見た PR か」を一目で判断できるようにするため) / **PR URL を含める** / 何が変わったかを 1 語句で添える — `fix_count` が 1 以上なら対応した指摘の件数、衝突解消からの復帰なら載せ直し先。例: `<id> 更新 (指摘 <fix_count> 件対応): <PR URL>` / `<id> 更新 (載せ直し → <base>): <PR URL>`。**素の force push (`playbooks/merge-recovery.md` の「残った PR を新しい基点へ載せ直す」) では送らない** — 詳細と理由はその節に書いてある。
    - **FAIL** → (判定 JSON は verifier が起動時に渡した verdict path へ既に書いている — オーケストレータは書かない) `state.ts phase-fail --id <id> --phase <phase> --expect-attempts <イテレーション冒頭の `next` が返した `tasks[].gate.attempts`> --verifier <この検証エージェントの agentId> --session <自分の id>` を呼んで `attempts` を +1 する (`--expect-attempts` は「この FAIL がどの判定ラウンドに対するものか」の宣言。**`conflict` なら同じ session id の別インスタンスが同じラウンドを既に落としている**ので、二重加算しないよう自分の判定は捨て、このタスクの続きは次のイテレーションの `next` に従う)。実行エージェントへ「Fix required. Read required_fixes from `<verdict path の絶対パス>` and address them in phase `<phase>`.」を送る (送信手段は手順 4 のとおり経路で決まる) (required_fixes の中身をそのまま転記せず、ファイルのパスだけを渡す)。修正・再停止後の再検証は、**`next` の `tasks[].gate.reuse_verifier` が agentId を返したときだけ、その検証エージェントを再開する** (上記「再開時のプロンプト」と「再開の経路」)。null なら上記のとおり新規に (フレッシュに) 起動する。再開が 2 段とも通らなかったら**同じ内容で新規起動し**、history に「verifier 再開失敗 — フレッシュ起動」を1行残す。
 
+### シェル判定 (Shell-Check ゲート)
+`state.ts verdict-path --id <id>` で判定ファイルの位置を取った後、**フェーズを問わず 1 回**次を呼ぶ。どの class・どのフェーズが機械判定の対象かは CLI の内側にあり、**ここに条件を書き写さない** (`state.ts verdict-path` と同じ流儀 — 導出の正は 1 か所だけに置く):
+```
+deno run --no-prompt --allow-read=<state dir>,<worktree の絶対パス> --allow-write=<state dir> --allow-run ~/.claude/skills/task-pipeline/scripts/shell-check.ts --state-dir <.task-pipeline の絶対パス> --id <id> --verdict-path <verdict-path が返した path>
+```
+応答の `route` で分岐する:
+- **`{"route": "llm", "audit_mode": "single"|"dual", "reason": ...}`** → 機械判定の対象ではない (散文の成果物を判定するフェーズ、`standard`/`high` の class、`audit_mode` 宣言、信頼済みマニフェストが無い等)。**手順 6 の残りをそのまま行う** (検証エージェントを起動・再開する)。`reason` は history に 1 行残す。
+- **`{"route": "shell", "verdict": "PASS", ...}`** → 判定はこれで確定。**上の PASS 分岐と同じ処理をする** (`advance` → 実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」→ 列末なら finalize / `ship`)。判定 JSON は CLI が verdict path へ既に書いている。
+- **`{"route": "shell", "verdict": "FAIL", ...}`** → **上の FAIL 分岐と同じ処理をするが、`--verifier` と `--session` は渡さない** (`state.ts phase-fail --id <id> --phase <phase> --expect-attempts <n>` だけ)。検証エージェントが存在しないので `reuse_verifier` を立ててはならない — 立てると次の再検証が「居ないエージェントの再開」を試みる。実行エージェントへ送る文面は現行と同一 (「Fix required. Read required_fixes from `<verdict path の絶対パス>` and address them in phase `<phase>`.」)。
+- **`{"route": "shell", "verdict": "UNAVAILABLE", ...}`** → **PASS でも FAIL でもない。** チェックが実行できていない (git が起動できない、コマンドが spawn できない等) ので、`advance` も `phase-fail` も呼ばない。`state.ts block --id <id> --reason <判定 JSON の reasons の 1 行>` を呼び、アダプタで `mark <id> blocked <理由>`、`PushNotification` を 1 本送る (`playbooks/agent-launch.md`「どちらの経路も使えないとき」と同じ扱い。ループは止めない)。**代わりに検証エージェントを起動して埋め合わせてはならない** — 実行されていないチェックを別の判断で PASS にすることになる。
+- CLI 自体がエラーで終わった (`{"error": ...}` と非ゼロ終了) → シェル判定は無かったものとして扱い、`llm` と同じく検証エージェントを起動する。`error` と `message` を history に 1 行残す。
+
+プロジェクト側の設定は**リポジトリルート直下の `TASK_PIPELINE_CHECKS.json`** で、置いていないプロジェクトではこの節は不発になる (常に `route: "llm"`)。中身の契約は `scripts/shell-check-manifest.ts` にある。**このファイルは base スナップショット (`git show <base>:TASK_PIPELINE_CHECKS.json`) から読まれる** — 実行エージェントが自分のブランチでチェックを差し替えられないようにするためで、オーケストレーターがここへ手を入れることはない。
+
 ### 検証ゲートの絶対規則
 フェーズ成果物は、**このイテレーションでオーケストレーターが起動または再開した検証エージェント**の PASS なしには、**どんな理由があっても** 次フェーズへ進めない。実行エージェントの self-check、過去の PASS、成果物への自分の印象は代替にならない。 **再開してよいのは、直前に同じフェーズで FAIL を出した検証エージェントだけである** (`next` が返す `reuse_verifier`)。フェーズが進んだら再開しない — 別フェーズの判断は別の検証である。再開しても**実行エージェントのコンテキストは一度も入らない**ので独立性は保たれる (`references/verifier.md` が禁じているのは実行エージェントの作業経緯を知ることであって、verifier が自分の前回の判断を覚えていることではない)。
+**シェル判定 (上記) の PASS はこの規則を満たす** — 機械が実際にコマンドを走らせた証跡が判定 JSON に残っており、LLM の意見より強い証明である。満たさないのは `UNAVAILABLE` で、これは PASS ではないので前進させない。どちらの経路でも、**判定なしに次フェーズへ進める例外は無い。**
 
 ### リトライ上限
 1 フェーズにつき検証は最大 3 回 (初回 + リトライ 2 回)。3 回目も FAIL ならタスクを blocked にする: `state.ts block --id <id> --reason <最後の FAIL 理由>` を呼び (`run` は消え `session` は null に戻る)、アダプタで `mark <id> blocked <理由>`、成果物と判定はそのまま残す。**ループは止めず**、次のタスクを次イテレーションで進める。
