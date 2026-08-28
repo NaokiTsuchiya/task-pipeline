@@ -2,7 +2,7 @@
 //
 // state CLI の **層 4 — verb 名から実装への表**。受理するフラグの一覧 (ALLOWED_FLAGS) と
 // cmd 実装への割り当て (HANDLERS) の 2 つだけを持ち、**この 2 つのキー集合が
-// ディスパッチ集合そのもの**である (49 verb = VERB_SPEC 33 + LEDGER_VERBS 16)。
+// ディスパッチ集合そのもの**である (50 verb = VERB_SPEC 33 + LEDGER_VERBS 17)。
 //
 // 分けてある理由: verb を 1 つ足す/消すときに触るのがこのファイルだけになり、
 // 「フラグ表には有るのに実装が無い」「実装は有るのに契約文書に無い」というずれが
@@ -13,6 +13,7 @@ import type { VerbName } from "./state-transitions-v2.ts";
 import {
   cmdCandidatesDrop,
   cmdCandidatesSet,
+  cmdCleanupResolve,
   cmdControllerLeaseSet,
   cmdGet,
   cmdHistoryAppend,
@@ -70,7 +71,7 @@ import {
 // 語彙 — verb 名とフラグ名を string ではなく宣言から導いたリテラルユニオンで持つ
 //
 // **`Verb` は新しい語彙ではなく、既にある 2 つの宣言の和である**:
-// `VerbName` (= VERB_SPEC のキー 33 個) と `LedgerVerb` (= LEDGER_VERBS 16 個)。
+// `VerbName` (= VERB_SPEC のキー 33 個) と `LedgerVerb` (= LEDGER_VERBS 17 個)。
 // ディスパッチ集合の定義そのものを型にしているので、
 //
 //   - 下の 2 つの表を `Record<Verb, …>` で受けると、**verb の書き落としも綴り違いも
@@ -109,6 +110,7 @@ export const FLAG_NAMES = [
   "dead-tasks",
   "drop-withdrawn-branch",
   "epoch",
+  "error",
   "errors-inc",
   "errors-reset",
   "executor",
@@ -207,6 +209,7 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
     "clear",
     ...LOCK_FLAGS,
   ]),
+  "cleanup-resolve": new Set(["state-dir", "id", "error", ...LOCK_FLAGS]),
   // --- 進行系 (設計2.1) ---
   "approve": new Set(["state-dir", "id", "title", ...LOCK_FLAGS]),
   "claim": new Set(["state-dir", "id", "session", ...LOCK_FLAGS]),
@@ -355,6 +358,7 @@ export const HANDLERS: Record<Verb, CmdHandler> = {
   "relisted-drop": cmdRelistedDrop,
   "stalled-set": cmdStalledSet,
   "controller-lease-set": cmdControllerLeaseSet,
+  "cleanup-resolve": cmdCleanupResolve,
   // 進行系
   "approve": cmdApprove,
   "claim": cmdClaim,

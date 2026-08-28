@@ -349,6 +349,7 @@ function buildState(
     promoted: [],
     completed: [],
     withdrawn_branches: [],
+    cleanup_outbox: [],
     history: [],
     history_archived: 0,
     schema_version: 2,
@@ -1911,7 +1912,7 @@ const REACH_VARIANTS: readonly ReachVariant[] = [
       applyShip(i, x, s, { commits: 1, ...SHIP_GROUP, ref: COMMIT_REF }).state,
   },
   { label: "merged", run: (i, x, s) => applyMerged(i, x, s) },
-  { label: "withdraw", run: (i, x, s) => applyWithdraw(i, x, s) },
+  { label: "withdraw", run: (i, x, s) => applyWithdraw(i, x, s, NOW0) },
   { label: "withdraw-asked", run: (i, x, s) => applyWithdrawAsked(i, x, s) },
   {
     label: "fix-request",
@@ -2860,6 +2861,62 @@ Deno.test("T-V2T-PRECOND-3: retire prunes completed entries older than 24h", () 
     out.completed.map((e) => e.id),
     ["edge", "recent", "bogus", "t-1"],
   );
+});
+
+// T-V2T-CLEANUP (gh-157): retire / withdraw が Cleanup Intent を同じ書き込みで積む
+
+Deno.test("T-V2T-CLEANUP-1: retire は queue 離脱と同じ戻り値に intent を積む", () => {
+  const merged = withSession(buildItem(P_RESTING, A_NODE_MERGED), null);
+  const out = applyRetire(merged, 0, buildState(merged), NOW);
+  assertEquals(out.queue.length, 0);
+  assertEquals(out.cleanup_outbox, [{
+    id: "t-1",
+    reason: "retire",
+    requested_at: NOW,
+    attempts: 0,
+    last_error: null,
+  }]);
+});
+
+Deno.test("T-V2T-CLEANUP-2: withdraw も同じ書き込みで intent を積む", () => {
+  const open = buildItem(P_RESTING, A_OPEN_IDLE);
+  const out = applyWithdraw(open, 0, buildState(open), NOW, "closed");
+  assertEquals(out.cleanup_outbox.map((e) => [e.id, e.reason]), [[
+    "t-1",
+    "withdraw",
+  ]]);
+});
+
+Deno.test("T-V2T-CLEANUP-3: 同じ id は積み増さず、失敗履歴も温存する", () => {
+  const merged = withSession(buildItem(P_RESTING, A_NODE_MERGED), null);
+  const state = buildState(merged, {
+    cleanup_outbox: [{
+      id: "t-1",
+      reason: "withdraw",
+      requested_at: "2026-07-01T00:00:00Z",
+      attempts: 2,
+      last_error: "archive failed",
+    }],
+  });
+  const out = applyRetire(merged, 0, state, NOW);
+  assertEquals(out.cleanup_outbox.length, 1, "重複して積まない");
+  assertEquals(out.cleanup_outbox[0].reason, "withdraw", "先に積んだ方が残る");
+  assertEquals(out.cleanup_outbox[0].attempts, 2, "失敗履歴を消さない");
+});
+
+Deno.test("T-V2T-CLEANUP-4: 別 id は別エントリとして積まれる", () => {
+  const merged = withSession(buildItem(P_RESTING, A_NODE_MERGED), null);
+  const state = buildState(merged, {
+    cleanup_outbox: [{
+      id: "t-other",
+      reason: "retire",
+      requested_at: NOW,
+      attempts: 0,
+      last_error: null,
+    }],
+  });
+  const out = applyRetire(merged, 0, state, NOW);
+  assertEquals(out.cleanup_outbox.map((e) => e.id), ["t-other", "t-1"]);
 });
 
 Deno.test("T-V2T-PRECOND-4: restore needs a relisted entry and drops it", () => {

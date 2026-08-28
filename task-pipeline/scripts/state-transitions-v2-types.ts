@@ -185,6 +185,18 @@ export interface WithdrawnBranchEntry {
   readonly reason: string;
 }
 
+/** `retire` / `withdraw` が台帳へ積む後始末の意思 (gh-157)。**state.ts は意思を記録する
+ * だけで外部を呼ばない** — 実際の `paseo workspace archive` は Driver のスイープが行い、
+ * 終わったら `cleanup-resolve` でエントリが落ちる。`attempts`/`last_error` はスイープが
+ * 失敗した回数と直近の理由で、上限に達したエントリは残置して人が気づけるようにする。 */
+export interface CleanupIntent {
+  readonly id: string;
+  readonly reason: "retire" | "withdraw";
+  readonly requested_at: string;
+  readonly attempts: number;
+  readonly last_error: string | null;
+}
+
 /** Driver (pipeline-driver.ts) が握る単一制御権の記録。`session` は再起動を跨いで
  * 安定な driver 固有の id、`epoch` はプロセス起動時刻 (ms) で、後発プロセスが先発を
  * 追い出すための fencing token である。 */
@@ -204,6 +216,9 @@ export interface V2State {
   readonly promoted: readonly string[];
   readonly completed: readonly CompletedEntry[];
   readonly withdrawn_branches: readonly WithdrawnBranchEntry[];
+  // 後始末の意思 (gh-157)。スキーマ上は任意キーだが normalizeStateV2 が全書き込み経路の
+  // 入口で [] 埋めするので、ここでは必須にできる (withdrawn_branches と同じパターン)。
+  readonly cleanup_outbox: readonly CleanupIntent[];
   readonly history: readonly string[];
   // 退避済み history 行数の累計 (gh-58)。スキーマ上は任意キー (この機能導入前の
   // 既存 v2 state.json には無い) だが、normalizeStateV2 が全書き込み経路の入口で

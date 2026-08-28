@@ -237,7 +237,12 @@ export async function cmdRetire(
     lockOpts(flags),
     (item, index, state) => applyRetire(item, index, state, nowIso()),
   );
-  return { ok: true, id, completed: next.completed.length };
+  return {
+    ok: true,
+    id,
+    completed: next.completed.length,
+    cleanup_outbox: next.cleanup_outbox.length,
+  };
 }
 
 // --- 完了系 (設計2.2) -------------------------------------------------------
@@ -305,13 +310,18 @@ export async function cmdWithdraw(
 ): Promise<Record<string, unknown>> {
   const id = requireFlag(flags, "id");
   const note = flags.get("note");
-  await withQueueLock(
+  const next = await withQueueLock(
     stateDir,
     id,
     lockOpts(flags),
-    (item, index, state) => applyWithdraw(item, index, state, note),
+    (item, index, state) => applyWithdraw(item, index, state, nowIso(), note),
   );
-  return { ok: true, id, artifact: "withdrawn" };
+  return {
+    ok: true,
+    id,
+    artifact: "withdrawn",
+    cleanup_outbox: next.cleanup_outbox.length,
+  };
 }
 
 export async function cmdWithdrawAsked(

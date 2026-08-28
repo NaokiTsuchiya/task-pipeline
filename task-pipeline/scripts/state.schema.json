@@ -289,6 +289,18 @@
       "required": ["id", "done_at"],
       "additionalProperties": false
     },
+    "cleanupIntent": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "reason": { "type": "string", "enum": ["retire", "withdraw"] },
+        "requested_at": { "type": "string" },
+        "attempts": { "type": "integer", "minimum": 0 },
+        "last_error": { "type": ["string", "null"] }
+      },
+      "required": ["id", "reason", "requested_at", "attempts", "last_error"],
+      "additionalProperties": false
+    },
     "candidate": {
       "type": "object",
       "properties": {
@@ -347,6 +359,7 @@
     "relisted": { "type": "array", "items": { "$ref": "#/$defs/relistedEntry" } },
     "promoted": { "type": "array", "items": { "type": "string" } },
     "withdrawn_branches": { "type": "array", "items": { "$ref": "#/$defs/withdrawnBranch" } },
+    "cleanup_outbox": { "type": "array", "items": { "$ref": "#/$defs/cleanupIntent" } },
     "history": { "type": "array", "items": { "type": "string" } },
     "history_archived": { "type": "integer", "minimum": 0 },
     "controller_lease": { "$ref": "#/$defs/controllerLease" },

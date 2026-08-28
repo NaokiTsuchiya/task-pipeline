@@ -1,6 +1,6 @@
 // task-pipeline/scripts/state-ledger-v2.test.ts
 //
-// state-ledger-v2.ts (帳簿系 16 verb の純関数群) の in-process テスト。
+// state-ledger-v2.ts (帳簿系 17 verb の純関数群) の in-process テスト。
 //
 //   L-INIT   init の 4 分岐 (新規作成 / 移行 / no-op / 読めないバージョン)
 //   L-NORM   読み込み時の正規化と finalizeStateV2
@@ -8,6 +8,7 @@
 //   L-STALL  stalled-set の since の扱い
 //   L-SESS   heartbeat のしきい値 (厳密不等号)
 //   L-LEASE  controller-lease-set の取得 (epoch fencing) と解放 (照合)
+//   L-CLEAN  cleanup-resolve の決着 (削除 / 失敗の記録 / 未知 id)
 //   L-DECL   LEDGER_VERBS の宣言
 //
 // 実行: deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
@@ -16,6 +17,7 @@
 import {
   applyCandidatesDropV2,
   applyCandidatesSetV2,
+  applyCleanupResolveV2,
   applyControllerLeaseSetV2,
   applyHistoryAppendV2,
   applyInitV2,
@@ -172,6 +174,18 @@ Deno.test("L-NORM-1: normalizeStateV2 fills a missing withdrawn_branches only", 
   assert(
     normalizeStateV2(withEntries) as unknown === withEntries,
     "an existing withdrawn_branches must be left untouched",
+  );
+});
+
+Deno.test("L-NORM-1b: normalizeStateV2 fills a missing cleanup_outbox (gh-157)", () => {
+  const raw = { ...buildFreshStateV2("gh", "o/r", NOW) };
+  delete raw.cleanup_outbox;
+  assertEquals(normalizeStateV2(raw).cleanup_outbox, []);
+  // 3 つの任意キーがそろっていれば同一参照を返す (新しいオブジェクトを作らない)
+  const complete = { ...buildFreshStateV2("gh", "o/r", NOW) };
+  assert(
+    normalizeStateV2(complete) as unknown === complete,
+    "an existing cleanup_outbox must be left untouched",
   );
 });
 
@@ -473,10 +487,11 @@ Deno.test("L-LEASE-9: an unmatched release (no session/epoch) always clears", ()
 // L-DECL
 // ---------------------------------------------------------------------------
 
-Deno.test("L-DECL-1: LEDGER_VERBS lists exactly the 16 bookkeeping verbs", () => {
+Deno.test("L-DECL-1: LEDGER_VERBS lists exactly the 17 bookkeeping verbs", () => {
   assertEquals([...LEDGER_VERBS].sort(), [
     "candidates-drop",
     "candidates-set",
+    "cleanup-resolve",
     "controller-lease-set",
     "get",
     "history-append",
@@ -492,4 +507,60 @@ Deno.test("L-DECL-1: LEDGER_VERBS lists exactly the 16 bookkeeping verbs", () =>
     "validate",
     "verdict-path",
   ]);
+});
+
+// L-CLEAN (gh-157)
+
+function outboxState(
+  entries: { id: string; attempts?: number; last_error?: string | null }[],
+): V2State {
+  return {
+    ...buildFreshStateV2("gh", "o/r", NOW),
+    cleanup_outbox: entries.map((e) => ({
+      id: e.id,
+      reason: "retire" as const,
+      requested_at: NOW,
+      attempts: e.attempts ?? 0,
+      last_error: e.last_error ?? null,
+    })),
+  } as unknown as V2State;
+}
+
+Deno.test("L-CLEAN-1: error 無しの決着はエントリを消す", () => {
+  const next = applyCleanupResolveV2(
+    outboxState([{ id: "gh-1" }, { id: "gh-2" }]),
+    "gh-1",
+    null,
+  );
+  assertEquals(next.cleanup_outbox.map((e) => e.id), ["gh-2"]);
+});
+
+Deno.test("L-CLEAN-2: error 付きは消さずに attempts を進めて last_error を置く", () => {
+  const once = applyCleanupResolveV2(
+    outboxState([{ id: "gh-1" }]),
+    "gh-1",
+    "x",
+  );
+  assertEquals(once.cleanup_outbox.length, 1, "残す");
+  assertEquals(once.cleanup_outbox[0].attempts, 1);
+  assertEquals(once.cleanup_outbox[0].last_error, "x");
+
+  const twice = applyCleanupResolveV2(once, "gh-1", "y");
+  assertEquals(twice.cleanup_outbox[0].attempts, 2, "回数は積み上がる");
+  assertEquals(twice.cleanup_outbox[0].last_error, "y", "直近の理由で上書き");
+});
+
+Deno.test("L-CLEAN-3: outbox に無い id は missing", () => {
+  let code: string | null = null;
+  try {
+    applyCleanupResolveV2(outboxState([{ id: "gh-1" }]), "gh-9", null);
+  } catch (e) {
+    code = e instanceof CliErrorV2 ? e.code : "other";
+  }
+  assertEquals(code, "missing");
+});
+
+Deno.test("L-CLEAN-4: buildFreshStateV2 は空の cleanup_outbox を持つ", () => {
+  const fresh = buildFreshStateV2("gh", "o/r", NOW);
+  assertEquals(fresh.cleanup_outbox, []);
 });

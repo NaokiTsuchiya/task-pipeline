@@ -28,11 +28,14 @@ import {
   buildPaseoStopArgs,
   buildPaseoWaitArgs,
   buildPaseoWorkspaceArchiveArgs,
+  buildPaseoWorkspaceCreateArgs,
   buildSessionTouchStateFlags,
   buildSetExecutorStateFlags,
   buildSetWorktreeStateFlags,
   buildStateArgs,
   buildTouchExecutorStateFlags,
+  CLEANUP_MAX_ATTEMPTS,
+  type CleanupSweepResult,
   type CommandResult,
   type CommandRunner,
   type ControllerLease,
@@ -43,7 +46,7 @@ import {
   DRIVER_TAKEOVER_DEADLINE_SEC,
   type DriverContext,
   extractAgentId,
-  extractOwnedWorkspaceId,
+  extractCreatedWorkspaceId,
   FileHeartbeatWriter,
   findActiveDuplicates,
   type HeartbeatWriter,
@@ -60,13 +63,25 @@ import {
   readDesired,
   readOrCreateDriverSession,
   resolveProviderModel,
+  runCleanupSweep,
   runCycle,
   runDispatchLoop,
   runObserveCycle,
   runObserveLoop,
   selectObserveOperation,
   splitProviderModel,
+  SubprocessRunner,
 } from "./pipeline-driver.ts";
+import {
+  emptyWorkspaceFile,
+  markArchived,
+  parseWorkspaceFile,
+  pendingArchives,
+  readWorkspaceFile,
+  upsertWorkspaceEntry,
+  workspaceFilePathOf,
+  writeWorkspaceFile,
+} from "./paseo-workspace.ts";
 import type { TakeoverOperation } from "./pipeline-dispatch.ts";
 import type { NextTask } from "./state-next.ts";
 
@@ -325,6 +340,7 @@ Deno.test("buildPaseoRunArgs: agent-launch.md の起動パラメータ規則ど�
     mode: "bypassPermissions",
     prompt:
       'Resume from phase "research". Check existing artifacts in the run dir first.',
+    workspaceId: "wks_abc123",
   });
   assertEquals(args, [
     "run",
@@ -340,12 +356,16 @@ Deno.test("buildPaseoRunArgs: agent-launch.md の起動パラメータ規則ど�
     "/wt/gh-42",
     "--provider",
     "claude/claude-opus-4-1",
-    "--new-workspace",
-    "local",
+    "--workspace",
+    "wks_abc123",
     "--mode",
     "bypassPermissions",
     'Resume from phase "research". Check existing artifacts in the run dir first.',
   ]);
+  assert(
+    !args.includes("--new-workspace"),
+    "暗黙生成 (--new-workspace) の経路は残さない",
+  );
 });
 
 Deno.test("buildPaseoRunArgs: model が無ければ --provider は provider だけ、mode 無しなら --mode を省略", () => {
@@ -356,35 +376,37 @@ Deno.test("buildPaseoRunArgs: model が無ければ --provider は provider だ�
     model: null,
     mode: undefined,
     prompt: "go",
+    workspaceId: "wks_1",
   });
   assert(!args.includes("--mode"));
   assertEquals(args[args.indexOf("--provider") + 1], "junie");
 });
 
-Deno.test("buildPaseoRunArgs: newWorkspace は既定で local、明示指定で上書き可能", () => {
-  const defaultArgs = buildPaseoRunArgs({
-    id: "gh-1",
-    worktree: "/scratch",
-    provider: "omp",
-    model: null,
-    mode: "full",
-    prompt: "go",
-  });
+Deno.test("buildPaseoWorkspaceCreateArgs: isolation と worktree を渡して JSON で受ける", () => {
   assertEquals(
-    defaultArgs[defaultArgs.indexOf("--new-workspace") + 1],
-    "local",
+    buildPaseoWorkspaceCreateArgs({
+      id: "gh-1",
+      worktree: "/wt/gh-1",
+      isolation: "local",
+    }),
+    [
+      "workspace",
+      "create",
+      "--isolation",
+      "local",
+      "--path",
+      "/wt/gh-1",
+      "--title",
+      "task-pipeline executor gh-1",
+      "--json",
+    ],
   );
-  const withCustomWorkspace = buildPaseoRunArgs({
-    id: "gh-1",
-    worktree: "/scratch",
-    provider: "omp",
-    model: null,
-    mode: "full",
-    prompt: "go",
-    newWorkspace: "worktree",
-  });
   assertEquals(
-    withCustomWorkspace[withCustomWorkspace.indexOf("--new-workspace") + 1],
+    buildPaseoWorkspaceCreateArgs({
+      id: "gh-1",
+      worktree: "/wt/gh-1",
+      isolation: "worktree",
+    })[3],
     "worktree",
   );
 });
@@ -406,17 +428,41 @@ Deno.test("buildPaseoWorkspaceArchiveArgs", () => {
   ]);
 });
 
-Deno.test("extractOwnedWorkspaceId: Created workspace 行があれば workspace id を返す", () => {
-  const stdout =
-    'Created workspace wks_abc123 - myproj\n{"agentId":"agent-1","status":"running"}\n';
-  assertEquals(extractOwnedWorkspaceId(stdout), "wks_abc123");
+Deno.test("extractCreatedWorkspaceId: 応答の workspaceId をそのまま返す", () => {
+  assertEquals(
+    extractCreatedWorkspaceId(
+      '{"workspaceId":"wks_abc123","project":"p","isolation":"local"}',
+    ),
+    "wks_abc123",
+  );
 });
 
-Deno.test("extractOwnedWorkspaceId: 通知行が無ければ null (非所有 = caller の workspace を継承)", () => {
-  assertEquals(
-    extractOwnedWorkspaceId('{"agentId":"agent-1","status":"running"}'),
-    null,
-  );
+Deno.test("extractCreatedWorkspaceId: error 応答と workspaceId 欠落はどちらも投げる", () => {
+  let threwOnError = false;
+  try {
+    extractCreatedWorkspaceId(
+      '{"error":{"code":"WORKSPACE_CREATE_FAILED","message":"x"}}',
+    );
+  } catch {
+    threwOnError = true;
+  }
+  assert(threwOnError, "error 応答は DriverError");
+
+  let threwOnMissing = false;
+  try {
+    extractCreatedWorkspaceId('{"project":"p"}');
+  } catch {
+    threwOnMissing = true;
+  }
+  assert(threwOnMissing, "workspaceId 欠落は DriverError");
+
+  let threwOnGarbage = false;
+  try {
+    extractCreatedWorkspaceId("not json at all");
+  } catch {
+    threwOnGarbage = true;
+  }
+  assert(threwOnGarbage, "JSON が無ければ DriverError");
 });
 
 Deno.test("buildPaseoDuplicateCheckArgs: -a -g --label task-pipeline-task=<id>", () => {
@@ -677,6 +723,50 @@ function baseCtx(
   };
 }
 
+/** takeover が出る `next` 応答 (worktree は記録済み = git を呼ばない形)。 */
+function takeoverNext(id: string): Record<string, unknown> {
+  return {
+    tasks: [{
+      id,
+      actions: [{
+        kind: "takeover",
+        reason: "no-executor",
+        resume_phase: "research",
+        recheck_gate: false,
+        needs_worktree: false,
+        replaces: null,
+      }],
+    }],
+  };
+}
+
+/** 上と対になる `get` 応答。 */
+function takeoverState(id: string): Record<string, unknown> {
+  return {
+    queue: [{
+      id,
+      title: "t",
+      progress: "running",
+      run: {
+        kind: "initial",
+        gate: "full",
+        phase: "research",
+        attempts: 0,
+        executor: null,
+        executor_last_event_at: null,
+        takeover_at: null,
+        verifier: null,
+        verifier_session: null,
+      },
+      blocked_reason: null,
+      artifact: { state: "none" },
+      worktree: `/wt/${id}`,
+      base: "main",
+      session: "sess-self",
+    }],
+  };
+}
+
 Deno.test("runCycle/claim: due な claim 1件を state.ts claim で実行する", async () => {
   const runner = new StubRunner((cmd, args) => {
     const verb = stateVerbOf(args);
@@ -703,6 +793,9 @@ Deno.test("runCycle/takeover: worktree 済みタスクを paseo run で起動し
   const runner = new StubRunner((cmd, args) => {
     if (cmd === "paseo") {
       if (args[0] === "ls") return ok([]);
+      if (args[0] === "workspace" && args[1] === "create") {
+        return ok({ workspaceId: "wks_stub", isolation: "local" });
+      }
       if (args[0] === "run") {
         return ok({ agentId: "agent-new-1", status: "running" });
       }
@@ -755,7 +848,8 @@ Deno.test("runCycle/takeover: worktree 済みタスクを paseo run で起動し
     throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
   });
 
-  const result = await runCycle(baseCtx(runner));
+  const stateDir = await Deno.makeTempDir();
+  const result = await runCycle(baseCtx(runner, { stateDir }));
   assertEquals(result.op, "takeover");
   assertEquals(result.outcome, "launched");
   assertEquals(
@@ -783,10 +877,18 @@ Deno.test("runCycle/takeover: worktree 済みタスクを paseo run で起動し
     "bypassPermissions",
   );
   assertEquals(
-    runCall!.args.includes("--new-workspace") &&
-      runCall!.args[runCall!.args.indexOf("--new-workspace") + 1],
-    "local",
+    runCall!.args.includes("--workspace") &&
+      runCall!.args[runCall!.args.indexOf("--workspace") + 1],
+    "wks_stub",
+    "明示生成した workspace で起こす",
   );
+  const createIndex = runner.calls.findIndex((c) =>
+    c.cmd === "paseo" && c.args[0] === "workspace" && c.args[1] === "create"
+  );
+  const runIndex = runner.calls.findIndex((c) =>
+    c.cmd === "paseo" && c.args[0] === "run"
+  );
+  assert(createIndex !== -1 && createIndex < runIndex, "生成は起動より先");
 
   const setExecCall = runner.calls.find((c) =>
     stateVerbOf(c.args) === "set-executor"
@@ -801,10 +903,13 @@ Deno.test("runCycle/takeover: worktree 済みタスクを paseo run で起動し
     "agent-new-1",
   );
 });
-Deno.test("runCycle/takeover: ctx.paseoNewWorkspace で --new-workspace を上書きできる", async () => {
+Deno.test("runCycle/takeover: ctx.paseoWorkspaceIsolation で --isolation を上書きできる", async () => {
   const runner = new StubRunner((cmd, args) => {
     if (cmd === "paseo") {
       if (args[0] === "ls") return ok([]);
+      if (args[0] === "workspace" && args[1] === "create") {
+        return ok({ workspaceId: "wks_custom", isolation: "worktree" });
+      }
       if (args[0] === "run") {
         return ok({ agentId: "agent-custom-ws", status: "running" });
       }
@@ -825,119 +930,137 @@ Deno.test("runCycle/takeover: ctx.paseoNewWorkspace で --new-workspace を上�
         }],
       });
     }
-    if (verb === "get") {
-      return ok({
-        queue: [{
-          id: "gh-30",
-          status: "in_progress",
-          run: {
-            kind: "initial",
-            gate: "full",
-            phase: "research",
-            attempts: 0,
-            executor: null,
-            executor_last_event_at: null,
-            takeover_at: null,
-            verifier: null,
-            verifier_session: null,
-          },
-          blocked_reason: null,
-          artifact: { state: "none" },
-          worktree: "/wt/gh-30",
-          base: "main",
-          session: "sess-self",
-        }],
-      });
-    }
+    if (verb === "get") return ok(takeoverState("gh-30"));
     if (verb === "set-executor") {
       return ok({ ok: true, id: "gh-30", executor: "agent-custom-ws" });
     }
     throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
   });
 
+  const stateDir = await Deno.makeTempDir();
   const result = await runCycle(
-    baseCtx(runner, { paseoNewWorkspace: "worktree" }),
+    baseCtx(runner, { stateDir, paseoWorkspaceIsolation: "worktree" }),
   );
   assertEquals(result.outcome, "launched");
+  const createCall = runner.calls.find((c) =>
+    c.cmd === "paseo" && c.args[0] === "workspace" && c.args[1] === "create"
+  );
+  assert(createCall, "paseo workspace create が呼ばれているべき");
+  assertEquals(
+    createCall!.args[createCall!.args.indexOf("--isolation") + 1],
+    "worktree",
+  );
   const runCall = runner.calls.find((c) =>
     c.cmd === "paseo" && c.args[0] === "run"
   );
-  assert(runCall, "paseo run が呼ばれているべき");
   assertEquals(
-    runCall!.args[runCall!.args.indexOf("--new-workspace") + 1],
-    "worktree",
+    runCall!.args[runCall!.args.indexOf("--workspace") + 1],
+    "wks_custom",
   );
 });
 
-Deno.test("runCycle/takeover: owned workspace id は stdout/stderr どちらの Created workspace 行からも拾う", async () => {
+Deno.test("runCycle/takeover: 生成した workspace を runs/<id>/paseo-workspace.json に owned で記録する", async () => {
   const runner = new StubRunner((cmd, args) => {
     if (cmd === "paseo") {
       if (args[0] === "ls") return ok([]);
+      if (args[0] === "workspace" && args[1] === "create") {
+        return ok({ workspaceId: "wks_owned123", isolation: "local" });
+      }
       if (args[0] === "run") {
-        return {
-          code: 0,
-          stdout: JSON.stringify({
-            agentId: "agent-new-owned",
-            status: "running",
-          }),
-          // 実測 (paseo 0.4.0): Created workspace 通知は stderr に出る。
-          stderr: "Created workspace wks_owned123 - proj\nTip: ...\n",
-        };
+        return ok({ agentId: "agent-new-owned", status: "running" });
       }
       throw new Error(`unexpected paseo call: ${args.join(" ")}`);
     }
     const verb = stateVerbOf(args);
-    if (verb === "next") {
-      return ok({
-        tasks: [{
-          id: "gh-14",
-          actions: [{
-            kind: "takeover",
-            reason: "no-executor",
-            resume_phase: "research",
-            recheck_gate: false,
-            needs_worktree: false,
-            replaces: null,
-          }],
-        }],
-      });
-    }
-    if (verb === "get") {
-      return ok({
-        queue: [{
-          id: "gh-14",
-          title: "t",
-          progress: "running",
-          run: {
-            kind: "initial",
-            gate: "full",
-            phase: "research",
-            attempts: 0,
-            executor: null,
-            executor_last_event_at: null,
-            takeover_at: null,
-            verifier: null,
-            verifier_session: null,
-          },
-          blocked_reason: null,
-          artifact: { state: "none" },
-          worktree: "/wt/gh-14",
-          base: "main",
-          session: "sess-self",
-        }],
-      });
-    }
+    if (verb === "next") return ok(takeoverNext("gh-14"));
+    if (verb === "get") return ok(takeoverState("gh-14"));
     if (verb === "set-executor") {
       return ok({ ok: true, id: "gh-14", executor: "agent-new-owned" });
     }
     throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
   });
 
-  const result = await runCycle(baseCtx(runner));
+  const stateDir = await Deno.makeTempDir();
+  const result = await runCycle(baseCtx(runner, { stateDir }));
   assertEquals(result.outcome, "launched");
   assertEquals(
     (result.detail as Record<string, unknown>).workspaceId,
     "wks_owned123",
+  );
+
+  const file = await readWorkspaceFile(workspaceFilePathOf(stateDir, "gh-14"));
+  assert(file, "記録ファイルが書かれているべき");
+  assertEquals(file!.workspaces.length, 1, "同じ workspace は 1 エントリ");
+  const entry = file!.workspaces[0];
+  assertEquals(entry.workspace_id, "wks_owned123");
+  assertEquals(entry.owned, true);
+  assertEquals(entry.agent_id, "agent-new-owned", "起動後に agentId が埋まる");
+  assertEquals(entry.role, "executor");
+  assertEquals(entry.archived_at, null);
+});
+
+Deno.test("runCycle/takeover: paseo run が落ちても生成済み workspace は記録に残る (漏れは畳めない)", async () => {
+  const runner = new StubRunner((cmd, args) => {
+    if (cmd === "paseo") {
+      if (args[0] === "ls") return ok([]);
+      if (args[0] === "workspace" && args[1] === "create") {
+        return ok({ workspaceId: "wks_leak_guard", isolation: "local" });
+      }
+      if (args[0] === "run") return fail("boom");
+      throw new Error(`unexpected paseo call: ${args.join(" ")}`);
+    }
+    const verb = stateVerbOf(args);
+    if (verb === "next") return ok(takeoverNext("gh-15"));
+    if (verb === "get") return ok(takeoverState("gh-15"));
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+
+  const stateDir = await Deno.makeTempDir();
+  let threw = false;
+  try {
+    await runCycle(baseCtx(runner, { stateDir }));
+  } catch {
+    threw = true;
+  }
+  assert(threw, "paseo run の失敗は DriverError として伝播する");
+
+  const file = await readWorkspaceFile(workspaceFilePathOf(stateDir, "gh-15"));
+  assert(file, "起動前に書いた記録が残っているべき");
+  assertEquals(file!.workspaces[0].workspace_id, "wks_leak_guard");
+  assertEquals(file!.workspaces[0].agent_id, null);
+});
+
+Deno.test("runCycle/takeover: workspace create が失敗したら paseo run を呼ばない", async () => {
+  const runner = new StubRunner((cmd, args) => {
+    if (cmd === "paseo") {
+      if (args[0] === "ls") return ok([]);
+      if (args[0] === "workspace" && args[1] === "create") {
+        return fail("WORKSPACE_CREATE_FAILED");
+      }
+      throw new Error(`unexpected paseo call: ${args.join(" ")}`);
+    }
+    const verb = stateVerbOf(args);
+    if (verb === "next") return ok(takeoverNext("gh-16"));
+    if (verb === "get") return ok(takeoverState("gh-16"));
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+
+  const stateDir = await Deno.makeTempDir();
+  let threw = false;
+  try {
+    await runCycle(baseCtx(runner, { stateDir }));
+  } catch {
+    threw = true;
+  }
+  assert(threw, "create の失敗は DriverError として伝播する");
+  assert(
+    !runner.calls.some((c) => c.cmd === "paseo" && c.args[0] === "run"),
+    "workspace を確保できていないのにエージェントを起こしてはならない",
+  );
+  assertEquals(
+    await readWorkspaceFile(workspaceFilePathOf(stateDir, "gh-16")),
+    null,
+    "生成できていないので記録も作らない",
   );
 });
 
@@ -958,6 +1081,9 @@ Deno.test("runCycle/takeover: worktree が無ければ git worktree add して�
     }
     if (cmd === "paseo") {
       if (args[0] === "ls") return ok([]);
+      if (args[0] === "workspace" && args[1] === "create") {
+        return ok({ workspaceId: "wks_stub", isolation: "local" });
+      }
       if (args[0] === "run") {
         return ok({ agentId: "agent-new-2", status: "running" });
       }
@@ -1018,7 +1144,8 @@ Deno.test("runCycle/takeover: worktree が無ければ git worktree add して�
     throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
   });
 
-  const result = await runCycle(baseCtx(runner));
+  const stateDir = await Deno.makeTempDir();
+  const result = await runCycle(baseCtx(runner, { stateDir }));
   assertEquals(result.outcome, "launched");
 
   const worktreeAddCall = runner.calls.find((c) =>
@@ -1083,6 +1210,9 @@ Deno.test("runCycle/takeover: worktree add が二重に競合したら重複起�
     }
     if (cmd === "paseo") {
       if (args[0] === "ls") return ok([]);
+      if (args[0] === "workspace" && args[1] === "create") {
+        return ok({ workspaceId: "wks_stub", isolation: "local" });
+      }
       if (args[0] === "run") {
         return ok({
           agentId: "agent-loser-should-not-launch",
@@ -1179,6 +1309,9 @@ Deno.test("runCycle/takeover: replaces が非null なら旧executorをpaseo stop
     if (cmd === "paseo") {
       if (args[0] === "ls") return ok([]);
       if (args[0] === "stop") return fail("agent not reachable", 1);
+      if (args[0] === "workspace" && args[1] === "create") {
+        return ok({ workspaceId: "wks_stub", isolation: "local" });
+      }
       if (args[0] === "run") {
         return ok({ agentId: "agent-new-3", status: "running" });
       }
@@ -1231,7 +1364,8 @@ Deno.test("runCycle/takeover: replaces が非null なら旧executorをpaseo stop
     throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
   });
 
-  const result = await runCycle(baseCtx(runner));
+  const stateDir = await Deno.makeTempDir();
+  const result = await runCycle(baseCtx(runner, { stateDir }));
   assertEquals(result.outcome, "launched");
 
   const stopCall = runner.calls.find((c) =>
@@ -2966,9 +3100,9 @@ Deno.test("main --loop: --session 省略なら driver 固有の id を作って�
 // ことを検証してから、起動したエージェントと (作られていれば) owned workspace を
 // archive で片付ける。
 //
-// pipeline-driver.ts の既定値は "local" (#148, #150 整合: agent-scoped 実行環境でも
-// --cwd の隔離を確実に効かせるため)。この E2E テストでは明示指定の動作確認を兼ねて
-// `--paseo-new-workspace local` を渡している。
+// pipeline-driver.ts は takeover のたびに Task Cell の workspace を明示生成する
+// (gh-157)。この E2E テストでは `--paseo-workspace-isolation local` を明示して
+// (既定と同じ値) その経路を通し、後片付けで生成された workspace を archive する。
 // ---------------------------------------------------------------------------
 
 interface PaseoAvailability {
@@ -3112,7 +3246,7 @@ async function runE2eSmokeTest(provider: string): Promise<void> {
       "e2e-smoke-session",
       "--impl-provider",
       provider,
-      "--paseo-new-workspace",
+      "--paseo-workspace-isolation",
       "local",
     ];
     const cmd = new Deno.Command(Deno.execPath(), {
@@ -3142,7 +3276,7 @@ async function runE2eSmokeTest(provider: string): Promise<void> {
     assert(typeof agentId === "string" && agentId.length > 0);
 
     // 実際に Paseo エージェントが起動され、指定した --cwd で走っていることを確認する
-    // (agent-scoped 実行環境でも --paseo-new-workspace local が --cwd を確実に効かせる)。
+    // (workspace は --path <worktree> で明示生成しているので Cwd はそこになる)。
     const inspectCmd = new Deno.Command("paseo", {
       args: ["inspect", agentId, "--json"],
       stdout: "piped",
@@ -3375,6 +3509,497 @@ Deno.test("main --loop without --observe: SIGINT で進行中のサイクル完�
   } finally {
     await Deno.remove(scratch, { recursive: true }).catch(() => {});
   }
+});
+
+// U: paseo-workspace.ts (記録ファイルの純関数) — gh-157
+
+function entry(
+  overrides: Partial<
+    {
+      workspace_id: string;
+      owned: boolean;
+      agent_id: string | null;
+      role: string;
+      recorded_at: string;
+      archived_at: string | null;
+    }
+  > = {},
+) {
+  return {
+    workspace_id: "wks_1",
+    owned: true,
+    agent_id: null,
+    role: "executor",
+    recorded_at: "2026-08-28T00:00:00Z",
+    archived_at: null,
+    ...overrides,
+  };
+}
+
+Deno.test("upsertWorkspaceEntry: 同じ workspace_id は 1 件に畳み、recorded_at は最初の値を残す", () => {
+  const first = upsertWorkspaceEntry(emptyWorkspaceFile(), entry());
+  assertEquals(first.workspaces.length, 1);
+
+  const updated = upsertWorkspaceEntry(
+    first,
+    entry({ agent_id: "agent-1", recorded_at: "2026-08-29T00:00:00Z" }),
+  );
+  assertEquals(updated.workspaces.length, 1, "重複させない");
+  assertEquals(updated.workspaces[0].agent_id, "agent-1");
+  assertEquals(updated.workspaces[0].recorded_at, "2026-08-28T00:00:00Z");
+
+  const another = upsertWorkspaceEntry(
+    updated,
+    entry({ workspace_id: "wks_2" }),
+  );
+  assertEquals(another.workspaces.map((w) => w.workspace_id), [
+    "wks_1",
+    "wks_2",
+  ]);
+});
+
+Deno.test("pendingArchives: owned かつ未 archive のものだけを返す", () => {
+  const file = {
+    schema_version: 1,
+    workspaces: [
+      entry({ workspace_id: "wks_owned_open" }),
+      entry({ workspace_id: "wks_not_owned", owned: false }),
+      entry({
+        workspace_id: "wks_done",
+        archived_at: "2026-08-28T01:00:00Z",
+      }),
+      entry({
+        workspace_id: "wks_not_owned_done",
+        owned: false,
+        archived_at: "2026-08-28T01:00:00Z",
+      }),
+    ],
+  };
+  assertEquals(pendingArchives(file).map((w) => w.workspace_id), [
+    "wks_owned_open",
+  ]);
+});
+
+Deno.test("markArchived: 指定した workspace_id だけに archived_at を入れる", () => {
+  const file = {
+    schema_version: 1,
+    workspaces: [entry({ workspace_id: "a" }), entry({ workspace_id: "b" })],
+  };
+  const next = markArchived(file, "a", "2026-08-28T02:00:00Z");
+  assertEquals(next.workspaces[0].archived_at, "2026-08-28T02:00:00Z");
+  assertEquals(next.workspaces[1].archived_at, null);
+});
+
+Deno.test("parseWorkspaceFile: 壊れた記録は空に丸めずに投げる", () => {
+  const broken = ["{not json", '{"workspaces":{}}', '{"workspaces":[42]}'];
+  for (const text of broken) {
+    let threw = false;
+    try {
+      parseWorkspaceFile(text);
+    } catch {
+      threw = true;
+    }
+    assert(threw, `壊れた記録は投げるべき: ${text}`);
+  }
+  assertEquals(
+    parseWorkspaceFile('{"schema_version":1,"workspaces":[]}').workspaces,
+    [],
+  );
+});
+
+// H: runCleanupSweep — Cleanup Outbox の冪等スイープ (gh-157)
+
+function outbox(
+  entries: { id: string; attempts?: number }[],
+): Record<string, unknown> {
+  return {
+    queue: [],
+    cleanup_outbox: entries.map((e) => ({
+      id: e.id,
+      reason: "retire",
+      requested_at: "2026-08-28T00:00:00Z",
+      attempts: e.attempts ?? 0,
+      last_error: null,
+    })),
+  };
+}
+
+/** state.ts の get / cleanup-resolve と paseo workspace archive だけを解釈するスタブ。 */
+function sweepRunner(
+  state: Record<string, unknown>,
+  archive: (workspaceId: string) => CommandResult = () => ok({}),
+): StubRunner {
+  return new StubRunner((cmd, args) => {
+    if (cmd === "paseo") {
+      if (args[0] === "workspace" && args[1] === "archive") {
+        return archive(args[2]);
+      }
+      throw new Error(`unexpected paseo call: ${args.join(" ")}`);
+    }
+    const verb = stateVerbOf(args);
+    if (verb === "get") return ok(state);
+    if (verb === "cleanup-resolve") return ok({ ok: true });
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+}
+
+function resolveCalls(runner: StubRunner) {
+  return runner.calls.filter((c) => stateVerbOf(c.args) === "cleanup-resolve");
+}
+
+function archiveCalls(runner: StubRunner) {
+  return runner.calls.filter((c) =>
+    c.cmd === "paseo" && c.args[0] === "workspace" && c.args[1] === "archive"
+  );
+}
+
+Deno.test("runCleanupSweep: outbox が空なら paseo も cleanup-resolve も呼ばない", async () => {
+  const runner = sweepRunner({ queue: [] });
+  const stateDir = await Deno.makeTempDir();
+  const result = await runCleanupSweep(baseCtx(runner, { stateDir }));
+  assertEquals(result.entries, []);
+  assertEquals(archiveCalls(runner).length, 0);
+  assertEquals(resolveCalls(runner).length, 0);
+});
+
+Deno.test("runCleanupSweep: 記録ファイルが無ければ archive せずに intent を落とす", async () => {
+  const runner = sweepRunner(outbox([{ id: "gh-1" }]));
+  const stateDir = await Deno.makeTempDir();
+  const result = await runCleanupSweep(baseCtx(runner, { stateDir }));
+  assertEquals(result.entries[0].outcome, "resolved");
+  assertEquals(
+    archiveCalls(runner).length,
+    0,
+    "記録に無い workspace は触らない",
+  );
+  assertEquals(resolveCalls(runner).length, 1);
+  assert(
+    !resolveCalls(runner)[0].args.includes("--error"),
+    "後始末するものが無いのは失敗ではない",
+  );
+});
+
+Deno.test("runCleanupSweep: owned:true かつ未 archive だけを archive して archived_at を書く", async () => {
+  const stateDir = await Deno.makeTempDir();
+  const path = workspaceFilePathOf(stateDir, "gh-1");
+  await writeWorkspaceFile(path, {
+    schema_version: 1,
+    workspaces: [
+      entry({ workspace_id: "wks_target", agent_id: "a1" }),
+      entry({ workspace_id: "wks_inherited", owned: false }),
+      entry({
+        workspace_id: "wks_already",
+        archived_at: "2026-08-27T00:00:00Z",
+      }),
+    ],
+  });
+  const runner = sweepRunner(outbox([{ id: "gh-1" }]));
+  const result = await runCleanupSweep(baseCtx(runner, { stateDir }));
+
+  assertEquals(result.entries[0].outcome, "resolved");
+  assertEquals(result.entries[0].archived, ["wks_target"]);
+  assertEquals(
+    archiveCalls(runner).map((c) => c.args),
+    [["workspace", "archive", "wks_target", "--json"]],
+    "owned:false と archive 済みは対象外",
+  );
+  const after = await readWorkspaceFile(path);
+  const byId = Object.fromEntries(
+    after!.workspaces.map((w) => [w.workspace_id, w.archived_at]),
+  );
+  assert(byId["wks_target"] !== null, "archived_at が入る");
+  assertEquals(byId["wks_inherited"], null);
+  assertEquals(byId["wks_already"], "2026-08-27T00:00:00Z", "書き換えない");
+});
+
+Deno.test("runCleanupSweep: archive が失敗したら --error 付きで resolve し archived_at は入れない", async () => {
+  const stateDir = await Deno.makeTempDir();
+  const path = workspaceFilePathOf(stateDir, "gh-1");
+  await writeWorkspaceFile(path, {
+    schema_version: 1,
+    workspaces: [
+      entry({ workspace_id: "wks_bad" }),
+      entry({ workspace_id: "wks_good" }),
+    ],
+  });
+  const runner = sweepRunner(
+    outbox([{ id: "gh-1" }]),
+    (id) => id === "wks_bad" ? fail("Workspace not found") : ok({}),
+  );
+  const result = await runCleanupSweep(baseCtx(runner, { stateDir }));
+
+  assertEquals(result.entries[0].outcome, "failed");
+  assertEquals(result.entries[0].archived, ["wks_good"], "成功分だけ畳む");
+  const resolve = resolveCalls(runner)[0];
+  assert(resolve.args.includes("--error"), "失敗は --error 付きで記録する");
+  const after = await readWorkspaceFile(path);
+  const byId = Object.fromEntries(
+    after!.workspaces.map((w) => [w.workspace_id, w.archived_at]),
+  );
+  assertEquals(byId["wks_bad"], null, "失敗したものは未 archive のまま");
+  assert(byId["wks_good"] !== null);
+});
+
+Deno.test("runCleanupSweep: 記録ファイルが壊れていたら --error 付きで残す", async () => {
+  const stateDir = await Deno.makeTempDir();
+  const path = workspaceFilePathOf(stateDir, "gh-1");
+  await Deno.mkdir(`${stateDir}/runs/gh-1`, { recursive: true });
+  await Deno.writeTextFile(path, "{not json");
+  const runner = sweepRunner(outbox([{ id: "gh-1" }]));
+  const result = await runCleanupSweep(baseCtx(runner, { stateDir }));
+
+  assertEquals(result.entries[0].outcome, "failed");
+  assertEquals(archiveCalls(runner).length, 0);
+  assert(resolveCalls(runner)[0].args.includes("--error"));
+});
+
+Deno.test("runCleanupSweep: 試行上限に達したエントリは触らない (残置して人に見せる)", async () => {
+  const stateDir = await Deno.makeTempDir();
+  await writeWorkspaceFile(workspaceFilePathOf(stateDir, "gh-1"), {
+    schema_version: 1,
+    workspaces: [entry({ workspace_id: "wks_stuck" })],
+  });
+  const runner = sweepRunner(
+    outbox([{ id: "gh-1", attempts: CLEANUP_MAX_ATTEMPTS }]),
+  );
+  const result = await runCleanupSweep(baseCtx(runner, { stateDir }));
+  assertEquals(result.entries[0].outcome, "skipped");
+  assertEquals(archiveCalls(runner).length, 0);
+  assertEquals(resolveCalls(runner).length, 0);
+});
+
+Deno.test("runDispatchLoop: スイープは cleanupSweepEveryCycles の周期でだけ走る", async () => {
+  const stateDir = await Deno.makeTempDir();
+  const runner = new StubRunner((cmd, args) => {
+    if (cmd === "paseo") throw new Error("paseo は呼ばれない");
+    const verb = stateVerbOf(args);
+    if (verb === "next") return ok({ tasks: [] });
+    if (verb === "get") return ok({ queue: [], cleanup_outbox: [] });
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+  const sweeps: CleanupSweepResult[] = [];
+  await runDispatchLoop({
+    context: baseCtx(runner, { stateDir }),
+    intervalSec: 0,
+    maxCycles: 2,
+    cleanupSweepEveryCycles: 1,
+    signal: new AbortController().signal,
+    onSweep: (result) => sweeps.push(result),
+  });
+  assertEquals(
+    sweeps.length,
+    2,
+    "毎サイクル走る (回数を切っても最後の周も走る)",
+  );
+
+  const defaultRunner = new StubRunner((cmd, args) => {
+    if (cmd === "paseo") throw new Error("paseo は呼ばれない");
+    const verb = stateVerbOf(args);
+    if (verb === "next") return ok({ tasks: [] });
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+  const defaultSweeps: CleanupSweepResult[] = [];
+  await runDispatchLoop({
+    context: baseCtx(defaultRunner, { stateDir }),
+    intervalSec: 0,
+    maxCycles: 3,
+    signal: new AbortController().signal,
+    onSweep: (result) => defaultSweeps.push(result),
+  });
+  assertEquals(defaultSweeps.length, 0, "既定 (12 サイクル) では走らない");
+});
+
+// L: ライフサイクル統合 (gh-157) — 生成 → 記録 → retire → スイープ → resolve。
+// **state.ts は本物のプロセスで動かす** (state.json の書き込み・スキーマ検証・outbox の
+// 追記と解決を実装ごと通す)。差し替えるのは paseo だけである。
+
+/** `deno`(= state.ts) は実プロセスへ委譲し、`paseo` だけをスタブする runner。 */
+class HybridRunner implements CommandRunner {
+  readonly paseoCalls: RecordedCall[] = [];
+  readonly #real = new SubprocessRunner();
+  constructor(
+    private readonly paseo: (args: readonly string[]) => CommandResult,
+  ) {}
+  run(cmd: string, args: readonly string[]): Promise<CommandResult> {
+    if (cmd === "paseo") {
+      this.paseoCalls.push({ cmd, args: [...args] });
+      return Promise.resolve(this.paseo(args));
+    }
+    if (cmd === Deno.execPath()) return this.#real.run(cmd, args);
+    throw new Error(`unexpected command: ${cmd}`);
+  }
+}
+
+function lifecycleQueueItem(
+  overrides: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    id: "t-cell",
+    title: "Task Cell",
+    blocked_reason: null,
+    worktree: "/wt/t-cell",
+    base: "main",
+    ...overrides,
+  };
+}
+
+async function writeLifecycleState(
+  stateDir: string,
+  item: Record<string, unknown>,
+): Promise<void> {
+  await Deno.writeTextFile(
+    `${stateDir}/state.json`,
+    JSON.stringify({
+      tracker: "gh",
+      source: "o/r",
+      updated_at: "2026-08-28T00:00:00Z",
+      queue: [item],
+      completed: [],
+      candidates: [],
+      relisted: [],
+      promoted: [],
+      history: [],
+      schema_version: 2,
+    }),
+  );
+}
+
+Deno.test("cleanup lifecycle: takeover の owned workspace が retire → スイープで archive され outbox から消える", async () => {
+  const stateDir = await Deno.makeTempDir();
+  const runner = new HybridRunner((args) => {
+    if (args[0] === "ls") return ok([]);
+    if (args[0] === "workspace" && args[1] === "create") {
+      return ok({ workspaceId: "wks_life", isolation: "local" });
+    }
+    if (args[0] === "run") {
+      return ok({ agentId: "agent-life", status: "running" });
+    }
+    if (args[0] === "workspace" && args[1] === "archive") {
+      return ok({ workspaceId: args[2], status: "archived" });
+    }
+    throw new Error(`unexpected paseo call: ${args.join(" ")}`);
+  });
+  const ctx = baseCtx(runner, { stateDir, session: "sess-life" });
+
+  // 1. 着手: running(initial, full, research) / worktree 記録済み → next が takeover を出す
+  await writeLifecycleState(
+    stateDir,
+    lifecycleQueueItem({
+      progress: "running",
+      run: {
+        kind: "initial",
+        gate: "full",
+        phase: "research",
+        attempts: 0,
+        executor: null,
+        executor_last_event_at: null,
+        takeover_at: null,
+        verifier: null,
+        verifier_session: null,
+      },
+      artifact: { state: "none" },
+      session: "sess-life",
+    }),
+  );
+  const takeover = await runCycle(ctx);
+  assertEquals(takeover.outcome, "launched", JSON.stringify(takeover));
+
+  const path = workspaceFilePathOf(stateDir, "t-cell");
+  const recorded = await readWorkspaceFile(path);
+  assertEquals(recorded!.workspaces.length, 1);
+  assertEquals(recorded!.workspaces[0].workspace_id, "wks_life");
+  assertEquals(recorded!.workspaces[0].agent_id, "agent-life");
+  assertEquals(recorded!.workspaces[0].archived_at, null);
+
+  // 2. 回収可能な状態 (resting × merged / session なし) にしてから本物の retire を打つ
+  await writeLifecycleState(
+    stateDir,
+    lifecycleQueueItem({
+      progress: "resting",
+      run: null,
+      artifact: {
+        state: "merged",
+        ref: "https://github.com/o/r/pull/1",
+        branch: "task-pipeline/t-cell",
+        tip: "abc123",
+        base: "main",
+      },
+      session: null,
+    }),
+  );
+  const retire = await runner.run(
+    Deno.execPath(),
+    buildStateArgs(
+      new URL("./state.ts", import.meta.url).pathname,
+      stateDir,
+      "retire",
+      [["state-dir", stateDir], ["id", "t-cell"]],
+    ),
+  );
+  assertEquals(retire.code, 0, retire.stderr);
+  const afterRetire = JSON.parse(
+    await Deno.readTextFile(`${stateDir}/state.json`),
+  );
+  assertEquals(afterRetire.queue.length, 0);
+  assertEquals(afterRetire.cleanup_outbox.length, 1);
+  assertEquals(afterRetire.cleanup_outbox[0].id, "t-cell");
+  assertEquals(afterRetire.cleanup_outbox[0].reason, "retire");
+
+  // 3. スイープ: 手順 1 が記録した exact な id を畳み、intent を落とす
+  const sweep = await runCleanupSweep(ctx);
+  assertEquals(sweep.entries, [{
+    id: "t-cell",
+    outcome: "resolved",
+    archived: ["wks_life"],
+  }]);
+  const archives = runner.paseoCalls.filter((c) =>
+    c.args[0] === "workspace" && c.args[1] === "archive"
+  );
+  assertEquals(archives.length, 1);
+  assertEquals(archives[0].args, [
+    "workspace",
+    "archive",
+    "wks_life",
+    "--json",
+  ]);
+  const swept = await readWorkspaceFile(path);
+  const archivedAt = swept!.workspaces[0].archived_at;
+  assert(archivedAt !== null, "archived_at が入る");
+  assertEquals(
+    JSON.parse(await Deno.readTextFile(`${stateDir}/state.json`))
+      .cleanup_outbox,
+    [],
+    "後始末が終わった intent は消える",
+  );
+
+  // 4. 冪等性: もう一度スイープしても何も起きない
+  const again = await runCleanupSweep(ctx);
+  assertEquals(again.entries, []);
+  assertEquals(
+    runner.paseoCalls.filter((c) => c.args[1] === "archive").length,
+    1,
+    "2 度目の archive は呼ばれない",
+  );
+  assertEquals(
+    (await readWorkspaceFile(path))!.workspaces[0].archived_at,
+    archivedAt,
+    "archived_at は書き換わらない",
+  );
+});
+
+Deno.test("main --loop: --cleanup-sweep-every-cycles の非整数は usage エラー", async () => {
+  const stateDir = await Deno.makeTempDir();
+  const code = await main([
+    "--state-dir",
+    stateDir,
+    "--loop",
+    "true",
+    "--max-cycles",
+    "0",
+    "--cleanup-sweep-every-cycles",
+    "abc",
+  ]);
+  assertEquals(code, 1);
 });
 
 if (TASK_PIPELINE_E2E) {

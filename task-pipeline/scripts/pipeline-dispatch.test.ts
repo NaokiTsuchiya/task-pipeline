@@ -77,6 +77,7 @@ function state(queue: V2Item[], overrides: Partial<V2State> = {}): V2State {
     promoted: [],
     completed: [],
     withdrawn_branches: [],
+    cleanup_outbox: [],
     history: [],
     history_archived: 0,
     schema_version: 2,
