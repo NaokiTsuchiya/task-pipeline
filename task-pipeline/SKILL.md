@@ -75,6 +75,14 @@ state.json への**書き込み**は、目的に対応する verb を CLI (`~/.c
 - **verb がエラーを返したときの扱い** (エラー時は state.json が不変なので、いずれの分岐も安全に選べる): **`lock` (11、取得失敗)** → CLI は既定回数リトライ済みなので、これ以上再試行せずそのイテレーションでは書き込みを諦め、次の wakeup に回す。**`conflict` (15、前提違反 — 対象は存在するが `progress`/`run`/`session`/`artifact.*` 等が想定と違う)** → `state.ts get` で読み直し、判断の前提が変わっていないか確認したうえで、処理をやり直すか破棄する。**`schema` (12、state.json 自体が不正)** → パイプライン全体が動けない状態なので再試行し続けず、そのタスク (無ければパイプライン全体) を BLOCKED 相当として報告する。**それ以外 (`usage`/`missing`/`permission`)** → 呼び出し側の不整合か環境側の権限不備なので、再試行せず実際のエラー出力を添えて報告する。
 - 排他のリトライ回数・stale 判定の閾値・heartbeat の生存判定/掃除閾値がなぜその値かなど、CLI の内部規則の**理由**は `docs/state-machine.md` を参照 (ここには書かない)。数値は `docs/state-cli-contract.md` の「heartbeat の契約」節にある。
 
+## 常駐 Driver (ディスパッチの移管)
+**実ディスパッチ (`claim` / `takeover` / `status-check`) を常駐プロセスへ移す任意の運用形態である。** 配備していなければ本節は不発で、これまでどおりオーケストレーターが全アクションを実行する。配備すると役割が分かれる — **Driver: 実ディスパッチ / オーケストレーター: トリアージ・承認・追従・回収・例外対応**。
+- **配備**: `hub(op: "start", name: "task-pipeline-driver", application: "bash", args: ["~/.claude/skills/task-pipeline/scripts/driver-start.sh", "<.task-pipeline の絶対パス>"], persist: true, restart: "on-failure")` を 1 回呼ぶ。`persist: true` はクライアント切断で死なせないため、`restart: "on-failure"` は異常終了だけを起こし直すためである (意図的な停止は exit 0 なので起こされない)。
+- **確認・ログ・停止**: `omp ps info task-pipeline-driver` / `omp ps logs task-pipeline-driver` / `omp ps stop task-pipeline-driver`。**プロセスを直接 kill しない**。
+- **停止意思は `<.task-pipeline>/driver/desired` が持つ** (`running` か `stopped` の 1 語)。`stopped` を書いてから `omp ps stop` する — 逆にすると `restart` が起こし直す。**ファイルを消すと `running` に戻る。**`stopped` のあいだ Driver は Controller Lease を取らずに即終了するので、実ディスパッチはオーケストレーター側へ戻る。**未知の値・空は `stopped` として扱われる** (解釈できない停止意思のもとで実ディスパッチを続けない)。
+- **Lease が生きているあいだの `next` の応答**: `start.blocked_by` に `driver_lease` が立ち (`next_id` は `null`)、`running` タスクの `actions` は `wait {reason: "driver-lease"}` になる。**このとき新しい着手も引き取りも Status check も行わない** — 追従・回収 (`probe-run` / `fix-start` / `rebase-start` / `release` / `retire` / `set-takeover` / `clear-takeover`) と承認 (`tracker-list`) は**通常どおり自分で行う**。どこまでが Driver の担当かは `docs/state-cli-contract.md` の `next` 節が持つ (ここで数え直さない)。
+- **Driver がクラッシュして Lease が残ったとき**: `restart: on-failure` が起こし直す。それでも解けないときの解除口は `state.ts controller-lease-set --state-dir <dir> --clear true` (照合なしの無条件解除)。Lease の寿命はセッション台帳の生存判定に乗っているので、放置しても失効する (閾値は `docs/state-cli-contract.md`。ここには書かない)。
+
 ## state.json スキーマ
 ```json
 {
@@ -90,7 +98,8 @@ state.json への**書き込み**は、目的に対応する verb を CLI (`~/.c
   "relisted": [{"id": "t-1a2b3c4d", "seen_at": "2026-07-16T09:10:00Z"}],
   "promoted": ["gh-88"],
   "withdrawn_branches": [{"id": "t-1a2b3c4d", "branch": "task-pipeline/t-1a2b3c4d", "base": "main", "worktree": "/abs/path/.claude/worktrees/task-pipeline/t-1a2b3c4d", "at": "2026-07-16T09:12:00Z", "reason": "PR 取り下げ後にユーザーが queue から外した"}],
-  "history": ["2026-07-16T09:12Z done t-1a2b3c4d (.task-pipeline/runs/t-1a2b3c4d/report.md)"]
+  "history": ["2026-07-16T09:12Z done t-1a2b3c4d (.task-pipeline/runs/t-1a2b3c4d/report.md)"],
+  "controller_lease": null
 }
 ```
 タスクの状態は **2 つの領域の積**で持つ (設計 `docs/state-model-v2-2026-08.md`)。片方だけを見て判断しない:
@@ -109,6 +118,7 @@ state.json への**書き込み**は、目的に対応する verb を CLI (`~/.c
 - `stalled` は**パイプラインが新しいタスクを着手できない状態**の種類 (`null` / `"depleted"` = 候補が尽きた / `"max_open"` = レビュー待ちの上限)、`stalled_since` はその状態に入った時刻。**追従を打ち切る唯一の判定材料** (下記「ペーシングと枯渇」)。毎イテレーション `state.ts stalled-set` で書き直す (パイプライン全体の状態。時刻で持つ理由は `docs/state-machine.md`)。`worktree`/`base` はそのタスク専用 worktree の絶対パスと分岐元ブランチ (`state.ts set-worktree` が書く。`playbooks/worktree.md`)。
 - `run.phase`/`run.attempts` は現在実行中のフェーズと検証試行回数 (`state.ts advance`/`phase-fail`)。`session` はこのタスクの揮発資源を持つセッションの id (下記「セッションの所有権」)。`run.executor` は実行エージェントの agentId — **必ず `session` とセットで読む** (`state.ts set-executor`/`touch-executor`)。`run.executor_last_event_at` は起動時・**指示の送信に成功したとき**・**停止を検知したとき**の 3 箇所だけで更新し (**実行エージェントの生存判定はこのフィールドで行う**。トップレベルの `updated_at` は使わない)、`run.takeover_at` は引き継ぎ待ちの開始時刻 (`state.ts set-takeover`。`playbooks/inflight.md`)。3 箇所に限る理由は `docs/state-machine.md`。
 - `updated_at` は書き込み系 verb がすべて自動で更新する。`candidates`/`promoted`/`withdrawn_branches`/`relisted`/`completed` はそれぞれ `candidates-set`/`candidates-drop`、`promoted-add`/`promoted-drop`、`withdraw-remove`、`relisted-add`/`relisted-drop`/`restore`、`retire` で操作する未承認タスクの優先順キャッシュ・自動昇格の控え・取り下げブランチの控え (`base` を運ぶためだけに置く)・再登場ガード (10 分ルール)・回収済みの控えで、根拠は `docs/state-machine.md` (下記「承認」、`playbooks/merge-recovery.md` の「マージで解けた依存の昇格」、`playbooks/pr-follow.md`)。
+- `controller_lease` は常駐 Driver が握る単一制御権 (`{session, epoch, acquired_at}`、無ければ `null`)。書くのは Driver だけで、オーケストレーターが触るのは上記「常駐 Driver」の解除口 (`state.ts controller-lease-set --clear true`) だけである。**この値を自分で読んで抑制を判断しない** — 抑制は `next` の応答 (`start.blocked_by` の `driver_lease` と `wait {reason: "driver-lease"}`) が配る。
 
 ## state.json への書き込み
 すべて上記「CLI (state.ts) の呼び出し方」の verb を呼ぶだけでよい。排他 (lock)・原子的な置換・読み直しは CLI が内側で行うので、SKILL.md 側に書く手順は無い。理由 (なぜ lock を `mv` で退避するか、なぜ書く前に読み直すか等) は `docs/state-machine.md` を参照。
@@ -131,6 +141,7 @@ state.json への**書き込み**は、目的に対応する verb を CLI (`~/.c
    - トップレベルの `observations` に `tracker-list` がある (= 非除外の `queued` も `running` も無い。state が無い場合を含む) → 承認へ。
    **着手が塞がれているとき** (`start.allowed` が偽) は、`start.blocked_by` に載っている理由ごとに扱いが違う。**判定そのものは `next` が済ませているので、ここで数え直さない**:
    **`max_tasks` による停止判定**: `start.blocked_by` に `max_tasks` が含まれていれば、新しい着手にも承認にも進まず、`playbooks/max-tasks.md` の手順で止める。**ただし自分の仕上げ run が飛行中の間はこの停止を保留する — 条件は `playbooks/max-tasks.md` の判定節に明示してあるので、ここでは数え直さない。** 含まれていなければ (`max_tasks` 省略時を含む) 何もせず以下へ進む。**この判定は他のどの理由より先に見る。**
+   **`driver_lease` (常駐 Driver が制御権を持っている)**: `start.blocked_by` に `driver_lease` があれば、新しい着手と飛行中タスクへの手出しは Driver の担当である (上記「常駐 Driver」)。**新しい着手には進まず、追従・回収と承認だけを通常どおり行う** — `wait {reason: "driver-lease"}` は何もしない action なので、`running` タスクについてはこのイテレーションで何もしない。`stalled.set_to` の値で `state.ts stalled-set` を呼んで終える。**`max_tasks` の停止判定より後、他の理由より先に見る。**
    **併走の枠**: 「1 セッション 1 タスク」が数えるのは**新しいタスク**だけである。1 セッションが同時に持ってよい実行エージェントは **新しいタスク 1 件 + 仕上げ (`pr_fix` / `rebase_fix`) 1 件** までで、この 2 つは互いの枠を塞がない (仕上げは新しい着手ではなく既に出した PR を仕上げる作業。往復には上限があり、別の worktree・別のブランチで動く)。これを分けないと、無関係なタスクの実装フェーズが終わるまでレビューコメントに誰も反応しなくなる。枠が埋まっているかの判定は `next` が行い、`start.blocked_by` の `own_initial` と、仕上げ側の `release {reason: "finishing-busy"}` として返る。**停止通知は必ず送り元の agentId と各タスクの `executor` を突き合わせて振り分ける**。state.json の書き込みは通常どおり CLI の verb 呼び出しで行う (排他は CLI が内側で担う)。仕上げ同士は併走させない。
    **飛行中の上限**: `start.blocked_by` に `inflight_limit` があれば、プロジェクト全体で飛行中が多すぎる (生きている他セッションが実行中の新規タスクの数。人がレビューできる本数まで抑える)。1 行報告し、dynamic なら ScheduleWakeup 1800 秒を予約してこのイテレーションを終える。**仕上げ (`run.kind` が `pr_fix` / `rebase_fix`) はこの数に入らない。**
    **レビュー待ちの上限 (`max_open`、既定 2)**: `start.blocked_by` に `max_open` があれば、マージ待ちのまま残っているレビュー待ちの PR が上限に達している (`counts.open_prs` がその件数。`finish=pr` のときだけ意味を持つ)。

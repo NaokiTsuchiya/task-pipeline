@@ -6,9 +6,10 @@
 //
 // ここに居るのは「どのノードから発火するか」を宣言できない verb だけ:
 //
-//   init / get / validate / next / session-touch / sessions-alive /
-//   history-append / candidates-set / candidates-drop / promoted-add /
-//   promoted-drop / relisted-add / relisted-drop / stalled-set        … 14 verb
+//   init / get / validate / next / verdict-path / session-touch /
+//   sessions-alive / history-append / candidates-set / candidates-drop /
+//   promoted-add / promoted-drop / relisted-add / relisted-drop /
+//   stalled-set / controller-lease-set                              … 16 verb
 //
 // `next` (設計5節) もここに属する — 何も書かない読み取り専用 verb であり、from/to を
 // 宣言できないためである。導出本体は state-next.ts (Deno API を呼ばない純関数)。
@@ -59,6 +60,7 @@ export const LEDGER_VERBS = [
   "relisted-add",
   "relisted-drop",
   "stalled-set",
+  "controller-lease-set",
 ] as const;
 export type LedgerVerb = (typeof LEDGER_VERBS)[number];
 
@@ -317,4 +319,58 @@ export function applyStalledSetV2(
   const wasNull = state.stalled == null;
   const stalledSince = wasNull || bump ? nowIso : (state.stalled_since ?? null);
   return { ...state, stalled: value, stalled_since: stalledSince };
+}
+
+// controller-lease-set — Driver の単一制御権 (gh-156)
+
+/**
+ * 取得 (`clear: false`) は `session`/`epoch` を必ず伴う — 欠落はフラグの形状の誤りなので
+ * `usage` として cmd 層が弾き、ここまで来ない。解放 (`clear: true`) は照合付きと無条件の
+ * 2 形あり、後者 (`session`/`epoch` を省略) が人が使う解除口である。
+ */
+export type ControllerLeaseArg =
+  | { readonly clear: false; readonly session: string; readonly epoch: number }
+  | {
+    readonly clear: true;
+    readonly session: string | null;
+    readonly epoch: number | null;
+  };
+
+/**
+ * 取得は **epoch の fencing** で決める — 既存リースの epoch が要求より**大きい**ときだけ
+ * `conflict` で弾く。等しいときに通すのは、同じ epoch を名乗るのは自分自身の再取得
+ * (冪等なリトライ) だからである。
+ *
+ * 解放の照合は、追い出された古いプロセスの後始末が、勝った新しいプロセスのリースを
+ * 消してしまうのを止めるためにある。
+ */
+export function applyControllerLeaseSetV2(
+  state: V2State,
+  arg: ControllerLeaseArg,
+  nowIso: string,
+): V2State {
+  const current = state.controller_lease ?? null;
+  if (arg.clear) {
+    if (current !== null && arg.session !== null && arg.epoch !== null) {
+      requirePrecondition(
+        current.session === arg.session && current.epoch === arg.epoch,
+        `controller lease is held by ${current.session}/${current.epoch}`,
+      );
+    }
+    return { ...state, controller_lease: null };
+  }
+  if (current !== null) {
+    requirePrecondition(
+      current.epoch <= arg.epoch,
+      `a newer controller holds the lease (${current.session}/${current.epoch})`,
+    );
+  }
+  return {
+    ...state,
+    controller_lease: {
+      session: arg.session,
+      epoch: arg.epoch,
+      acquired_at: nowIso,
+    },
+  };
 }

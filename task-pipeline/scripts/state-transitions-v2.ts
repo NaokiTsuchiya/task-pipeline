@@ -99,6 +99,7 @@ export {
   type V2ArtifactNone,
   type V2ArtifactOpen,
   type V2ArtifactWithdrawn,
+  type V2ControllerLease,
   type V2FixAsk,
   type V2Follow,
   type V2Item,

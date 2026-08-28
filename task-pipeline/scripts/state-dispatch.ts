@@ -2,7 +2,7 @@
 //
 // state CLI の **層 4 — verb 名から実装への表**。受理するフラグの一覧 (ALLOWED_FLAGS) と
 // cmd 実装への割り当て (HANDLERS) の 2 つだけを持ち、**この 2 つのキー集合が
-// ディスパッチ集合そのもの**である (48 verb = VERB_SPEC 33 + LEDGER_VERBS 15)。
+// ディスパッチ集合そのもの**である (49 verb = VERB_SPEC 33 + LEDGER_VERBS 16)。
 //
 // 分けてある理由: verb を 1 つ足す/消すときに触るのがこのファイルだけになり、
 // 「フラグ表には有るのに実装が無い」「実装は有るのに契約文書に無い」というずれが
@@ -13,6 +13,7 @@ import type { VerbName } from "./state-transitions-v2.ts";
 import {
   cmdCandidatesDrop,
   cmdCandidatesSet,
+  cmdControllerLeaseSet,
   cmdGet,
   cmdHistoryAppend,
   cmdInit,
@@ -69,7 +70,7 @@ import {
 // 語彙 — verb 名とフラグ名を string ではなく宣言から導いたリテラルユニオンで持つ
 //
 // **`Verb` は新しい語彙ではなく、既にある 2 つの宣言の和である**:
-// `VerbName` (= VERB_SPEC のキー 33 個) と `LedgerVerb` (= LEDGER_VERBS 13 個)。
+// `VerbName` (= VERB_SPEC のキー 33 個) と `LedgerVerb` (= LEDGER_VERBS 16 個)。
 // ディスパッチ集合の定義そのものを型にしているので、
 //
 //   - 下の 2 つの表を `Record<Verb, …>` で受けると、**verb の書き落としも綴り違いも
@@ -107,6 +108,7 @@ export const FLAG_NAMES = [
   "config",
   "dead-tasks",
   "drop-withdrawn-branch",
+  "epoch",
   "errors-inc",
   "errors-reset",
   "executor",
@@ -198,6 +200,13 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
   "relisted-add": new Set(["state-dir", "id", "seen-at", ...LOCK_FLAGS]),
   "relisted-drop": new Set(["state-dir", "id", ...LOCK_FLAGS]),
   "stalled-set": new Set(["state-dir", "value", "bump", ...LOCK_FLAGS]),
+  "controller-lease-set": new Set([
+    "state-dir",
+    "session",
+    "epoch",
+    "clear",
+    ...LOCK_FLAGS,
+  ]),
   // --- 進行系 (設計2.1) ---
   "approve": new Set(["state-dir", "id", "title", ...LOCK_FLAGS]),
   "claim": new Set(["state-dir", "id", "session", ...LOCK_FLAGS]),
@@ -319,7 +328,7 @@ export const ALLOWED_FLAGS: Record<Verb, ReadonlySet<FlagName>> = {
 // dispatch
 //
 // ディスパッチ表のキー集合は ALLOWED_FLAGS と一致し、その内訳は VERB_SPEC (遷移 33) と
-// LEDGER_VERBS (帳簿 15) で尽きる。どちらにも属さない verb を足すと state.test.ts の
+// LEDGER_VERBS (帳簿 16) で尽きる。どちらにも属さない verb を足すと state.test.ts の
 // 分類ネットが落ちる。
 // ---------------------------------------------------------------------------
 
@@ -345,6 +354,7 @@ export const HANDLERS: Record<Verb, CmdHandler> = {
   "relisted-add": cmdRelistedAdd,
   "relisted-drop": cmdRelistedDrop,
   "stalled-set": cmdStalledSet,
+  "controller-lease-set": cmdControllerLeaseSet,
   // 進行系
   "approve": cmdApprove,
   "claim": cmdClaim,

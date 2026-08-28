@@ -53,6 +53,7 @@ import {
 import {
   CliErrorV2,
   followOf,
+  type V2ControllerLease,
   type V2Follow,
   type V2Item,
   type V2Run,
@@ -217,7 +218,8 @@ export type TakeoverReason =
 export type WaitReason =
   | "takeover-pending"
   | "executor-alive"
-  | "own-slot-busy";
+  | "own-slot-busy"
+  | "driver-lease";
 
 export type NextAction =
   /** 新しいタスクの着手 (`claim`)。`start.allowed` の先頭 1 件にだけ付く。 */
@@ -348,6 +350,7 @@ export interface NextTask {
 
 export type StartBlocker =
   | "max_tasks"
+  | "driver_lease"
   | "own_initial"
   | "inflight_limit"
   | "max_open";
@@ -412,6 +415,12 @@ export interface NextResult {
   readonly start: NextStart;
   readonly stalled: NextStalled;
   readonly observations: readonly NextObservation[];
+  /**
+   * `state.json` の `controller_lease` の生値 (無ければ null)。抑制が起きたかどうかは
+   * `start.blocked_by` の `driver_lease` と `wait{reason: "driver-lease"}` が語るので、
+   * ここには加工した派生値を置かない。
+   */
+  readonly controller_lease: V2ControllerLease | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -574,7 +583,13 @@ function livenessAction(
   classified: readonly Classified[],
   input: NextInput,
   nowMs: number,
+  driverLeaseHeld: boolean,
 ): NextAction {
+  // Driver が制御権を握っている間、飛行中のタスクに触るアクション (takeover /
+  // status-check) は Driver が実行する。ここで返しても実行するのは LLM 側なので、
+  // 二重ディスパッチになる (gh-156)。
+  if (driverLeaseHeld) return { kind: "wait", reason: "driver-lease" };
+
   const run = target.item.run;
   // progress==running のとき run は非 null (不変条件 1)。型の上の残差だけを埋める。
   if (run === null) return { kind: "wait", reason: "executor-alive" };
@@ -775,6 +790,7 @@ function deriveTask(
   counts: NextCounts,
   nowMs: number,
   claimId: string | null,
+  driverLeaseHeld: boolean,
 ): NextTask {
   const { item } = c;
   const follow = followOf(item);
@@ -812,7 +828,7 @@ function deriveTask(
   }
 
   if (item.progress === "running") {
-    actions.push(livenessAction(c, classified, input, nowMs));
+    actions.push(livenessAction(c, classified, input, nowMs, driverLeaseHeld));
   }
 
   if (item.progress === "resting") {
@@ -862,11 +878,15 @@ function startOf(
   counts: NextCounts,
   config: NextConfig,
   headQueuedId: string | null,
+  driverLeaseHeld: boolean,
 ): NextStart {
   const blocked: StartBlocker[] = [];
   if (config.max_tasks !== null && counts.tasks_started >= config.max_tasks) {
     blocked.push("max_tasks");
   }
+  // 新しいタスクの着手 (`claim`) は Driver が実行する。`next_id` を null に落とすことで
+  // `claim` アクションそのものが出なくなる (deriveTask の押し込み条件が claimId 一致)。
+  if (driverLeaseHeld) blocked.push("driver_lease");
   if (counts.running_attendable_initial >= 1) blocked.push("own_initial");
   if (counts.running_excluded_initial >= INFLIGHT_LIMIT) {
     blocked.push("inflight_limit");
@@ -937,6 +957,30 @@ function stalledOf(
   };
 }
 
+// Controller Lease (gh-156) — Driver が実ディスパッチを握っているかの判定
+
+/**
+ * **他人の**有効な Controller Lease を返す (無ければ null)。3 条件すべてを満たすときだけ
+ * 非 null になる:
+ *
+ *   1. `state.controller_lease` が非 null (キー欠落は null と同義)
+ *   2. その `session` が呼び出し側の `--session` と**違う** — Driver 自身の `next` 呼び出しを
+ *      自分の Lease で抑制してしまうと、Driver が 1 件もディスパッチできなくなる
+ *   3. その `session` が生存セッション一覧に**居る** — リースの寿命はセッション台帳
+ *      (`sessions/<id>` の mtime) が決める。Driver がクラッシュして release できなかった
+ *      ときは、台帳が失効した時点で抑制も自然に解ける (新しい時計を持たない理由)
+ */
+export function activeForeignLeaseOf(
+  state: V2State,
+  input: NextInput,
+): V2ControllerLease | null {
+  const lease = state.controller_lease ?? null;
+  if (lease === null) return null;
+  if (lease.session === input.session) return null;
+  if (!input.alive.includes(lease.session)) return null;
+  return lease;
+}
+
 // ---------------------------------------------------------------------------
 // 入口
 // ---------------------------------------------------------------------------
@@ -950,6 +994,8 @@ export function deriveNext(state: V2State, input: NextInput): NextResult {
   if (nowMs === null) {
     throw usage(`invalid --now: ${JSON.stringify(input.now)}`);
   }
+
+  const driverLeaseHeld = activeForeignLeaseOf(state, input) !== null;
 
   const classified: Classified[] = state.queue.map((item) => {
     const ownership = classifySessionOwnership(
@@ -968,7 +1014,12 @@ export function deriveNext(state: V2State, input: NextInput): NextResult {
   const headQueued = classified.find((c) =>
     !c.excluded && c.item.progress === "queued"
   );
-  const start = startOf(counts, input.config, headQueued?.item.id ?? null);
+  const start = startOf(
+    counts,
+    input.config,
+    headQueued?.item.id ?? null,
+    driverLeaseHeld,
+  );
 
   // 承認へ進むのは、非除外の queued も running も無いときだけ (SKILL.md 手順 1)。
   // 着手可否 (max_open 等) とは独立で、上限に達していても list は呼ぶ。
@@ -981,7 +1032,15 @@ export function deriveNext(state: V2State, input: NextInput): NextResult {
     : [];
 
   const tasks = classified.map((c) =>
-    deriveTask(c, classified, input, counts, nowMs, start.next_id)
+    deriveTask(
+      c,
+      classified,
+      input,
+      counts,
+      nowMs,
+      start.next_id,
+      driverLeaseHeld,
+    )
   );
 
   return {
@@ -994,6 +1053,7 @@ export function deriveNext(state: V2State, input: NextInput): NextResult {
     start,
     stalled: stalledOf(state, counts, start, listRequested, nowMs),
     observations,
+    controller_lease: state.controller_lease ?? null,
   };
 }
 

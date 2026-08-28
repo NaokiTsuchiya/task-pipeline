@@ -1,10 +1,11 @@
 // task-pipeline/scripts/state-verbs-ledger.ts
 //
-// state CLI の **層 3 — 帳簿系 15 verb の cmd 実装**:
+// state CLI の **層 3 — 帳簿系 16 verb の cmd 実装**:
 //
 //   init / get / validate / next / verdict-path / session-touch /
 //   sessions-alive / history-append / candidates-set / candidates-drop /
-//   promoted-add / promoted-drop / relisted-add / relisted-drop / stalled-set
+//   promoted-add / promoted-drop / relisted-add / relisted-drop /
+//   stalled-set / controller-lease-set
 //
 // queue エントリの座標 (領域 P × 領域 A) を持たない verb だけがここに居る
 // (対応する純関数は state-ledger-v2.ts の LEDGER_VERBS)。**queue エントリを対象にする
@@ -20,6 +21,7 @@ import { checkStateV2 } from "./state-schema-v2.ts";
 import {
   applyCandidatesDropV2,
   applyCandidatesSetV2,
+  applyControllerLeaseSetV2,
   applyHistoryAppendV2,
   applyInitV2,
   applyPromotedAddV2,
@@ -27,6 +29,7 @@ import {
   applyRelistedAddV2,
   applyRelistedDropV2,
   applyStalledSetV2,
+  type ControllerLeaseArg,
   getV2,
   HISTORY_MAX_LINES,
   isRecord,
@@ -59,6 +62,7 @@ import {
   parseCsv,
   requireEnumFlag,
   requireFlag,
+  requireIntFlag,
   validateSessionId,
 } from "./state-flags.ts";
 import {
@@ -562,4 +566,35 @@ export async function cmdStalledSet(
       applyStalledSetV2(current, value as StalledArg, bump, nowIso()),
   );
   return { ok: true, value: value === "null" ? null : value };
+}
+
+// controller-lease-set — フラグの形状の誤り (取得なのに session/epoch が無い、id が使えない
+// 形) は usage、リースの持ち主が想定と違うのは conflict、という切り分けをここで済ませてから
+// applyControllerLeaseSetV2 に渡す。
+export async function cmdControllerLeaseSet(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const clear = boolFlag(flags, "clear");
+  const session = flags.get("session");
+  if (session !== undefined) validateSessionId(session);
+  const epoch = flags.has("epoch") ? requireIntFlag(flags, "epoch") : null;
+  let arg: ControllerLeaseArg;
+  if (clear) {
+    arg = { clear: true, session: session ?? null, epoch };
+  } else {
+    if (session === undefined || epoch === null) {
+      throw new CliErrorV2(
+        "usage",
+        "controller-lease-set requires --session and --epoch (or --clear true)",
+      );
+    }
+    arg = { clear: false, session, epoch };
+  }
+  const next = await withExistingStateLock(
+    stateDir,
+    lockOpts(flags),
+    (current) => applyControllerLeaseSetV2(current, arg, nowIso()),
+  );
+  return { ok: true, controller_lease: next.controller_lease ?? null };
 }

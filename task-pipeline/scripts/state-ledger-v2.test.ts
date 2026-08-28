@@ -1,12 +1,13 @@
 // task-pipeline/scripts/state-ledger-v2.test.ts
 //
-// state-ledger-v2.ts (帳簿系 15 verb の純関数群) の in-process テスト。
+// state-ledger-v2.ts (帳簿系 16 verb の純関数群) の in-process テスト。
 //
 //   L-INIT   init の 4 分岐 (新規作成 / 移行 / no-op / 読めないバージョン)
 //   L-NORM   読み込み時の正規化と finalizeStateV2
 //   L-ARR    candidates / promoted / relisted の追加・除去と missing/conflict
 //   L-STALL  stalled-set の since の扱い
 //   L-SESS   heartbeat のしきい値 (厳密不等号)
+//   L-LEASE  controller-lease-set の取得 (epoch fencing) と解放 (照合)
 //   L-DECL   LEDGER_VERBS の宣言
 //
 // 実行: deno task test (リポジトリルートの deno.json。*.test.ts を自動検出)
@@ -15,6 +16,7 @@
 import {
   applyCandidatesDropV2,
   applyCandidatesSetV2,
+  applyControllerLeaseSetV2,
   applyHistoryAppendV2,
   applyInitV2,
   applyPromotedAddV2,
@@ -352,14 +354,130 @@ Deno.test("L-SESS-1: alive is strict (< max), stale is strict (> cleanup)", () =
   assertEquals(isSessionStale(now, minutes(1441), 1440), true);
 });
 
+// L-LEASE — controller-lease-set (gh-156)
+//
+// 取得は epoch の fencing (既存より小さい epoch だけを弾く)、解放は session+epoch の照合、
+// という 2 つの判定を分けて固定する。緩めた実装 (>= で弾く / 照合を飛ばす) がどのケースで
+// 落ちるかがそのままケース名になっている。
+
+function leaseState(over: Partial<V2State> = {}): V2State {
+  return { ...freshState(), ...over };
+}
+
+const LEASE = {
+  session: "driver-a",
+  epoch: 100,
+  acquired_at: NOW,
+} as const;
+
+Deno.test("L-LEASE-1: acquiring on an empty lease records session/epoch/now", () => {
+  const next = applyControllerLeaseSetV2(
+    leaseState(),
+    { clear: false, session: "driver-a", epoch: 100 },
+    NOW,
+  );
+  assertEquals(next.controller_lease, {
+    session: "driver-a",
+    epoch: 100,
+    acquired_at: NOW,
+  });
+});
+
+Deno.test("L-LEASE-2: a newer epoch takes the lease over", () => {
+  const next = applyControllerLeaseSetV2(
+    leaseState({ controller_lease: LEASE }),
+    { clear: false, session: "driver-b", epoch: 101 },
+    NOW,
+  );
+  assertEquals(next.controller_lease?.session, "driver-b");
+  assertEquals(next.controller_lease?.epoch, 101);
+});
+
+Deno.test("L-LEASE-3: the same epoch is an idempotent re-acquire (not a conflict)", () => {
+  const next = applyControllerLeaseSetV2(
+    leaseState({ controller_lease: LEASE }),
+    { clear: false, session: "driver-a", epoch: 100 },
+    "2026-08-07T13:00:00.000Z",
+  );
+  assertEquals(next.controller_lease?.epoch, 100);
+  assertEquals(next.controller_lease?.acquired_at, "2026-08-07T13:00:00.000Z");
+});
+
+Deno.test("L-LEASE-4: an older epoch is a conflict (a newer controller is live)", () => {
+  expectCliError(
+    () =>
+      applyControllerLeaseSetV2(
+        leaseState({ controller_lease: LEASE }),
+        { clear: false, session: "driver-a", epoch: 99 },
+        NOW,
+      ),
+    "conflict",
+    "older epoch",
+  );
+});
+
+Deno.test("L-LEASE-5: a matching release clears the lease", () => {
+  const next = applyControllerLeaseSetV2(
+    leaseState({ controller_lease: LEASE }),
+    { clear: true, session: "driver-a", epoch: 100 },
+    NOW,
+  );
+  assertEquals(next.controller_lease, null);
+});
+
+Deno.test("L-LEASE-6: releasing an already-empty lease is a no-op", () => {
+  const next = applyControllerLeaseSetV2(
+    leaseState(),
+    { clear: true, session: "driver-a", epoch: 100 },
+    NOW,
+  );
+  assertEquals(next.controller_lease, null);
+});
+
+Deno.test("L-LEASE-7: a release with a different session is a conflict", () => {
+  expectCliError(
+    () =>
+      applyControllerLeaseSetV2(
+        leaseState({ controller_lease: LEASE }),
+        { clear: true, session: "driver-b", epoch: 100 },
+        NOW,
+      ),
+    "conflict",
+    "session mismatch",
+  );
+});
+
+Deno.test("L-LEASE-8: a release with a different epoch is a conflict", () => {
+  expectCliError(
+    () =>
+      applyControllerLeaseSetV2(
+        leaseState({ controller_lease: LEASE }),
+        { clear: true, session: "driver-a", epoch: 101 },
+        NOW,
+      ),
+    "conflict",
+    "epoch mismatch",
+  );
+});
+
+Deno.test("L-LEASE-9: an unmatched release (no session/epoch) always clears", () => {
+  const next = applyControllerLeaseSetV2(
+    leaseState({ controller_lease: LEASE }),
+    { clear: true, session: null, epoch: null },
+    NOW,
+  );
+  assertEquals(next.controller_lease, null);
+});
+
 // ---------------------------------------------------------------------------
 // L-DECL
 // ---------------------------------------------------------------------------
 
-Deno.test("L-DECL-1: LEDGER_VERBS lists exactly the 15 bookkeeping verbs", () => {
+Deno.test("L-DECL-1: LEDGER_VERBS lists exactly the 16 bookkeeping verbs", () => {
   assertEquals([...LEDGER_VERBS].sort(), [
     "candidates-drop",
     "candidates-set",
+    "controller-lease-set",
     "get",
     "history-append",
     "init",

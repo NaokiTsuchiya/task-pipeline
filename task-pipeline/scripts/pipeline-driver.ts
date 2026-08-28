@@ -32,6 +32,16 @@
 //     [--paseo-new-workspace <local|worktree>] (既定値: local; #148 整合) \
 //     [--loop [--interval-sec <n>] [--max-cycles <n>]] [--observe [--replay-next <path>]]
 //
+// gh-156 (Phase2 Task 2-3b) で `--loop` の実ディスパッチだけが「自律制御ループ」になった。
+// 常駐に必要な 3 つは `<state dir>/driver/` に閉じている (単発実行はどれも使わない):
+//   - desired        … 停止意思 (running | stopped)。`stopped` なら Lease も取らずに exit 0。
+//                      `hub start` の `restart: on-failure` が exit 0 では起こさないことが、
+//                      「意図的停止のあいだ誤起床しない」の実装そのものである。
+//   - session        … 再起動を跨いで安定な driver 固有の session id (readOrCreateDriverSession)。
+//   - heartbeat.json … サイクル開始・終了・長命操作前に上書きする進行状況 (デッドライン込み)。
+// Controller Lease (state.json の `controller_lease`) は `--loop` のときだけ取り、LLM 側の
+// `state.ts next` から claim/takeover/status-check を消す (state-next.ts の activeForeignLeaseOf)。
+//
 // テスト: pipeline-driver.test.ts (state.ts / paseo / git をスタブ化した CommandRunner
 // で 4 kind それぞれの組み立てを検証)。実行は deno task test
 // (リポジトリルートの deno.json が *.test.ts を自動検出する)。
@@ -359,6 +369,30 @@ export function buildTouchExecutorStateFlags(
   ];
 }
 
+/** 常駐ループが毎サイクル自分の生存を台帳へ主張するための呼び (lock を取らない verb)。 */
+export function buildSessionTouchStateFlags(
+  stateDir: string,
+  session: string,
+): [string, string][] {
+  return [["state-dir", stateDir], ["id", session]];
+}
+
+/** `clear` が真なら照合付きの解放、偽なら取得。どちらも session と epoch を渡す。 */
+export function buildControllerLeaseStateFlags(
+  stateDir: string,
+  session: string,
+  epoch: number,
+  clear: boolean,
+): [string, string][] {
+  const flags: [string, string][] = [
+    ["state-dir", stateDir],
+    ["session", session],
+    ["epoch", String(epoch)],
+  ];
+  if (clear) flags.push(["clear", "true"]);
+  return flags;
+}
+
 /** agent-launch.md「Paseo 経路の起動パラメータと読み取り」の起動パラメータ規則。
  * `executor` には `--output-schema` を付けない (background で複数回停止するため)。
  * `newWorkspace` は既定で "local" とする (#148 整合: top-level / agent-scoped を問わず
@@ -657,6 +691,155 @@ export function isExecutorFresh(inputs: FreshnessInputs): boolean {
   return matchesProtocolLine(inputs.runPhase, inputs.waitMessageLines);
 }
 
+// `<state dir>/driver/` — 停止意思・進行状況・driver 自身の identity (gh-156)
+
+function driverDirOf(stateDir: string): string {
+  return `${stateDir}/driver`;
+}
+
+export type DesiredState = "running" | "stopped";
+
+/**
+ * 停止意思 (`<state dir>/driver/desired`) を読む。
+ *
+ * **ファイルが無いときだけ `running`**。空・未知の値・読み取り失敗は `stopped` に倒す —
+ * 解釈できない停止意思のもとで実ディスパッチ (エージェント起動・state.json 書き換え) を
+ * 続けるのは不可逆で、止めておけば `omp ps` に停止として現れて人が直せる。不在を
+ * `running` にするのは、初回起動と「一度も止められていない」通常状態がそれだから。
+ */
+export async function readDesired(stateDir: string): Promise<DesiredState> {
+  let raw: string;
+  try {
+    raw = await Deno.readTextFile(`${driverDirOf(stateDir)}/desired`);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return "running";
+    return "stopped";
+  }
+  return raw.trim() === "running" ? "running" : "stopped";
+}
+
+/** Driver の Controller Lease。`session` は再起動を跨いで安定、`epoch` はプロセス起動時刻。 */
+export interface ControllerLease {
+  readonly session: string;
+  readonly epoch: number;
+}
+
+/**
+ * driver 固有の session id を `<state dir>/driver/session` から読む (無ければ生成して書く)。
+ *
+ * **再起動を跨いで安定でなければならない** — 起動ごとに変わると、前のプロセスが `claim` で
+ * 所有したタスクが新しいプロセスから `alive-other` (セッション台帳に残っている) に見えて
+ * 除外され、誰も引き取れなくなる。プロセスの世代を区別するのは `epoch` の役目である。
+ */
+export async function readOrCreateDriverSession(
+  stateDir: string,
+): Promise<string> {
+  const path = `${driverDirOf(stateDir)}/session`;
+  try {
+    const existing = (await Deno.readTextFile(path)).trim();
+    if (existing !== "") return existing;
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+  const generated = `driver-${crypto.randomUUID()}`;
+  await Deno.mkdir(driverDirOf(stateDir), { recursive: true });
+  await Deno.writeTextFile(path, `${generated}\n`);
+  return generated;
+}
+
+/** 長命操作のデッドラインに足す余裕 (プロセス起動と JSON パースの分)。 */
+export const DRIVER_DEADLINE_MARGIN_SEC = 60;
+/** takeover (paseo ls → git worktree add → paseo run → set-executor の直列) のデッドライン。 */
+export const DRIVER_TAKEOVER_DEADLINE_SEC = 300;
+
+export interface HeartbeatRecord {
+  readonly schema_version: number;
+  readonly epoch: number;
+  readonly session: string;
+  readonly cycle_started_at: string;
+  readonly cycle_completed_at: string | null;
+  readonly current_operation: string | null;
+  readonly operation_deadline_at: string | null;
+}
+
+/** 進行状況の書き出し境界。テストは記録用のスタブを差す (CommandRunner と同じ流儀)。 */
+export interface HeartbeatWriter {
+  cycleStart(): Promise<void>;
+  /** `deadlineSec` は「今からあと何秒までに終わるはず」。ISO への変換は時計を持つ
+   * 実装側が行う (呼び出し側は時刻を組み立てない)。 */
+  operation(kind: string, deadlineSec: number | null): Promise<void>;
+  cycleEnd(): Promise<void>;
+}
+
+/**
+ * `<state dir>/driver/heartbeat.json` を**毎回上書き**する実装 (追記しない — 監視側は
+ * 常に最新の 1 個だけを読む)。`now` はテストのための注入点。
+ */
+export class FileHeartbeatWriter implements HeartbeatWriter {
+  #record: HeartbeatRecord;
+  readonly #stateDir: string;
+  readonly #now: () => Date;
+
+  constructor(params: {
+    readonly stateDir: string;
+    readonly lease: ControllerLease;
+    readonly now?: () => Date;
+  }) {
+    this.#stateDir = params.stateDir;
+    this.#now = params.now ?? (() => new Date());
+    this.#record = {
+      schema_version: 1,
+      epoch: params.lease.epoch,
+      session: params.lease.session,
+      cycle_started_at: this.#now().toISOString(),
+      cycle_completed_at: null,
+      current_operation: null,
+      operation_deadline_at: null,
+    };
+  }
+
+  async cycleStart(): Promise<void> {
+    this.#record = {
+      ...this.#record,
+      cycle_started_at: this.#now().toISOString(),
+      cycle_completed_at: null,
+      current_operation: "next",
+      operation_deadline_at: null,
+    };
+    await this.#flush();
+  }
+
+  async operation(kind: string, deadlineSec: number | null): Promise<void> {
+    this.#record = {
+      ...this.#record,
+      current_operation: kind,
+      operation_deadline_at: deadlineSec === null
+        ? null
+        : new Date(this.#now().getTime() + deadlineSec * 1000).toISOString(),
+    };
+    await this.#flush();
+  }
+
+  async cycleEnd(): Promise<void> {
+    this.#record = {
+      ...this.#record,
+      cycle_completed_at: this.#now().toISOString(),
+      current_operation: null,
+      operation_deadline_at: null,
+    };
+    await this.#flush();
+  }
+
+  async #flush(): Promise<void> {
+    const dir = driverDirOf(this.#stateDir);
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(
+      `${dir}/heartbeat.json`,
+      `${JSON.stringify(this.#record)}\n`,
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // DriverContext と state.ts / paseo の呼び出し
 // ---------------------------------------------------------------------------
@@ -677,6 +860,11 @@ export interface DriverContext {
   /** git rev-parse で求めるプロジェクトルート。takeover が worktree を新規に作る
    * ときだけ呼ぶ (claim/status-check/wait では git を一切呼ばない)。 */
   readonly resolveProjectRoot: () => Promise<string>;
+  /** 常駐ループが握っている Controller Lease。**未指定 = リースを取らない実行**
+   * (単発 `runCycle` や observe) で、そのときリースの検査は行わない。 */
+  readonly lease?: ControllerLease;
+  /** 進行状況の書き出し先。未指定なら何も書かない。 */
+  readonly heartbeat?: HeartbeatWriter;
 }
 
 export function makeProjectRootResolver(
@@ -716,6 +904,69 @@ async function callStateCli(
     );
   }
   return json;
+}
+
+/** `state.ts` の `conflict` (前提違反) の終了コード。正は state.ts の `EXIT_CODES` で、
+ * 契約は `docs/state-cli-contract.md` の「終了コード」節。 */
+const STATE_CONFLICT_EXIT_CODE = 15;
+
+export type LeaseAcquisition = "acquired" | "conflict";
+
+/**
+ * Controller Lease を取る。**`callStateCli` を通さない** — あれは非ゼロ終了をすべて
+ * `DriverError` にするので、`conflict` (= より新しい epoch の driver が既に居る、退くのが
+ * 正しい) と本物の障害を区別できない。
+ *
+ * `conflict` と断定できるのは exit 15 かつ stdout が `{"error":"conflict"}` を返したときだけで、
+ * それ以外の非ゼロは投げる (JSON が壊れていて分類できないときも投げる — 「新しい driver が
+ * 居るのだろう」と推測して黙って引き下がると、本物の障害が停止として片付いてしまう)。
+ */
+export async function acquireControllerLease(
+  ctx: DriverContext,
+  lease: ControllerLease,
+): Promise<LeaseAcquisition> {
+  const args = buildStateArgs(
+    STATE_TS_PATH,
+    ctx.stateDir,
+    "controller-lease-set",
+    buildControllerLeaseStateFlags(
+      ctx.stateDir,
+      lease.session,
+      lease.epoch,
+      false,
+    ),
+  );
+  const result = await ctx.runner.run(Deno.execPath(), args);
+  if (result.code === 0) return "acquired";
+  const json = parseJsonSafe(result.stdout);
+  const error = typeof json === "object" && json !== null
+    ? (json as Record<string, unknown>)["error"]
+    : null;
+  if (result.code === STATE_CONFLICT_EXIT_CODE && error === "conflict") {
+    return "conflict";
+  }
+  const detail = json !== null ? JSON.stringify(json) : result.stderr.trim();
+  throw new DriverError(
+    `state.ts controller-lease-set failed (exit ${result.code}): ${detail}`,
+  );
+}
+
+/** 照合付きの解放。自分が取ったリースが既に奪われていれば `conflict` で落ちるので、
+ * 勝った側のリースを消してしまうことはない。 */
+async function releaseControllerLease(
+  ctx: DriverContext,
+  lease: ControllerLease,
+): Promise<void> {
+  await callStateCli(
+    ctx,
+    "controller-lease-set",
+    buildControllerLeaseStateFlags(
+      ctx.stateDir,
+      lease.session,
+      lease.epoch,
+      true,
+    ),
+  );
 }
 
 async function callPaseoCli(
@@ -1388,7 +1639,19 @@ export interface DispatchLoopParams {
   readonly maxCycles?: number;
   readonly signal: AbortSignal;
   readonly onResult?: (result: CycleResult) => void;
+  /** 指定すると常駐ループが Controller Lease を取り、離脱時に解放する。 */
+  readonly lease?: ControllerLease;
+  readonly heartbeat?: HeartbeatWriter;
+  /** ループを抜けた理由。`main` はこれで停止理由の 1 行を出す。 */
+  readonly onStop?: (reason: DispatchStopReason) => void;
 }
+
+export type DispatchStopReason =
+  | "desired"
+  | "lease-conflict"
+  | "lease-lost"
+  | "signal"
+  | "max-cycles";
 
 function dispatchContextOf(params: DispatchLoopParams): DriverContext {
   if (params.context !== undefined) return params.context;
@@ -1411,9 +1674,16 @@ function dispatchContextOf(params: DispatchLoopParams): DriverContext {
     paseoNewWorkspace: params.paseoNewWorkspace ?? "local",
     resolveProjectRoot: params.resolveProjectRoot ??
       makeProjectRootResolver(runner, stateDir),
+    lease: params.lease,
+    heartbeat: params.heartbeat,
   };
 }
 
+/**
+ * 実ディスパッチの常駐ループ。**停止意思の確認 → Lease の取得 → サイクル → 解放** の順で、
+ * 取得が `conflict` (より新しい epoch の driver が居る) のときは `try` に入らずに退く —
+ * 解放を通してしまうと、勝った側のリースに照合付きの解放を打つことになる。
+ */
 export async function runDispatchLoop(
   params: DispatchLoopParams,
 ): Promise<readonly CycleResult[]> {
@@ -1421,26 +1691,84 @@ export async function runDispatchLoop(
   const intervalMs =
     (params.intervalSec ?? DEFAULT_DISPATCH_LOOP_INTERVAL_SEC) * 1000;
   const results: CycleResult[] = [];
-  let sequence = 0;
-  while (true) {
-    if (
-      params.signal.aborted ||
-      (params.maxCycles !== undefined && sequence >= params.maxCycles)
-    ) {
-      break;
+  const lease = ctx.lease;
+
+  // 1 サイクルも回さないと分かっているなら、停止意思の確認も Lease の取得もしない
+  // (取っても使わないリースを state.json に置いて回るのは、他プロセスから見て嘘になる)。
+  if (params.signal.aborted) {
+    params.onStop?.("signal");
+    return results;
+  }
+  if (params.maxCycles !== undefined && params.maxCycles <= 0) {
+    params.onStop?.("max-cycles");
+    return results;
+  }
+
+  if (await readDesired(ctx.stateDir) === "stopped") {
+    params.onStop?.("desired");
+    return results;
+  }
+  if (lease !== undefined) {
+    if (await acquireControllerLease(ctx, lease) === "conflict") {
+      params.onStop?.("lease-conflict");
+      return results;
     }
-    const result = await runCycle(ctx);
-    results.push(result);
-    params.onResult?.(result);
-    sequence += 1;
-    if (
-      params.signal.aborted ||
-      (params.maxCycles !== undefined && sequence >= params.maxCycles)
-    ) {
-      break;
+  }
+
+  // Lease を失って抜けたときは解放しない — 既に持ち主が別のプロセスであり、照合付きの
+  // 解放は conflict で落ちる (finally から例外が飛んで正常な離脱を潰す)。
+  let holdsLease = lease !== undefined;
+  try {
+    let sequence = 0;
+    while (true) {
+      if (params.signal.aborted) {
+        params.onStop?.("signal");
+        break;
+      }
+      if (params.maxCycles !== undefined && sequence >= params.maxCycles) {
+        params.onStop?.("max-cycles");
+        break;
+      }
+      if (await readDesired(ctx.stateDir) === "stopped") {
+        params.onStop?.("desired");
+        break;
+      }
+      if (lease !== undefined) {
+        await callStateCli(
+          ctx,
+          "session-touch",
+          buildSessionTouchStateFlags(ctx.stateDir, lease.session),
+        );
+      }
+      await ctx.heartbeat?.cycleStart();
+      const result = await runCycle(ctx);
+      await ctx.heartbeat?.cycleEnd();
+      results.push(result);
+      params.onResult?.(result);
+      sequence += 1;
+      if (result.outcome === "lease-lost") {
+        holdsLease = false;
+        params.onStop?.("lease-lost");
+        break;
+      }
+      if (params.signal.aborted) {
+        params.onStop?.("signal");
+        break;
+      }
+      if (params.maxCycles !== undefined && sequence >= params.maxCycles) {
+        params.onStop?.("max-cycles");
+        break;
+      }
+      await sleepAbortable(intervalMs, params.signal);
+      if (params.signal.aborted) {
+        params.onStop?.("signal");
+        break;
+      }
     }
-    await sleepAbortable(intervalMs, params.signal);
-    if (params.signal.aborted) break;
+  } finally {
+    if (lease !== undefined && holdsLease) {
+      await releaseControllerLease(ctx, lease);
+    }
   }
   return results;
 }
@@ -1449,6 +1777,33 @@ export async function runDispatchLoop(
 // 1 サイクル: next → due な1件を実行 → 終了
 // ---------------------------------------------------------------------------
 
+/** 自分のリースが `next` の応答で確認できるか。`session` と `epoch` の両方が一致しない
+ * かぎり、制御権は既に別のプロセス (または人の解除) に移っている。 */
+function stillHoldsLease(
+  lease: ControllerLease,
+  nextResult: NextResult,
+): boolean {
+  const current = nextResult.controller_lease;
+  if (current === null || current === undefined) return false;
+  return current.session === lease.session && current.epoch === lease.epoch;
+}
+
+/**
+ * 長命操作のデッドラインまでの秒数 (時刻ではなく所要時間を返し、ISO への変換は
+ * 時計を持つ `HeartbeatWriter` に任せる)。`claim` は `state.ts` を 1 本呼ぶだけなので
+ * デッドラインを持たない。
+ */
+export function operationDeadlineSec(
+  op: DriverOperation["op"],
+  waitTimeoutSec: number,
+): number | null {
+  if (op === "takeover") return DRIVER_TAKEOVER_DEADLINE_SEC;
+  if (op === "status-check" || op === "wait") {
+    return waitTimeoutSec + DRIVER_DEADLINE_MARGIN_SEC;
+  }
+  return null;
+}
+
 export async function runCycle(ctx: DriverContext): Promise<CycleResult> {
   const nextFlags = buildNextStateFlags(ctx.stateDir, {
     session: ctx.session,
@@ -1456,8 +1811,18 @@ export async function runCycle(ctx: DriverContext): Promise<CycleResult> {
   });
   const nextResult = await callStateCli(ctx, "next", nextFlags) as NextResult;
 
+  // 常駐ループのときだけ効く。追い出された側が最後の 1 手を打ってしまうと、勝った
+  // プロセスと二重にディスパッチすることになる。
+  if (ctx.lease !== undefined && !stillHoldsLease(ctx.lease, nextResult)) {
+    return { op: "none", id: null, outcome: "lease-lost" };
+  }
+
   const { selected, firstDeferred } = selectDriverAction(nextResult.tasks);
   if (selected !== null) {
+    await ctx.heartbeat?.operation(
+      selected.op.op,
+      operationDeadlineSec(selected.op.op, ctx.waitTimeoutSec),
+    );
     switch (selected.op.op) {
       case "claim":
         return await handleClaim(ctx, selected.id);
@@ -1470,6 +1835,7 @@ export async function runCycle(ctx: DriverContext): Promise<CycleResult> {
     }
   }
   if (firstDeferred !== null) {
+    await ctx.heartbeat?.operation("deferred", null);
     return {
       op: "deferred",
       id: firstDeferred.id,
@@ -1563,13 +1929,35 @@ export async function main(argv: string[]): Promise<number> {
     );
     const paseoBin = flags.get("paseo-bin") ?? "paseo";
 
+    // ループ用フラグの形状は**ファイルに触る前**に確かめる — usage エラーが state dir の
+    // 有無に左右されると、引数の誤りが環境の問題に見える。
+    const intervalSec = intFlag(
+      flags,
+      "interval-sec",
+      DEFAULT_DISPATCH_LOOP_INTERVAL_SEC,
+    );
+    const maxCycles = flags.has("max-cycles")
+      ? requireIntFlag(flags, "max-cycles")
+      : undefined;
+
     const runner = new SubprocessRunner();
     const prefs = await readOrchestrationPrefs(Deno.env.get("HOME") ?? "");
+
+    // 常駐 driver は `CLAUDE_CODE_SESSION_ID` を名乗らない — オーケストレーターと同じ
+    // session id になると `controller_lease.session == --session` で抑制が効かず、
+    // 二重ディスパッチ防止が成立しないためである。`--session` の明示だけを尊重する。
+    const lease: ControllerLease | undefined = loop
+      ? {
+        session: flags.get("session") ??
+          await readOrCreateDriverSession(stateDir),
+        epoch: Date.now(),
+      }
+      : undefined;
 
     const ctx: DriverContext = {
       runner,
       stateDir,
-      session,
+      session: lease?.session ?? session,
       waitTimeoutSec,
       paseoBin,
       launchArgs: {
@@ -1585,16 +1973,12 @@ export async function main(argv: string[]): Promise<number> {
       },
       paseoNewWorkspace: flags.get("paseo-new-workspace") ?? "local",
       resolveProjectRoot: makeProjectRootResolver(runner, stateDir),
+      lease,
+      heartbeat: lease === undefined
+        ? undefined
+        : new FileHeartbeatWriter({ stateDir, lease }),
     };
     if (loop) {
-      const intervalSec = intFlag(
-        flags,
-        "interval-sec",
-        DEFAULT_DISPATCH_LOOP_INTERVAL_SEC,
-      );
-      const maxCycles = flags.has("max-cycles")
-        ? requireIntFlag(flags, "max-cycles")
-        : undefined;
       const controller = new AbortController();
       const onSignal = () => controller.abort();
       Deno.addSignalListener("SIGINT", onSignal);
@@ -1606,6 +1990,12 @@ export async function main(argv: string[]): Promise<number> {
           maxCycles,
           signal: controller.signal,
           onResult: (cycleResult) => console.log(JSON.stringify(cycleResult)),
+          onStop: (reason) => {
+            // signal / max-cycles は「言われたとおり終わった」だけなので黙って抜ける。
+            // 残り 3 つは driver 自身の判断による停止で、運用ログに残す必要がある。
+            if (reason === "signal" || reason === "max-cycles") return;
+            console.log(JSON.stringify({ driver: "stopped", reason }));
+          },
         });
       } finally {
         Deno.removeSignalListener("SIGINT", onSignal);
