@@ -60,6 +60,7 @@ FIELD_PATTERNS = {
     "not_fail": r"^not-FAIL:\s+(\d+)$",
     "unnumbered": r"^unnumbered:\s+(\d+)$",
     "first_attempt": r"^first-attempt:\s+(\d+)$",
+    "shell_check": r"^shell-check:\s+(\d+)$",
     "denominator": r"^denominator \(attempt>0 FAIL\):\s+(\d+)$",
     "no_field": r"^no-carryover-field:\s+(\d+)$",
     "malformed": r"^malformed:\s+(\d+)$",
@@ -189,6 +190,25 @@ def main():
             ok("P4: attempt==0 は first-attempt (分母に入らない)、attempt==1/2 は分母に入る")
         else:
             ng("P4: attempt==0 は first-attempt (分母に入らない)、attempt==1/2 は分母に入る", f"got={r!r}")
+
+    # P12: シェル判定 (audit.mode == "shell") は分母に数えない
+    with tempfile.TemporaryDirectory() as tmp:
+        repo_root = os.path.join(tmp, "repo")
+        vdir = os.path.join(repo_root, ".task-pipeline", "runs", "slug-p12", "verdicts")
+        # LLM 検証エージェントの FAIL (carryover 無し) は従来どおり no-field に数える。
+        w(vdir, "implement-1.json", {"phase": "implement", "verdict": "FAIL",
+                                     "required_fixes": ["a"]})
+        # シェル判定の FAIL は carryover を持ちえないので、分母にも no-field にも入らない。
+        w(vdir, "implement-2.json", {"phase": "implement", "verdict": "FAIL",
+                                     "required_fixes": ["b"],
+                                     "audit": {"mode": "shell", "checks": []}})
+        proc = run(script, [repo_root])
+        r = parse_report(proc.stdout)
+        if r["shell_check"] == 1 and r["denominator"] == 1 and r["no_field"] == 1:
+            ok("P12: シェル判定の FAIL は shell-check に数え、分母と no-field に入れない")
+        else:
+            ng("P12: シェル判定の FAIL は shell-check に数え、分母と no-field に入れない",
+               f"got={r!r}")
 
     # --- P5/P6/P7: carryover キー有無・値の型・status の妥当性 ------------------------------
     with tempfile.TemporaryDirectory() as tmp:

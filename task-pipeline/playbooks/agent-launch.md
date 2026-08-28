@@ -41,7 +41,7 @@ sed -n '2,/^---$/p' <tasks/<id>.md の絶対パス> | grep -Fxq 'risk: high'
 
 - **class は state.json に書かない。** 起動のたびにここで導出し直す (`state.schema.json` は変更しない — frontmatter から必ず導けるものを状態に持たせない。宣言の正はトラッカー側にあり frontmatter はその転写、という gate 判定の規律もそのまま引き継ぐ)。タスクファイルが読めない・grep が実行できないときは `standard` に落とす。
 - **`gate: light` と `risk: high` の両方が見えたら `high` を採る** (保守側)。宣言としては背反で、これは task-prep 側の誤りである (`task-prep/SKILL.md`「risk-high 宣言」)。**history に 1 行残す** (`agent-launch: <id> は gate: light と risk: high の両方が立っている — class=high を採用 (保守側)`)。
-- **class はワークフローを動かさない。** フェーズ列とゲートの数を決めるのは SKILL.md「タスク実行」手順 1 の gate 判定 (`run.gate` / `run.phase`) だけで、上の両立ケースでも `gate: light` が立っていればフェーズ列は light のままである。class が動かすのは下記の provider・model の選択だけである。
+- **class はワークフローを動かさない。** フェーズ列とゲートの数を決めるのは SKILL.md「タスク実行」手順 1 の gate 判定 (`run.gate` / `run.phase`) だけで、上の両立ケースでも `gate: light` が立っていればフェーズ列は light のままである。class が動かすのは下記の provider・model の選択と、検証ポリシー (`audit_mode`) の床である (床の表は `scripts/task-policy.ts`、ゲートでの使われ方は SKILL.md「シェル判定 (Shell-Check ゲート)」)。
 
 ## provider・model・mode の解決手順
 

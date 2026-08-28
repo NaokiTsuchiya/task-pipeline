@@ -112,7 +112,7 @@ compile(class, gate, finish) → runs/<id>/plan.json
 
 | タスク分類 (Class) | 判定基準 (6項目該当) | ワークフロー (Gate) | Executor 寿命 | 検証ゲート (Verifier) | 想定コスト / 時間 |
 |---|---|---|---|---|---|
-| **Trivial (低リスク)** | 6項目すべて非該当、かつ機械的検証可能 (純ドキュメント、軽微な命名統一、テスト整理) | `gate: light`<br>(3フェーズ) | ワンショット<br>(1体で完結) | **Shell-Check ゲート**<br>(テストコマンド等の機械的終了コードのみで PASS/FAIL 判定。LLM 呼び出しゼロ) | コスト: **極小 (~135k tokens)**<br>時間: **~2分** |
+| **Trivial (低リスク)** | 6項目すべて非該当、かつ機械的検証可能 (純ドキュメント、軽微な命名統一、テスト整理) | `gate: light`<br>(3フェーズ) | ワンショット<br>(1体で完結) | **Shell-Check ゲート**<br>(`implement` のゲートだけ。テストコマンド等の機械的終了コードのみで PASS/FAIL 判定。LLM 呼び出しゼロ。`research+plan` / `report` は散文の成果物を判定するので LLM Verifier のまま) | コスト: **極小 (~135k tokens)**<br>時間: **~2分** |
 | **Standard (通常)** | 単一モジュールの通常の機能追加・不具合修正 | `gate: full`<br>(4フェーズ) | 長命 executor<br>(フェーズ間再開) | **独立 LLM Verifier (1体)**<br>(FAIL 時の再開 ≤ 3回) | コスト: **標準 (~700k tokens)**<br>時間: **~30〜45分** |
 | **High (高リスク)** | 公開API変更、スキーマ移行、セキュリティ、並行性、血流域モジュール、新規依存のいずれか | `gate: full`<br>(4フェーズ) | フェーズ毎フレッシュ<br>(前フェーズの思い込み遮断) | **異種モデル合議 Verifier**<br>(異なる 2 プロバイダによる両 PASS 必須) | コスト: **高 (堅牢性最優先)**<br>時間: **~60〜90分** |
 
@@ -144,8 +144,11 @@ compile(class, gate, finish) → runs/<id>/plan.json
 - [x] **Task 3-1: Paseo Workspace による Task Cell 隔離の標準化** (gh-157)
   - takeover が `paseo workspace create --json` で Task Cell を明示生成し、exact な id を `runs/<id>/paseo-workspace.json` に記録してから `paseo run --workspace <id>` で起こす。
   - `state.ts retire` / `withdraw` が台帳 (`cleanup_outbox`) に Cleanup Intent を同じ書き込みで積み (Durable Cleanup Outbox — 台帳は外部 RPC を呼ばない)、Driver の低頻度・冪等なスイープが記録された owned workspace を archive して `cleanup-resolve` で意思を落とす。手動 CLI で retire された分も同じ経路で回収される。
-- [ ] **Task 3-2: Trivial タスク向け Shell-Check ゲートの実装**
-  - 機械検証可能な受け入れ条件に対する高速・無料のコマンド実行ゲートの導入。
+- [x] **Task 3-2: Trivial タスク向け Shell-Check ゲートの実装** (gh-158)
+  - 監査ポリシー `audit_mode` (`shell` / `single` / `dual`) を `gate` (DAG トポロジ) から分離し、frontmatter の宣言 + class の床から導出する (`scripts/task-policy.ts`。state.json には持たせない)。宣言は強度を上げる方向にだけ効く。
+  - シェル判定を許すのは **`implement` フェーズだけ**である。`research+plan` / `report` / `pr_fix` / `rebase_fix` のゲートの判定対象は散文の成果物と履歴の読解で、コマンドでは検証できないため Audit Floor により `single` へ昇格する (`SHELL_AUDITABLE_PHASE`)。
+  - 実行するコマンドは **base スナップショットの `TASK_PIPELINE_CHECKS.json`** (`git show <base>:...`) から読んだ構造化マニフェスト (`command` + `args`) だけで、シェルを経由しない。マニフェストが無い・壊れているプロジェクトは `single` へ昇格する。
+  - 判定は 3 分類 (`scripts/shell-check.ts`): 全 exit 0 かつ Scope Guard (`git diff --name-only <merge-base>` + untracked が承認済みスコープ内) 成功 → PASS / 非ゼロ終了・タイムアウト・スコープ違反 → FAIL (LLM を介さず標準出力を `required_fixes` へ) / spawn 失敗・git 故障 → UNAVAILABLE (block へ回し、LLM に代行させない)。判定は `runs/<id>/verdicts/` に JSON で残る (コマンド・exit code・所要時間・ログパス)。
 - [ ] **Task 3-3: High タスク向け 異種モデル合議ゲート (Dual-Verifier) の実装**
   - 異なるプロバイダ 2 体による並列検証と両 PASS 合議ロジックの導入。
 - **効果**: 低リスクタスクの 5 倍高速化・コスト削減と、高リスクタスクの欠陥捕捉率の最大化を両立。

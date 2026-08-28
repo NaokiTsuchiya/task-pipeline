@@ -40,7 +40,6 @@ import {
   type CommandRunner,
   type ControllerLease,
   DEFAULT_DISPATCH_LOOP_INTERVAL_SEC,
-  deriveTaskClass,
   type DispatchLoopParams,
   DRIVER_DEADLINE_MARGIN_SEC,
   DRIVER_TAKEOVER_DEADLINE_SEC,
@@ -96,26 +95,6 @@ function assertEquals(actual: unknown, expected: unknown, msg?: string): void {
     throw new Error(`${msg ?? "assertEquals failed"}: ${a} !== ${e}`);
   }
 }
-
-// ---------------------------------------------------------------------------
-// U: タスクの class
-// ---------------------------------------------------------------------------
-
-Deno.test("deriveTaskClass: gate: light -> trivial", () => {
-  assertEquals(deriveTaskClass("id: gh-1\ngate: light\nrisk: low"), "trivial");
-});
-
-Deno.test("deriveTaskClass: risk: high -> high", () => {
-  assertEquals(deriveTaskClass("id: gh-1\nrisk: high"), "high");
-});
-
-Deno.test("deriveTaskClass: no declaration -> standard", () => {
-  assertEquals(deriveTaskClass("id: gh-1\ntitle: foo"), "standard");
-});
-
-Deno.test("deriveTaskClass: both declared -> high (保守側)", () => {
-  assertEquals(deriveTaskClass("gate: light\nrisk: high"), "high");
-});
 
 // ---------------------------------------------------------------------------
 // U: provider・model の 4段解決
