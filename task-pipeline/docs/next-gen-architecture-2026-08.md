@@ -149,6 +149,9 @@ compile(class, gate, finish) → runs/<id>/plan.json
   - シェル判定を許すのは **`implement` フェーズだけ**である。`research+plan` / `report` / `pr_fix` / `rebase_fix` のゲートの判定対象は散文の成果物と履歴の読解で、コマンドでは検証できないため Audit Floor により `single` へ昇格する (`SHELL_AUDITABLE_PHASE`)。
   - 実行するコマンドは **base スナップショットの `TASK_PIPELINE_CHECKS.json`** (`git show <base>:...`) から読んだ構造化マニフェスト (`command` + `args`) だけで、シェルを経由しない。マニフェストが無い・壊れているプロジェクトは `single` へ昇格する。
   - 判定は 3 分類 (`scripts/shell-check.ts`): 全 exit 0 かつ Scope Guard (`git diff --name-only <merge-base>` + untracked が承認済みスコープ内) 成功 → PASS / 非ゼロ終了・タイムアウト・スコープ違反 → FAIL (LLM を介さず標準出力を `required_fixes` へ) / spawn 失敗・git 故障 → UNAVAILABLE (block へ回し、LLM に代行させない)。判定は `runs/<id>/verdicts/` に JSON で残る (コマンド・exit code・所要時間・ログパス)。
-- [ ] **Task 3-3: High タスク向け 異種モデル合議ゲート (Dual-Verifier) の実装**
-  - 異なるプロバイダ 2 体による並列検証と両 PASS 合議ロジックの導入。
+- [x] **Task 3-3: High タスク向け 異種モデル合議ゲート (Dual-Verifier) の実装** (gh-159)
+  - **`audit_mode` の `dual` を実装として埋めた** — Task 3-2 が用意した軸 (`shell` / `single` / `dual`) の 3 つ目で、`high` の床が `dual` になり (`CLASS_AUDIT_FLOOR`)、`audit_mode: dual` の宣言は class を問わず合議へ昇格する。ゲートの選択はシェル判定の応答 (`route: "llm"` + `audit_mode`) で決まる。
+  - `providers_by_class.high.audit` の JSON 配列 2 件 (または `verify_provider=` のカンマ区切り) で 2 体を指定し、**異種 provider かつ異種モデルファミリー**を不変条件として要求する。満たせない設定は単一検証へ降格させず `block` + 通知に落とす。
+  - スロットを**逐次**に起こし (テストキャッシュ・一時ファイルの干渉を構造的に避ける)、スロット別判定 (`verdicts/slots/<phase>-<attempt>.<slot>.json`) を `scripts/dual-verifier.ts` が出所タグ (`[claude] ` / `[omp] `) 付きで正典へ決定論的に連結する。**両 PASS のときだけ PASS**、片方 FAIL でラウンド全体 FAIL、スナップショット不整合のラウンドは破棄。
+  - 手順は `playbooks/dual-verifier.md`、決定の記録は `docs/dual-verifier-2026-08.md`。
 - **効果**: 低リスクタスクの 5 倍高速化・コスト削減と、高リスクタスクの欠陥捕捉率の最大化を両立。

@@ -18,10 +18,10 @@
 //                      inflight.md にあるが、検証ゲート駆動 (停止の扱い) を伴うため
 //                      Task 2-2/2-3 に残す — ここでは鮮度判定と touch だけを行う。)
 //
-// provider・model の解決は `playbooks/agent-launch.md`「provider・model・mode の解決
-// 手順」の 4 段 (起動引数 → providers_by_class → providers → 既定の組) をそのまま実装
-// する (`docs/orchestration-preferences.md`)。**実在確認・junie 除外・現行ハーネス経路
-// フォールバックは実装しない** (この issue は Paseo 経路の 1 サイクルを固めるのが目的)。
+// provider・model の解決 (`playbooks/agent-launch.md`「provider・model・mode の解決手順」の
+// 4 段) と class の導出は `provider-resolve.ts`、外部コマンドの実行境界は
+// `command-runner.ts` にある。**実在確認・junie 除外・現行ハーネス経路フォールバックは
+// 実装しない** (この issue は Paseo 経路の 1 サイクルを固めるのが目的)。
 //
 // 実行形:
 //   deno run --allow-read --allow-write --allow-env --allow-run \
@@ -86,167 +86,21 @@ import {
   requireIntFlag,
 } from "./state-flags.ts";
 import { readTaskClass } from "./task-policy.ts";
-import type { TaskClass } from "./task-policy.ts";
+import {
+  type CommandResult,
+  type CommandRunner,
+  SubprocessRunner,
+} from "./command-runner.ts";
+import {
+  type LaunchArgs,
+  type OrchestrationPrefs,
+  providerModeOf,
+  readOrchestrationPrefs,
+  resolveProviderModel,
+} from "./provider-resolve.ts";
 
-// ---------------------------------------------------------------------------
-// provider・model の解決 (agent-launch.md「provider・model・mode の解決手順」)
-// ---------------------------------------------------------------------------
-
-export type Role = "executor" | "verifier";
-
-export interface OrchestrationPrefs {
-  readonly providers?: Record<string, string>;
-  readonly providers_by_class?: Record<string, Record<string, string>>;
-}
-
-export interface LaunchArgs {
-  readonly impl_provider?: string;
-  readonly verify_provider?: string;
-}
-
-export interface ResolvedProvider {
-  readonly provider: string;
-  readonly model: string | null;
-  readonly source:
-    | "launch-args"
-    | "providers_by_class"
-    | "providers"
-    | "default";
-}
-
-const ROLE_CATEGORY: Record<Role, "impl" | "audit"> = {
-  executor: "impl",
-  verifier: "audit",
-};
-
-// 段4: 既定の組 (実装 = claude 系 / 検証 = omp)。
-const DEFAULT_PROVIDER: Record<Role, string> = {
-  executor: "claude",
-  verifier: "omp",
-};
-
-/** `<provider>[/<model>]` を分ける。最初の `/` までが provider (omp のモデル id 自体が
- * `/` を含むため、残り全部が model)。 */
-export function splitProviderModel(
-  value: string,
-): { provider: string; model: string | null } {
-  const idx = value.indexOf("/");
-  if (idx === -1) return { provider: value, model: null };
-  return { provider: value.slice(0, idx), model: value.slice(idx + 1) };
-}
-
-export function parseOrchestrationPrefs(
-  raw: string,
-): OrchestrationPrefs | null {
-  try {
-    const data: unknown = JSON.parse(raw);
-    if (data === null || typeof data !== "object") return null;
-    return data as OrchestrationPrefs;
-  } catch {
-    return null;
-  }
-}
-
-export async function readOrchestrationPrefs(
-  homeDir: string,
-): Promise<OrchestrationPrefs | null> {
-  if (homeDir === "") return null;
-  try {
-    const text = await Deno.readTextFile(
-      `${homeDir}/.paseo/orchestration-preferences.json`,
-    );
-    return parseOrchestrationPrefs(text);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * 4段解決: 起動引数 → providers_by_class → providers → 既定の組。
- * class 行の床 (`providers_by_class.<class>.audit` を書けるのは class `high` だけ) を守る
- * — `standard`/`trivial` の `audit` は無視して段3へ落とす。
- */
-export function resolveProviderModel(
-  role: Role,
-  taskClass: TaskClass,
-  launchArgs: LaunchArgs,
-  prefs: OrchestrationPrefs | null,
-): ResolvedProvider {
-  const category = ROLE_CATEGORY[role];
-
-  const launchValue = role === "executor"
-    ? launchArgs.impl_provider
-    : launchArgs.verify_provider;
-  if (launchValue) {
-    return { ...splitProviderModel(launchValue), source: "launch-args" };
-  }
-
-  const byClassValue = prefs?.providers_by_class?.[taskClass]?.[category];
-  if (byClassValue && (category === "impl" || taskClass === "high")) {
-    return {
-      ...splitProviderModel(byClassValue),
-      source: "providers_by_class",
-    };
-  }
-
-  const providersValue = prefs?.providers?.[category];
-  if (providersValue) {
-    return { ...splitProviderModel(providersValue), source: "providers" };
-  }
-
-  return { provider: DEFAULT_PROVIDER[role], model: null, source: "default" };
-}
-
-// mode は provider ごとに決まる (agent-launch.md): claude は bypassPermissions、omp は
-// full。未知の provider は指定しない (`providerModeOf` が `undefined` を返す =
-// `--mode` を省略する)。
-const PROVIDER_MODES: Record<string, string> = {
-  claude: "bypassPermissions",
-  omp: "full",
-};
-
-export function providerModeOf(provider: string): string | undefined {
-  return PROVIDER_MODES[provider];
-}
-
-// ---------------------------------------------------------------------------
-// CommandRunner — state.ts / paseo / git の実行境界 (テストではスタブ化する)
-// ---------------------------------------------------------------------------
-
-export interface CommandResult {
-  readonly code: number;
-  readonly stdout: string;
-  readonly stderr: string;
-}
-
-export interface CommandRunner {
-  run(
-    cmd: string,
-    args: readonly string[],
-    opts?: { readonly cwd?: string },
-  ): Promise<CommandResult>;
-}
-
-export class SubprocessRunner implements CommandRunner {
-  async run(
-    cmd: string,
-    args: readonly string[],
-    opts?: { readonly cwd?: string },
-  ): Promise<CommandResult> {
-    const command = new Deno.Command(cmd, {
-      args: [...args],
-      cwd: opts?.cwd,
-      stdout: "piped",
-      stderr: "piped",
-    });
-    const { code, stdout, stderr } = await command.output();
-    return {
-      code,
-      stdout: new TextDecoder().decode(stdout),
-      stderr: new TextDecoder().decode(stderr),
-    };
-  }
-}
+// provider・model・mode の解決は provider-resolve.ts、class の導出は task-policy.ts、
+// 外部コマンドの実行境界は command-runner.ts が正である。
 
 export class DriverError extends Error {}
 

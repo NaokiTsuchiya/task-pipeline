@@ -109,7 +109,7 @@ Deno.test("T-TP-floor-1: class × 宣言の 12 組 (implement フェーズ)", ()
   const expected: Record<TaskClass, readonly string[]> = {
     trivial: ["shell", "shell", "single", "dual"],
     standard: ["single", "single", "single", "dual"],
-    high: ["single", "single", "single", "dual"],
+    high: ["dual", "dual", "dual", "dual"],
   };
   for (const taskClass of Object.keys(expected) as TaskClass[]) {
     for (let i = 0; i < declared.length; i++) {
@@ -130,7 +130,7 @@ Deno.test("T-TP-floor-2: 床の値", () => {
   assertEquals(CLASS_AUDIT_FLOOR, {
     trivial: "shell",
     standard: "single",
-    high: "single",
+    high: "dual",
   });
 });
 

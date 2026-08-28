@@ -443,9 +443,9 @@ const ESCALATIONS: ReadonlyArray<readonly [string, FixtureOpts, string]> = [
     "single",
   ],
   [
-    "class が high",
+    "class が high (床が dual)",
     { taskFrontmatter: "gate: light\nrisk: high" },
-    "single",
+    "dual",
   ],
   [
     "audit_mode: dual の宣言",
