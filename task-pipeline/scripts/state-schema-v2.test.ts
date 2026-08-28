@@ -381,6 +381,36 @@ const VALID_CASES: { label: string; value: unknown }[] = [
     label: "gh-58: history_archived が無い state も合法 (任意キー)",
     value: stateOf([]),
   },
+  {
+    // gh-156: controller_lease は任意キー。3 つ (欠落 / null / 正常オブジェクト) すべてが
+    // 合法であることが「欠落は null と同義」の実装の前提になる。
+    label: "gh-156: controller_lease が無い state も合法 (任意キー)",
+    value: stateOf([]),
+  },
+  {
+    label: "gh-156: controller_lease が null",
+    value: stateOf([], { controller_lease: null }),
+  },
+  {
+    label: "gh-156: controller_lease が 3 キーそろったオブジェクト",
+    value: stateOf([], {
+      controller_lease: {
+        session: "driver-abc",
+        epoch: 1756339200000,
+        acquired_at: "2026-08-28T00:00:00Z",
+      },
+    }),
+  },
+  {
+    label: "gh-156: controller_lease の epoch は 0 でよい",
+    value: stateOf([], {
+      controller_lease: {
+        session: "driver-abc",
+        epoch: 0,
+        acquired_at: "2026-08-28T00:00:00Z",
+      },
+    }),
+  },
 ];
 
 const INVALID_CASES: { label: string; value: unknown }[] = [
@@ -747,6 +777,66 @@ const INVALID_CASES: { label: string; value: unknown }[] = [
   {
     label: "gh-58: history_archived が文字列",
     value: stateOf([], { history_archived: "3" }),
+  },
+  {
+    label: "gh-156: controller_lease に余分なキー",
+    value: stateOf([], {
+      controller_lease: {
+        session: "driver-abc",
+        epoch: 1,
+        acquired_at: "2026-08-28T00:00:00Z",
+        holder: "extra",
+      },
+    }),
+  },
+  {
+    label: "gh-156: controller_lease の session が数値",
+    value: stateOf([], {
+      controller_lease: {
+        session: 1,
+        epoch: 1,
+        acquired_at: "2026-08-28T00:00:00Z",
+      },
+    }),
+  },
+  {
+    label: "gh-156: controller_lease の epoch が文字列",
+    value: stateOf([], {
+      controller_lease: {
+        session: "driver-abc",
+        epoch: "1",
+        acquired_at: "2026-08-28T00:00:00Z",
+      },
+    }),
+  },
+  {
+    label: "gh-156: controller_lease の epoch が負数",
+    value: stateOf([], {
+      controller_lease: {
+        session: "driver-abc",
+        epoch: -1,
+        acquired_at: "2026-08-28T00:00:00Z",
+      },
+    }),
+  },
+  {
+    label: "gh-156: controller_lease の epoch 欠落",
+    value: stateOf([], {
+      controller_lease: {
+        session: "driver-abc",
+        acquired_at: "2026-08-28T00:00:00Z",
+      },
+    }),
+  },
+  {
+    label: "gh-156: controller_lease の acquired_at 欠落",
+    value: stateOf([], {
+      controller_lease: { session: "driver-abc", epoch: 1 },
+    }),
+  },
+  {
+    label: "gh-156: controller_lease が配列",
+    value: stateOf([], { controller_lease: [] }),
   },
 ];
 

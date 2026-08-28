@@ -185,6 +185,15 @@ export interface WithdrawnBranchEntry {
   readonly reason: string;
 }
 
+/** Driver (pipeline-driver.ts) が握る単一制御権の記録。`session` は再起動を跨いで
+ * 安定な driver 固有の id、`epoch` はプロセス起動時刻 (ms) で、後発プロセスが先発を
+ * 追い出すための fencing token である。 */
+export interface V2ControllerLease {
+  readonly session: string;
+  readonly epoch: number;
+  readonly acquired_at: string;
+}
+
 export interface V2State {
   readonly tracker: string;
   readonly source: string;
@@ -205,6 +214,12 @@ export interface V2State {
   // 書き換えるのは stalled-set だけ (state-ledger-v2.ts)。
   readonly stalled?: string | null;
   readonly stalled_since?: string | null;
+  // Driver の Controller Lease (gh-156。スキーマ上は任意キー = 欠落は null と同義)。
+  // queue エントリの座標を持たない帳簿の値で、書き換えるのは controller-lease-set
+  // だけ。**リースが生きているかの判定はこの値だけでは決まらない** — 有効性は
+  // セッション台帳 (sessions/<id> の mtime) が決める (state-next.ts の
+  // activeForeignLeaseOf)。
+  readonly controller_lease?: V2ControllerLease | null;
 }
 
 // ---------------------------------------------------------------------------

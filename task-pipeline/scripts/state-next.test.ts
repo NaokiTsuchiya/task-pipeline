@@ -2038,6 +2038,237 @@ Deno.test(
   },
 );
 
+// N-LEASE — Controller Lease による実ディスパッチの抑制 (gh-156)
+//
+// 抑制するのは Driver が実際に実行する 3 種 (claim / takeover / status-check) だけである。
+// 残りの 9 種と tracker-list を落とすと誰も実行しなくなるので、非抑制側のケースが
+// 「抑制しすぎ」の退行を捕まえる本体になる。
+
+const DRIVER = "driver-x";
+
+function lease(
+  overrides: Partial<{ session: string; epoch: number; acquired_at: string }> =
+    {},
+): { session: string; epoch: number; acquired_at: string } {
+  return { session: DRIVER, epoch: 100, acquired_at: NOW, ...overrides };
+}
+
+/** Driver が生きている前提の入力 (台帳に driver が載っている)。 */
+function underLease(overrides: Partial<NextInput> = {}): NextInput {
+  return input({ alive: [SELF, DRIVER], ...overrides });
+}
+
+nextTest(
+  "next/start: 有効な他人の Lease は claim を消して driver_lease を立てる",
+  () => {
+    const queue = [item("t-1", { progress: "queued", session: null })];
+    const withLease = deriveNext(
+      state(queue, { controller_lease: lease() }),
+      underLease(),
+    );
+    assertEquals(withLease.start.allowed, false);
+    assertEquals(withLease.start.blocked_by, ["driver_lease"]);
+    assertEquals(withLease.start.next_id, null);
+    assertEquals(actionKinds(taskOf(withLease, "t-1")), []);
+    assertEquals(withLease.controller_lease, lease());
+
+    // 回帰: Lease が無ければ従来どおり claim が出る。
+    const without = deriveNext(state(queue), input());
+    assertEquals(without.start.next_id, "t-1");
+    assertEquals(actionKinds(taskOf(without, "t-1")), ["claim"]);
+    assertEquals(without.controller_lease, null);
+  },
+);
+
+nextTest(
+  "next/start: driver_lease は max_tasks の後、他の理由より先に並ぶ",
+  () => {
+    const result = deriveNext(
+      state([
+        item("t-1", { progress: "queued", session: null }),
+        item("t-2", {
+          progress: "resting",
+          artifact: openArtifact(),
+        }),
+      ], { controller_lease: lease() }),
+      underLease({
+        config: config({ max_open: 1, max_tasks: 1 }),
+        tasksStarted: 1,
+      }),
+    );
+    assertEquals(result.start.blocked_by, [
+      "max_tasks",
+      "driver_lease",
+      "max_open",
+    ]);
+  },
+);
+
+nextTest(
+  "next/liveness: Lease 中の running は理由を問わず wait{driver-lease} 1 件だけ",
+  () => {
+    // 沈黙超過 (本来 status-check) / 引き継ぎ待ち超過 (本来 takeover) / 強い証拠
+    // (本来 takeover{strong-evidence}) の 3 経路すべてが同じ wait に潰れる。
+    const cases: { label: string; queue: V2Item[]; input: NextInput }[] = [
+      {
+        label: "沈黙超過",
+        queue: [item("t-1", {
+          progress: "running",
+          run: run({ executor_last_event_at: isoMinutesAgo(91) }),
+        })],
+        input: underLease(),
+      },
+      {
+        label: "引き継ぎ待ち超過",
+        queue: [item("t-1", {
+          progress: "running",
+          run: run({ takeover_at: isoMinutesAgo(31) }),
+        })],
+        input: underLease(),
+      },
+      {
+        label: "孤児の強い証拠",
+        queue: [item("t-1", {
+          progress: "running",
+          session: "session-gone",
+          run: run(),
+        })],
+        input: underLease({ deadEvidence: ["t-1"] }),
+      },
+    ];
+    for (const c of cases) {
+      const task = taskOf(
+        deriveNext(state(c.queue, { controller_lease: lease() }), c.input),
+        "t-1",
+      );
+      assertEquals(actionKinds(task), ["wait"], c.label);
+      assertEquals(actionOf(task, "wait").reason, "driver-lease", c.label);
+    }
+  },
+);
+
+nextTest(
+  "next/liveness: Lease が有効でない 3 パターンでは抑制しない",
+  () => {
+    const queue = [item("t-1", {
+      progress: "running",
+      run: run({ executor_last_event_at: isoMinutesAgo(91) }),
+    })];
+    // 1. Lease が自分のもの (Driver 自身の next 呼び出し) — 抑制すると 1 件も実行できない
+    const own = deriveNext(
+      state(queue, { controller_lease: lease({ session: SELF }) }),
+      underLease(),
+    );
+    assertEquals(
+      actionKinds(taskOf(own, "t-1")),
+      ["status-check"],
+      "自分の Lease",
+    );
+    // 2. Lease の持ち主が生存一覧に居ない (クラッシュして解放できなかった)
+    const dead = deriveNext(
+      state(queue, { controller_lease: lease() }),
+      input({ alive: [SELF] }),
+    );
+    assertEquals(actionKinds(taskOf(dead, "t-1")), ["status-check"], "失効");
+    // 3. Lease が無い (キー欠落)
+    const none = deriveNext(state(queue), input());
+    assertEquals(
+      actionKinds(taskOf(none, "t-1")),
+      ["status-check"],
+      "Lease 無し",
+    );
+  },
+);
+
+nextTest(
+  "next/liveness: session を主張できない呼び出し側も抑制される",
+  () => {
+    // `--session` 空 = 所有を主張できない環境。Lease の持ち主とは一致しないので抑制側。
+    const result = deriveNext(
+      state([item("t-1", {
+        progress: "running",
+        session: null,
+        run: run({ executor_last_event_at: isoMinutesAgo(91) }),
+      })], { controller_lease: lease() }),
+      input({ session: "", alive: [DRIVER] }),
+    );
+    assertEquals(
+      actionOf(taskOf(result, "t-1"), "wait").reason,
+      "driver-lease",
+    );
+  },
+);
+
+nextTest(
+  "next/follow: Lease 中でも Driver が実行しない 9 種と tracker-list は残る",
+  () => {
+    // probe-run (追従) / fix-start (修正サイクル) / retire (回収) / set-takeover /
+    // clear-takeover — どれも pipeline-dispatch.ts が deferred に分類する = Driver は
+    // 実行しない。ここが空になったら、Lease 中は誰も追従・回収しなくなる。
+    const result = deriveNext(
+      state([
+        item("t-probe", {
+          progress: "resting",
+          artifact: openArtifact({ follow: follow({ probe: probe() }) }),
+        }),
+        item("t-fix", {
+          progress: "resting",
+          artifact: openArtifact({
+            follow: follow({ asks: { fix: fixAsk(), rebase: null } }),
+          }),
+        }),
+        item("t-merged", { progress: "resting", artifact: mergedArtifact() }),
+        item("t-dead", {
+          progress: "running",
+          session: "session-gone",
+          run: run({ executor_last_event_at: isoMinutesAgo(91) }),
+        }),
+        item("t-clear", {
+          progress: "running",
+          run: run({ takeover_at: isoMinutesAgo(5) }),
+        }),
+      ], { controller_lease: lease() }),
+      underLease(),
+    );
+    assertEquals(actionKinds(taskOf(result, "t-probe")), ["probe-run"]);
+    assertEquals(actionKinds(taskOf(result, "t-fix")), ["fix-start"]);
+    assertEquals(actionKinds(taskOf(result, "t-merged")), ["retire"]);
+    // running のタスクは wait に潰れるが、set-takeover / clear-takeover の経路が
+    // 消えるわけではない (Lease が解けた次のイテレーションでそのまま出る)。
+    assertEquals(actionKinds(taskOf(result, "t-dead")), ["wait"]);
+    assertEquals(actionKinds(taskOf(result, "t-clear")), ["wait"]);
+  },
+);
+
+nextTest(
+  "next/observation: Lease 中でも tracker-list (承認の入口) は出る",
+  () => {
+    const result = deriveNext(
+      state([], { controller_lease: lease() }),
+      underLease(),
+    );
+    assertEquals(result.observations.map((o) => o.kind), ["tracker-list"]);
+    assertEquals(result.start.blocked_by, ["driver_lease"]);
+  },
+);
+
+nextTest(
+  "next/ownership: excluded なタスクは Lease 中でも actions が空のまま",
+  () => {
+    const result = deriveNext(
+      state([item("t-1", {
+        progress: "running",
+        session: OTHER,
+        run: run({ executor_last_event_at: isoMinutesAgo(91) }),
+      })], { controller_lease: lease() }),
+      underLease({ alive: [SELF, OTHER, DRIVER] }),
+    );
+    const task = taskOf(result, "t-1");
+    assertEquals(task.excluded, true);
+    assertEquals(task.actions, []);
+  },
+);
+
 // ---------------------------------------------------------------------------
 // 導出 8 分類の網羅 (モジュール読み込み時の不変条件。冒頭の nextTest を参照)
 // ---------------------------------------------------------------------------

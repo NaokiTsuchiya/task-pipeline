@@ -16,6 +16,7 @@
 import {
   appendObserveRecord,
   buildClaimStateFlags,
+  buildControllerLeaseStateFlags,
   buildExecutorPrompt,
   buildGetStateFlags,
   buildGitCurrentBranchArgs,
@@ -27,28 +28,37 @@ import {
   buildPaseoStopArgs,
   buildPaseoWaitArgs,
   buildPaseoWorkspaceArchiveArgs,
+  buildSessionTouchStateFlags,
   buildSetExecutorStateFlags,
   buildSetWorktreeStateFlags,
   buildStateArgs,
   buildTouchExecutorStateFlags,
   type CommandResult,
   type CommandRunner,
+  type ControllerLease,
   DEFAULT_DISPATCH_LOOP_INTERVAL_SEC,
   deriveTaskClass,
   type DispatchLoopParams,
+  DRIVER_DEADLINE_MARGIN_SEC,
+  DRIVER_TAKEOVER_DEADLINE_SEC,
   type DriverContext,
   extractAgentId,
   extractOwnedWorkspaceId,
+  FileHeartbeatWriter,
   findActiveDuplicates,
+  type HeartbeatWriter,
   isExecutorFresh,
   main,
   matchesProtocolLine,
   normalizeMessageLines,
   type ObserveRecord,
+  operationDeadlineSec,
   parentDir,
   parsePaseoLs,
   planObserveTasks,
   providerModeOf,
+  readDesired,
+  readOrCreateDriverSession,
   resolveProviderModel,
   runCycle,
   runDispatchLoop,
@@ -2400,6 +2410,539 @@ Deno.test("main --observe --replay-next: 標準出力にのみ書き、.task-pip
       driverDirExists = false;
     }
     assert(!driverDirExists, ".task-pipeline/driver/ は replay では作られない");
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+// L: 自律制御ループ (gh-156) — desired / Controller Lease / heartbeat
+
+const TEST_LEASE: ControllerLease = { session: "driver-test", epoch: 100 };
+
+async function withTempStateDir(
+  fn: (stateDir: string) => Promise<void>,
+): Promise<void> {
+  const dir = await Deno.makeTempDir();
+  try {
+    await fn(`${dir}/.task-pipeline`);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+}
+
+async function writeDesired(stateDir: string, value: string): Promise<void> {
+  await Deno.mkdir(`${stateDir}/driver`, { recursive: true });
+  await Deno.writeTextFile(`${stateDir}/driver/desired`, value);
+}
+
+/** 記録するだけの HeartbeatWriter (FileHeartbeatWriter とは別に呼び順を固定する)。 */
+class RecordingHeartbeat implements HeartbeatWriter {
+  readonly events: string[] = [];
+  cycleStart(): Promise<void> {
+    this.events.push("start");
+    return Promise.resolve();
+  }
+  operation(kind: string, deadlineSec: number | null): Promise<void> {
+    this.events.push(`op:${kind}:${deadlineSec}`);
+    return Promise.resolve();
+  }
+  cycleEnd(): Promise<void> {
+    this.events.push("end");
+    return Promise.resolve();
+  }
+}
+
+/** state.ts の verb ごとに応答を差し替えられるスタブ。`next` は tasks をそのまま返す。 */
+function leaseRunner(opts: {
+  readonly tasks?: readonly unknown[];
+  readonly controllerLease?: unknown;
+  readonly acquire?: CommandResult;
+} = {}): StubRunner {
+  return new StubRunner((cmd, args) => {
+    const verb = stateVerbOf(args);
+    if (verb === "next") {
+      return ok({
+        tasks: opts.tasks ?? [],
+        controller_lease: opts.controllerLease === undefined
+          ? { ...TEST_LEASE, acquired_at: "2026-08-28T00:00:00.000Z" }
+          : opts.controllerLease,
+      });
+    }
+    if (verb === "controller-lease-set") {
+      const clearing = args.includes("--clear");
+      if (!clearing && opts.acquire !== undefined) return opts.acquire;
+      return ok({ ok: true, controller_lease: null });
+    }
+    if (verb === "session-touch") return ok({ ok: true });
+    if (verb === "claim") return ok({ ok: true });
+    throw new Error(`unexpected call: ${cmd} ${args.join(" ")}`);
+  });
+}
+
+function leaseCalls(runner: StubRunner, clear: boolean): RecordedCall[] {
+  return runner.calls.filter((c) =>
+    stateVerbOf(c.args) === "controller-lease-set" &&
+    c.args.includes("--clear") === clear
+  );
+}
+
+Deno.test("buildSessionTouchStateFlags / buildControllerLeaseStateFlags: 取得と解放でフラグが変わるのは --clear だけ", () => {
+  assertEquals(buildSessionTouchStateFlags("/sd", "driver-a"), [
+    ["state-dir", "/sd"],
+    ["id", "driver-a"],
+  ]);
+  assertEquals(buildControllerLeaseStateFlags("/sd", "driver-a", 7, false), [
+    ["state-dir", "/sd"],
+    ["session", "driver-a"],
+    ["epoch", "7"],
+  ]);
+  assertEquals(buildControllerLeaseStateFlags("/sd", "driver-a", 7, true), [
+    ["state-dir", "/sd"],
+    ["session", "driver-a"],
+    ["epoch", "7"],
+    ["clear", "true"],
+  ]);
+});
+
+Deno.test("readDesired: 不在と running だけが running、他はすべて stopped", async () => {
+  await withTempStateDir(async (stateDir) => {
+    // 不在 = 初回起動と「一度も止められていない」通常状態。ここを stopped に倒すと
+    // driver が一度も起動できない。
+    assertEquals(await readDesired(stateDir), "running");
+
+    const runningCases = ["running", "running\n", "  running  \n"];
+    for (const value of runningCases) {
+      await writeDesired(stateDir, value);
+      assertEquals(
+        await readDesired(stateDir),
+        "running",
+        JSON.stringify(value),
+      );
+    }
+
+    // trim を落とすと "running\n" が未知値 = stopped に落ちる。上の running 側に改行付きを
+    // 置いてあるのはそれを捕まえるためで、"stopped\n" では帰結が変わらず検出できない。
+    const stoppedCases = [
+      "stopped",
+      "stopped\n",
+      " stopped ",
+      "",
+      "   ",
+      "Stopped",
+      "STOPPED",
+      "paused",
+      "running extra",
+    ];
+    for (const value of stoppedCases) {
+      await writeDesired(stateDir, value);
+      assertEquals(
+        await readDesired(stateDir),
+        "stopped",
+        JSON.stringify(value),
+      );
+    }
+  });
+});
+
+Deno.test("readDesired: NotFound 以外の読み取り失敗も stopped に倒す", async () => {
+  await withTempStateDir(async (stateDir) => {
+    // desired がディレクトリ = 読めない。「読めないなら止めておく」に倒す。
+    await Deno.mkdir(`${stateDir}/driver/desired`, { recursive: true });
+    assertEquals(await readDesired(stateDir), "stopped");
+  });
+});
+
+Deno.test("readOrCreateDriverSession: 生成した id は 2 回目の起動でも同じ", async () => {
+  await withTempStateDir(async (stateDir) => {
+    const first = await readOrCreateDriverSession(stateDir);
+    assert(first.startsWith("driver-"), `driver- 接頭辞が無い: ${first}`);
+    // 再起動を跨いで同じでなければ、前プロセスが claim したタスクが alive-other に
+    // 見えて除外され、誰も引き取れなくなる。
+    assertEquals(await readOrCreateDriverSession(stateDir), first);
+    assertEquals(
+      (await Deno.readTextFile(`${stateDir}/driver/session`)).trim(),
+      first,
+    );
+  });
+});
+
+Deno.test("readOrCreateDriverSession: 空ファイルは作り直す", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await Deno.mkdir(`${stateDir}/driver`, { recursive: true });
+    await Deno.writeTextFile(`${stateDir}/driver/session`, "  \n");
+    const generated = await readOrCreateDriverSession(stateDir);
+    assert(generated.startsWith("driver-"), generated);
+  });
+});
+
+Deno.test("operationDeadlineSec: 長命操作だけがデッドラインを持つ", () => {
+  assertEquals(operationDeadlineSec("claim", 30), null);
+  assertEquals(operationDeadlineSec("deferred", 30), null);
+  assertEquals(
+    operationDeadlineSec("status-check", 30),
+    30 + DRIVER_DEADLINE_MARGIN_SEC,
+  );
+  assertEquals(
+    operationDeadlineSec("wait", 45),
+    45 + DRIVER_DEADLINE_MARGIN_SEC,
+  );
+  assertEquals(
+    operationDeadlineSec("takeover", 30),
+    DRIVER_TAKEOVER_DEADLINE_SEC,
+  );
+});
+
+Deno.test("FileHeartbeatWriter: heartbeat.json は毎回上書きされ、境界でフィールドが戻る", async () => {
+  await withTempStateDir(async (stateDir) => {
+    let nowMs = Date.parse("2026-08-28T00:00:00.000Z");
+    const writer = new FileHeartbeatWriter({
+      stateDir,
+      lease: TEST_LEASE,
+      now: () => new Date(nowMs),
+    });
+    const read = async (): Promise<Record<string, unknown>> =>
+      JSON.parse(await Deno.readTextFile(`${stateDir}/driver/heartbeat.json`));
+
+    await writer.cycleStart();
+    let record = await read();
+    assertEquals(record.schema_version, 1);
+    assertEquals(record.epoch, TEST_LEASE.epoch);
+    assertEquals(record.session, TEST_LEASE.session);
+    assertEquals(record.cycle_started_at, "2026-08-28T00:00:00.000Z");
+    assertEquals(record.cycle_completed_at, null);
+    assertEquals(record.current_operation, "next");
+    assertEquals(record.operation_deadline_at, null);
+
+    await writer.operation("takeover", DRIVER_TAKEOVER_DEADLINE_SEC);
+    record = await read();
+    assertEquals(record.current_operation, "takeover");
+    assertEquals(record.operation_deadline_at, "2026-08-28T00:05:00.000Z");
+
+    nowMs += 10_000;
+    await writer.cycleEnd();
+    record = await read();
+    assertEquals(record.cycle_completed_at, "2026-08-28T00:00:10.000Z");
+    assertEquals(record.current_operation, null);
+    assertEquals(record.operation_deadline_at, null);
+
+    // 2 サイクル目の開始で cycle_completed_at が null に戻る (前サイクルの値が残らない)。
+    nowMs += 5_000;
+    await writer.cycleStart();
+    record = await read();
+    assertEquals(record.cycle_started_at, "2026-08-28T00:00:15.000Z");
+    assertEquals(record.cycle_completed_at, null);
+
+    // 追記ではなく上書き — ファイル全体が 1 個の JSON として読めることが要件である。
+    const text = await Deno.readTextFile(`${stateDir}/driver/heartbeat.json`);
+    assertEquals(text.trimEnd().split("\n").length, 1);
+  });
+});
+
+Deno.test("runDispatchLoop: 起動時に desired=stopped なら next も Lease も触らない", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await writeDesired(stateDir, "stopped");
+    const runner = leaseRunner();
+    const stops: string[] = [];
+    const results = await runDispatchLoop({
+      context: baseCtx(runner, { stateDir, lease: TEST_LEASE }),
+      maxCycles: 3,
+      signal: new AbortController().signal,
+      onStop: (reason) => stops.push(reason),
+    });
+    assertEquals(results, []);
+    assertEquals(stops, ["desired"]);
+    assertEquals(runner.calls, []);
+  });
+});
+
+Deno.test("runDispatchLoop: サイクル間で desired=stopped になったら進行中サイクル完走後に止まる", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await Deno.mkdir(stateDir, { recursive: true });
+    const runner = leaseRunner();
+    const stops: string[] = [];
+    const results = await runDispatchLoop({
+      context: baseCtx(runner, { stateDir, lease: TEST_LEASE }),
+      intervalSec: 0,
+      maxCycles: 5,
+      signal: new AbortController().signal,
+      onResult: () => writeDesired(stateDir, "stopped"),
+      onStop: (reason) => stops.push(reason),
+    });
+    assertEquals(results.length, 1);
+    assertEquals(stops, ["desired"]);
+    // 停止でも照合付きの解放は 1 回だけ打つ。
+    assertEquals(leaseCalls(runner, true).length, 1);
+  });
+});
+
+Deno.test("runDispatchLoop: acquire が conflict なら 1 サイクルも回さず解放も打たない", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await Deno.mkdir(stateDir, { recursive: true });
+    const runner = leaseRunner({
+      acquire: {
+        code: 15,
+        stdout: JSON.stringify({ error: "conflict", message: "newer" }),
+        stderr: "",
+      },
+    });
+    const stops: string[] = [];
+    const results = await runDispatchLoop({
+      context: baseCtx(runner, { stateDir, lease: TEST_LEASE }),
+      maxCycles: 3,
+      signal: new AbortController().signal,
+      onStop: (reason) => stops.push(reason),
+    });
+    assertEquals(results, []);
+    assertEquals(stops, ["lease-conflict"]);
+    assertEquals(
+      runner.calls.filter((c) => stateVerbOf(c.args) === "next").length,
+      0,
+      "conflict なのに next を呼んだ",
+    );
+    // 勝った側のリースに照合付きの解放を打ってはならない (打つと conflict で例外になる)。
+    assertEquals(leaseCalls(runner, true).length, 0);
+  });
+});
+
+Deno.test("runDispatchLoop: acquire の conflict 以外の失敗は例外として伝播する", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await Deno.mkdir(stateDir, { recursive: true });
+    for (
+      const acquire of [
+        // conflict 以外の終了コード
+        {
+          code: 12,
+          stdout: JSON.stringify({ error: "schema", message: "broken" }),
+          stderr: "",
+        },
+        // exit 15 だが JSON として読めない = conflict と断定できない
+        { code: 15, stdout: "not json", stderr: "" },
+        // exit 15 だが error が conflict でない
+        {
+          code: 15,
+          stdout: JSON.stringify({ error: "missing" }),
+          stderr: "",
+        },
+      ]
+    ) {
+      const runner = leaseRunner({ acquire });
+      let thrown: unknown = null;
+      try {
+        await runDispatchLoop({
+          context: baseCtx(runner, { stateDir, lease: TEST_LEASE }),
+          maxCycles: 1,
+          signal: new AbortController().signal,
+        });
+      } catch (e) {
+        thrown = e;
+      }
+      assert(thrown instanceof Error, `例外が飛ばなかった: ${acquire.code}`);
+      assert(
+        (thrown as Error).message.includes("controller-lease-set failed"),
+        (thrown as Error).message,
+      );
+      assertEquals(
+        runner.calls.filter((c) => stateVerbOf(c.args) === "next").length,
+        0,
+      );
+    }
+  });
+});
+
+Deno.test("runDispatchLoop: Lease を握っているあいだ毎サイクル session-touch する", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await Deno.mkdir(stateDir, { recursive: true });
+    const runner = leaseRunner();
+    await runDispatchLoop({
+      context: baseCtx(runner, { stateDir, lease: TEST_LEASE }),
+      intervalSec: 0,
+      maxCycles: 2,
+      signal: new AbortController().signal,
+    });
+    const touches = runner.calls.filter((c) =>
+      stateVerbOf(c.args) === "session-touch"
+    );
+    assertEquals(touches.length, 2);
+    assertEquals(
+      touches[0].args[touches[0].args.indexOf("--id") + 1],
+      "driver-test",
+    );
+    assertEquals(leaseCalls(runner, false).length, 1, "取得は 1 回だけ");
+    assertEquals(leaseCalls(runner, true).length, 1, "解放は 1 回だけ");
+  });
+});
+
+Deno.test("runDispatchLoop: Lease 未指定 (単発相当) では Lease も session-touch も触らない", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await Deno.mkdir(stateDir, { recursive: true });
+    const runner = leaseRunner();
+    await runDispatchLoop({
+      context: baseCtx(runner, { stateDir }),
+      intervalSec: 0,
+      maxCycles: 1,
+      signal: new AbortController().signal,
+    });
+    assertEquals(leaseCalls(runner, false).length, 0);
+    assertEquals(leaseCalls(runner, true).length, 0);
+    assertEquals(
+      runner.calls.filter((c) => stateVerbOf(c.args) === "session-touch")
+        .length,
+      0,
+    );
+  });
+});
+
+Deno.test("runDispatchLoop: heartbeat は開始 → 操作 → 終了の順で呼ばれる", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await Deno.mkdir(stateDir, { recursive: true });
+    const heartbeat = new RecordingHeartbeat();
+    const runner = leaseRunner({
+      tasks: [{ id: "gh-1", actions: [{ kind: "claim" }] }],
+    });
+    await runDispatchLoop({
+      context: baseCtx(runner, { stateDir, lease: TEST_LEASE, heartbeat }),
+      intervalSec: 0,
+      maxCycles: 1,
+      signal: new AbortController().signal,
+    });
+    assertEquals(heartbeat.events, ["start", "op:claim:null", "end"]);
+  });
+});
+
+Deno.test("runDispatchLoop: due が無いサイクルでも開始と終了は打つ", async () => {
+  await withTempStateDir(async (stateDir) => {
+    await Deno.mkdir(stateDir, { recursive: true });
+    const heartbeat = new RecordingHeartbeat();
+    await runDispatchLoop({
+      context: baseCtx(leaseRunner(), {
+        stateDir,
+        lease: TEST_LEASE,
+        heartbeat,
+      }),
+      intervalSec: 0,
+      maxCycles: 1,
+      signal: new AbortController().signal,
+    });
+    assertEquals(heartbeat.events, ["start", "end"]);
+  });
+});
+
+Deno.test("runDispatchLoop: Lease を失ったら何も実行せずループを抜け、解放も打たない", async () => {
+  const cases: { label: string; lease: unknown }[] = [
+    {
+      label: "epoch だけ違う (後発プロセスが奪った)",
+      lease: { session: "driver-test", epoch: 101, acquired_at: "x" },
+    },
+    {
+      label: "session だけ違う",
+      lease: { session: "driver-other", epoch: 100, acquired_at: "x" },
+    },
+    { label: "人が解除した (null)", lease: null },
+  ];
+  for (const c of cases) {
+    await withTempStateDir(async (stateDir) => {
+      await Deno.mkdir(stateDir, { recursive: true });
+      const runner = leaseRunner({
+        tasks: [{ id: "gh-1", actions: [{ kind: "claim" }] }],
+        controllerLease: c.lease,
+      });
+      const stops: string[] = [];
+      const results = await runDispatchLoop({
+        context: baseCtx(runner, { stateDir, lease: TEST_LEASE }),
+        intervalSec: 0,
+        maxCycles: 3,
+        signal: new AbortController().signal,
+        onStop: (reason) => stops.push(reason),
+      });
+      assertEquals(results.length, 1, c.label);
+      assertEquals(results[0].outcome, "lease-lost", c.label);
+      assertEquals(stops, ["lease-lost"], c.label);
+      assertEquals(
+        runner.calls.filter((call) => stateVerbOf(call.args) === "claim")
+          .length,
+        0,
+        `${c.label}: Lease を失った後に claim を実行した`,
+      );
+      assertEquals(leaseCalls(runner, true).length, 0, c.label);
+    });
+  }
+});
+
+Deno.test("runCycle: Lease 未指定なら controller_lease を検査しない (単発経路の回帰)", async () => {
+  const runner = leaseRunner({
+    tasks: [{ id: "gh-1", actions: [{ kind: "claim" }] }],
+    controllerLease: { session: "driver-other", epoch: 999, acquired_at: "x" },
+  });
+  const result = await runCycle(baseCtx(runner));
+  assertEquals(result.op, "claim");
+  assertEquals(result.outcome, "claimed");
+});
+
+Deno.test("main --loop: desired=stopped なら停止理由を 1 行出して exit 0", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const stateDir = `${dir}/.task-pipeline`;
+    await writeDesired(stateDir, "stopped");
+    let code = -1;
+    const lines = await captureConsoleLog(async () => {
+      code = await main([
+        "--loop",
+        "true",
+        "--max-cycles",
+        "1",
+        "--state-dir",
+        stateDir,
+      ]);
+    });
+    // exit 0 でなければ `restart: on-failure` が起こし直してしまう。
+    assertEquals(code, 0);
+    assertEquals(lines, [
+      JSON.stringify({ driver: "stopped", reason: "desired" }),
+    ]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("main --loop: --session 省略なら driver 固有の id を作って使い回す", async () => {
+  const dir = await Deno.makeTempDir();
+  try {
+    const stateDir = `${dir}/.task-pipeline`;
+    await writeDesired(stateDir, "stopped");
+    await captureConsoleLog(async () => {
+      await main([
+        "--loop",
+        "true",
+        "--max-cycles",
+        "1",
+        "--state-dir",
+        stateDir,
+      ]);
+    });
+    const session = (await Deno.readTextFile(`${stateDir}/driver/session`))
+      .trim();
+    assert(session.startsWith("driver-"), session);
+    // env が立っていても driver は名乗らない — 一致するとオーケストレーター側の
+    // 抑制が効かず二重ディスパッチになる。
+    Deno.env.set("CLAUDE_CODE_SESSION_ID", "orchestrator-session");
+    try {
+      await captureConsoleLog(async () => {
+        await main([
+          "--loop",
+          "true",
+          "--max-cycles",
+          "1",
+          "--state-dir",
+          stateDir,
+        ]);
+      });
+    } finally {
+      Deno.env.delete("CLAUDE_CODE_SESSION_ID");
+    }
+    assertEquals(
+      (await Deno.readTextFile(`${stateDir}/driver/session`)).trim(),
+      session,
+    );
   } finally {
     await Deno.remove(dir, { recursive: true });
   }

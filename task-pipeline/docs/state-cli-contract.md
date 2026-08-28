@@ -200,7 +200,7 @@ light は research+plan → implement → report。どちらもその後 `finali
 | 分類 | フィールド | 説明 |
 |---|---|---|
 | queue と同じ書き込みで更新が必要 | `queue`, `completed`, `relisted`, `withdrawn_branches` | `retire`/`restore`/`withdraw` は queue エントリの座標を書き換えるのと**同じ原子的書き込み**でこれらを更新する。 |
-| 帳簿系 (queue の遷移とは無関係に単体で更新) | `candidates`, `promoted`, `stalled`, `stalled_since`, `history`, `history_archived` | `LEDGER_VERBS` の一部として更新される。queue の遷移に一度も参加しない。 |
+| 帳簿系 (queue の遷移とは無関係に単体で更新) | `candidates`, `promoted`, `stalled`, `stalled_since`, `history`, `history_archived`, `controller_lease` | `LEDGER_VERBS` の一部として更新される。queue の遷移に一度も参加しない。 |
 | 全 verb 共通のメタ情報 | `updated_at`, `schema_version` | 書き込み系 verb 全体の共通後処理 (`finalizeStateV2`) が毎回更新する。 |
 | 初期化時に固定される設定値 | `tracker`, `source` | `init` 時に決まり、以降どの verb からも書き換わらない。 |
 
@@ -218,10 +218,10 @@ state を人が読むための入口」である以上ファイルを増やす�
 
 ## verb 一覧
 
-48 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
+49 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
 
 - **遷移 33** — `VERB_SPEC` のキー。上の遷移表に載る。
-- **帳簿 15** — `state-ledger-v2.ts` の `LEDGER_VERBS`。queue エントリの座標を持たない。
+- **帳簿 16** — `state-ledger-v2.ts` の `LEDGER_VERBS`。queue エントリの座標を持たない。
 
 ### 帳簿系
 
@@ -325,7 +325,8 @@ state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
  "start": {"allowed":false,"blocked_by":["max_open"],"next_id":null,"detail":{}},
  "stalled": {"current":"max_open","since":"<iso>|null","elapsed_min":123,
              "set_to":"max_open","defer":null,"cutoff":false},
- "observations": [{"kind":"tracker-list","why":"..."}]}
+ "observations": [{"kind":"tracker-list","why":"..."}],
+ "controller_lease": {"session":"driver-<uuid>","epoch":1756339200000,"acquired_at":"<iso>"}}
 ```
 
 - `counts.queued`/`running`/`resting`/`blocked` は**非除外**のタスクだけを数える
@@ -350,9 +351,18 @@ state.ts next --state-dir <dir> [--session <id>] [--alive <csv>] [--now <iso>] \
   `ship` の引数構成 (`ref_kind` は `finish` 由来、`group_flags` は `--commits` が 1 以上の
   ときに 4 つまとめて付ける対象) と、finalize 指示に `, rebase: off` を足すかどうかの
   `rebase_off` (**出所は `config.rebase` だけ**) を返す。
-- `start.blocked_by` は `["max_tasks","own_initial","inflight_limit","max_open"]` の
-  優先順で、該当するものを**全部**列挙する。`allowed` が真のときだけ `next_id` に
+- `start.blocked_by` は `["max_tasks","driver_lease","own_initial","inflight_limit","max_open"]`
+  の優先順で、該当するものを**全部**列挙する。`allowed` が真のときだけ `next_id` に
   非除外の先頭 `queued` の id が入る。
+- `controller_lease` は state.json の同名フィールドの**生値** (無ければ `null`)。
+  **有効な他人のリースがある間、`next` は Driver が実行する 3 種のアクションを返さない**
+  (gh-156): `claim` は `start.blocked_by` に `driver_lease` が立って `next_id` が `null` に
+  なることで消え、`takeover` / `status-check` は `wait{reason: "driver-lease"}` に替わる。
+  「有効な他人のリース」= `controller_lease != null` ∧ その `session` が `--session` と違う
+  ∧ その `session` が `--alive` に含まれる、の 3 条件すべて。
+  **残りの 9 種 (`probe-run` / `fix-start` / `fix-ci-rerun` / `fix-give-up` / `rebase-start` /
+  `release` / `retire` / `clear-takeover` / `set-takeover`) と `tracker-list` は抑制しない** —
+  Driver はこれらを実行しないので、抑制すると誰も実行しなくなる。
 - `stalled.set_to` は `stalled-set --value` に渡す値。`"null"` / `"max_open"` /
   `"defer"` (= `tracker-list` の結果次第。`defer` オブジェクトの `if_empty` /
   `otherwise` がその分岐) / `"keep"` (停滞の 2 種類のどちらでもないので書き換えない)。
@@ -531,6 +541,38 @@ state.ts stalled-set --state-dir <dir> --value depleted|max_open|null [--bump tr
 効果: `stalled` を設定 (または `null` で解除)。`stalled_since` は「今まで null だった」か
 `--bump` のときだけ現在時刻に更新する。
 成功: `{"ok": true, "value": "<value>"|null}`。
+
+### `controller-lease-set`
+
+```
+state.ts controller-lease-set --state-dir <dir> \
+  ( --session <id> --epoch <n> | --clear true [--session <id> --epoch <n>] ) [lock flags]
+```
+
+常駐 Driver (`scripts/pipeline-driver.ts`) の**単一制御権**を記録・解除する (gh-156)。
+`session` は再起動を跨いで安定な driver 固有の id、`epoch` はプロセス起動時刻 (ms) で、
+後発プロセスが先発を追い出すための fencing token である。
+
+前提と効果:
+
+| 呼び方 | 既存の `controller_lease` | 結果 |
+|---|---|---|
+| 取得 (`--session s --epoch n`) | `null` / キー欠落 | 設定する |
+| 取得 | `epoch <= n` | 上書きする (同じ epoch は自分自身の再取得 = 冪等なリトライ) |
+| 取得 | `epoch > n` | `conflict` — より新しい制御プロセスが居る |
+| 解放 (`--clear true --session s --epoch n`) | `null` / 一致 | `null` にする |
+| 解放 (照合付き) | `session` か `epoch` が不一致 | `conflict` — 勝った側のリースを消さない |
+| 解放 (`--clear true` のみ) | 何であれ | 無条件に `null` にする (運用の解除口) |
+
+`--clear` 無しで `--session` か `--epoch` が欠けていれば `usage`。`--session` は
+`session-touch --id` と同じ検査 (空・`.`・`..`・`/` 含みは `usage`)、`--epoch` は非負整数。
+
+成功: `{"ok": true, "controller_lease": {"session": "<id>", "epoch": <n>, "acquired_at": "<iso>"}|null}`。
+
+**リースの寿命はこの値が持たない** — 有効かどうかは `session` がセッション台帳
+(`sessions/<id>`、上記「heartbeat の契約」) で生存しているかで決まる。Driver は毎サイクル
+`session-touch` で生存を主張し、クラッシュして解放できなかったときは台帳の失効とともに
+`next` の抑制も解ける (新しい閾値をここに置かない理由)。
 
 ### 進行系
 

@@ -3367,6 +3367,188 @@ Deno.test("T-V-next-6: --session/--alive/--now/--config are all optional", async
   assert(typeof out.now === "string", "now must default to the CLI clock");
   assertEquals((out.counts as Record<string, number>).tasks_started, 0);
 });
+// gh-156: 抑制の導出そのものは state-next.test.ts の N-LEASE が覆う。ここで固定するのは
+// CLI 境界 — controller-lease-set の 3 つの終了経路と、next の応答に抑制が現れること。
+Deno.test("T-V-lease-1: controller-lease-set acquires, fences an older epoch, and releases", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem()]);
+
+  const acquired = await expectOk(dir, [
+    "controller-lease-set",
+    "--state-dir",
+    dir,
+    "--session",
+    "driver-a",
+    "--epoch",
+    "100",
+  ]);
+  const lease = acquired.controller_lease as Record<string, unknown>;
+  assertEquals(lease.session, "driver-a");
+  assertEquals(lease.epoch, 100);
+  assert(
+    typeof lease.acquired_at === "string",
+    "acquired_at must be an ISO string",
+  );
+  assertEquals((await readState(dir)).controller_lease, lease);
+
+  // 古い epoch は conflict で、state.json は 1 バイトも変わらない。
+  const conflict = await expectFailureUnchanged(dir, [
+    "controller-lease-set",
+    "--state-dir",
+    dir,
+    "--session",
+    "driver-a",
+    "--epoch",
+    "99",
+  ], EXIT_CODES.conflict);
+  assertEquals(conflict.error, "conflict");
+
+  const released = await expectOk(dir, [
+    "controller-lease-set",
+    "--state-dir",
+    dir,
+    "--clear",
+    "true",
+    "--session",
+    "driver-a",
+    "--epoch",
+    "100",
+  ]);
+  assertEquals(released.controller_lease, null);
+  assertEquals((await readState(dir)).controller_lease, null);
+});
+
+Deno.test("T-V-lease-2: controller-lease-set usage errors", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem()]);
+  const cases: string[][] = [
+    // 取得なのに session / epoch が欠けている
+    ["controller-lease-set", "--state-dir", dir, "--session", "driver-a"],
+    ["controller-lease-set", "--state-dir", dir, "--epoch", "1"],
+    ["controller-lease-set", "--state-dir", dir],
+    // session の形が state dir の外を指せる形
+    [
+      "controller-lease-set",
+      "--state-dir",
+      dir,
+      "--session",
+      "../evil",
+      "--epoch",
+      "1",
+    ],
+    [
+      "controller-lease-set",
+      "--state-dir",
+      dir,
+      "--session",
+      ".",
+      "--epoch",
+      "1",
+    ],
+    // epoch が整数でない / 負数
+    [
+      "controller-lease-set",
+      "--state-dir",
+      dir,
+      "--session",
+      "driver-a",
+      "--epoch",
+      "x",
+    ],
+    [
+      "controller-lease-set",
+      "--state-dir",
+      dir,
+      "--session",
+      "driver-a",
+      "--epoch",
+      "-1",
+    ],
+    // 未知フラグ
+    [
+      "controller-lease-set",
+      "--state-dir",
+      dir,
+      "--session",
+      "driver-a",
+      "--epoch",
+      "1",
+      "--id",
+      "t-1",
+    ],
+  ];
+  for (const args of cases) {
+    const out = await expectFailureUnchanged(dir, args, EXIT_CODES.usage);
+    assertEquals(out.error, "usage", args.join(" "));
+  }
+});
+
+Deno.test("T-V-lease-3: an unmatched --clear always releases (the operator escape hatch)", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem()], {
+    controller_lease: {
+      session: "driver-gone",
+      epoch: 500,
+      acquired_at: "2026-08-08T00:00:00.000Z",
+    },
+  });
+  const out = await expectOk(dir, [
+    "controller-lease-set",
+    "--state-dir",
+    dir,
+    "--clear",
+    "true",
+  ]);
+  assertEquals(out.controller_lease, null);
+  assertEquals((await readState(dir)).controller_lease, null);
+});
+
+Deno.test("T-V-lease-4: next reports the lease and suppresses claim while it is alive", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem({ progress: "queued", session: null })], {
+    controller_lease: {
+      session: "driver-a",
+      epoch: 100,
+      acquired_at: "2026-08-08T00:00:00.000Z",
+    },
+  });
+
+  const suppressed = await expectOkUnchanged(dir, [
+    "next",
+    "--state-dir",
+    dir,
+    "--session",
+    "session-self",
+    "--alive",
+    "session-self,driver-a",
+  ]);
+  const start = suppressed.start as Record<string, unknown>;
+  assertEquals(start.allowed, false);
+  assertEquals(start.blocked_by, ["driver_lease"]);
+  assertEquals(start.next_id, null);
+  assertEquals(
+    (suppressed.controller_lease as Record<string, unknown>).session,
+    "driver-a",
+  );
+  const tasks = suppressed.tasks as Record<string, unknown>[];
+  assertEquals(tasks[0].actions, []);
+
+  // driver-a が生存一覧から消えれば (クラッシュして解放できなかった) 抑制は解ける。
+  const expired = await expectOkUnchanged(dir, [
+    "next",
+    "--state-dir",
+    dir,
+    "--session",
+    "session-self",
+    "--alive",
+    "session-self",
+  ]);
+  assertEquals((expired.start as Record<string, unknown>).next_id, "t-1");
+  assertEquals(
+    (expired.tasks as Record<string, unknown>[])[0].actions as unknown[],
+    [{ kind: "claim" }],
+  );
+});
 
 // gh-104: 再開先で解決される provider/model が前回と同じであることの担保 (SKILL.md 手順 6)
 // は、この CLI 応答がセッション一致を守ることに全面的に依存する。導出そのものは
@@ -5274,7 +5456,7 @@ Deno.test("T-D2: verb headings match ALLOWED_FLAGS keys", async () => {
     [],
     `documented but unimplemented: ${missingInImpl}`,
   );
-  assertEquals(implVerbs.size, 48, "the dispatch set is 48 verbs");
+  assertEquals(implVerbs.size, 49, "the dispatch set is 49 verbs");
 });
 
 Deno.test("T-D3: the node tables match the v2 declarations", async () => {

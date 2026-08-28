@@ -322,6 +322,16 @@
       },
       "required": ["id", "branch", "base", "worktree", "at", "reason"],
       "additionalProperties": false
+    },
+    "controllerLease": {
+      "type": ["object", "null"],
+      "properties": {
+        "session": { "type": "string" },
+        "epoch": { "type": "integer", "minimum": 0 },
+        "acquired_at": { "type": "string" }
+      },
+      "required": ["session", "epoch", "acquired_at"],
+      "additionalProperties": false
     }
   },
   "type": "object",
@@ -339,6 +349,7 @@
     "withdrawn_branches": { "type": "array", "items": { "$ref": "#/$defs/withdrawnBranch" } },
     "history": { "type": "array", "items": { "type": "string" } },
     "history_archived": { "type": "integer", "minimum": 0 },
+    "controller_lease": { "$ref": "#/$defs/controllerLease" },
     "schema_version": { "type": "integer", "enum": [2] }
   },
   "required": ["tracker", "source", "updated_at", "queue", "completed", "candidates", "relisted", "promoted", "history", "schema_version"],
