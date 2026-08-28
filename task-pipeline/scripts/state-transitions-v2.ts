@@ -42,6 +42,7 @@ import {
   REBASE_FIX_DETOUR_PHASE,
 } from "./state-model-v2.ts";
 import {
+  type CleanupIntent,
   CliErrorV2,
   type CompletedEntry,
   type LedgerEntry,
@@ -483,6 +484,28 @@ function prunedCompleted(
   });
 }
 
+/**
+ * 後始末の意思を積む (gh-157)。**同じ id が既に居れば積み増さない** — 意思は「このタスクの
+ * Paseo 資源を畳め」の 1 個であって、`withdraw` の後に `retire` が来ても後始末は 1 回で
+ * 足りる。積み増すと、先に立てたエントリの `attempts`/`last_error` (スイープの失敗履歴) が
+ * 新しいエントリに隠される。
+ */
+export function appendCleanupIntent(
+  outbox: readonly CleanupIntent[],
+  id: string,
+  reason: CleanupIntent["reason"],
+  nowIso: string,
+): readonly CleanupIntent[] {
+  if (outbox.some((e) => e.id === id)) return outbox;
+  return [...outbox, {
+    id,
+    reason,
+    requested_at: nowIso,
+    attempts: 0,
+    last_error: null,
+  }];
+}
+
 export function applyRetire(
   item: V2Item,
   index: number,
@@ -502,7 +525,19 @@ export function applyRetire(
     Number.isNaN(nowMs) ? Number.NEGATIVE_INFINITY : nowMs,
   );
   const completed = [...kept, { id: item.id, done_at: nowIso }];
-  return { ...withRemovedItem(state, index), completed };
+  // queue からの離脱・控えの追記と**同じ 1 回の原子的書き込み**で意思を積む
+  // (Durable Cleanup Outbox)。別の書き込みに分けると、間で落ちたときに
+  // 「queue から消えたのに後始末の意思がどこにも無い」状態が生まれる。
+  return {
+    ...withRemovedItem(state, index),
+    completed,
+    cleanup_outbox: appendCleanupIntent(
+      state.cleanup_outbox,
+      item.id,
+      "retire",
+      nowIso,
+    ),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -693,6 +728,7 @@ export function applyWithdraw(
   item: V2Item,
   index: number,
   state: V2State,
+  nowIso: string,
   note?: string,
 ): V2State {
   requireVerbAxes(item, "withdraw");
@@ -710,7 +746,17 @@ export function applyWithdraw(
     },
     session: null,
   };
-  return withReplacedItem(state, index, next);
+  // 取り下げでもこのタスクの Paseo 経路への関与は終わる (`session` が null になる)。
+  // artifact の書き換えと同じ書き込みで意思を積む (applyRetire と同じ理由)。
+  return {
+    ...withReplacedItem(state, index, next),
+    cleanup_outbox: appendCleanupIntent(
+      state.cleanup_outbox,
+      item.id,
+      "withdraw",
+      nowIso,
+    ),
+  };
 }
 
 export function applyWithdrawAsked(

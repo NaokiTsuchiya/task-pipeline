@@ -29,8 +29,9 @@
 //     [--alive <csv>] [--now <iso>] [--config <k=v,...>] [--dead-tasks <csv>] \
 //     [--wait-timeout-sec <n>] [--paseo-bin <path>] \
 //     [--impl-provider <provider>[/<model>]] [--verify-provider <provider>[/<model>]] \
-//     [--paseo-new-workspace <local|worktree>] (既定値: local; #148 整合) \
-//     [--loop [--interval-sec <n>] [--max-cycles <n>]] [--observe [--replay-next <path>]]
+//     [--paseo-workspace-isolation <local|worktree>] (既定値: local; #148 整合) \
+//     [--loop [--interval-sec <n>] [--max-cycles <n>] [--cleanup-sweep-every-cycles <n>]] \
+//     [--observe [--replay-next <path>]]
 //
 // gh-156 (Phase2 Task 2-3b) で `--loop` の実ディスパッチだけが「自律制御ループ」になった。
 // 常駐に必要な 3 つは `<state dir>/driver/` に閉じている (単発実行はどれも使わない):
@@ -45,6 +46,16 @@
 // テスト: pipeline-driver.test.ts (state.ts / paseo / git をスタブ化した CommandRunner
 // で 4 kind それぞれの組み立てを検証)。実行は deno task test
 // (リポジトリルートの deno.json が *.test.ts を自動検出する)。
+//
+// gh-157 (Phase3 Task 3-1) で Task Cell (タスク専用 Paseo Workspace) のライフサイクルが
+// この driver に閉じた:
+//   - takeover は `paseo workspace create` で workspace を**明示生成**し、
+//     `runs/<id>/paseo-workspace.json` (paseo-workspace.ts) に exact な id を記録してから
+//     `paseo run --workspace <id>` を起こす。
+//   - `--loop` は低頻度 (既定 12 サイクル) で Cleanup Outbox (`state.json` の
+//     `cleanup_outbox`。`state.ts retire`/`withdraw` が積む) をスイープし、記録された
+//     owned workspace を archive して `state.ts cleanup-resolve` で意思を落とす。
+//     **手動 CLI で retire された分も同じ経路で回収される。**
 
 import { planOperation } from "./pipeline-dispatch.ts";
 import type {
@@ -55,6 +66,18 @@ import type {
 } from "./pipeline-dispatch.ts";
 import type { NextResult, NextTask } from "./state-next.ts";
 import type { V2Item, V2State } from "./state-transitions-v2.ts";
+import type { CleanupIntent } from "./state-transitions-v2-types.ts";
+import {
+  emptyWorkspaceFile,
+  markArchived,
+  pendingArchives,
+  readWorkspaceFile,
+  upsertWorkspaceEntry,
+  type WorkspaceEntry,
+  type WorkspaceFile,
+  workspaceFilePathOf,
+  writeWorkspaceFile,
+} from "./paseo-workspace.ts";
 import {
   boolFlag,
   intFlag,
@@ -377,6 +400,18 @@ export function buildSessionTouchStateFlags(
   return [["state-dir", stateDir], ["id", session]];
 }
 
+/** `error` が null なら「後始末が終わった」(エントリ削除)、非 null なら失敗の記録
+ * (試行回数だけ進めて残す) — 契約は docs/state-cli-contract.md の `cleanup-resolve` 節。 */
+export function buildCleanupResolveStateFlags(
+  stateDir: string,
+  id: string,
+  error: string | null,
+): [string, string][] {
+  const flags: [string, string][] = [["state-dir", stateDir], ["id", id]];
+  if (error !== null) flags.push(["error", error]);
+  return flags;
+}
+
 /** `clear` が真なら照合付きの解放、偽なら取得。どちらも session と epoch を渡す。 */
 export function buildControllerLeaseStateFlags(
   stateDir: string,
@@ -395,8 +430,8 @@ export function buildControllerLeaseStateFlags(
 
 /** agent-launch.md「Paseo 経路の起動パラメータと読み取り」の起動パラメータ規則。
  * `executor` には `--output-schema` を付けない (background で複数回停止するため)。
- * `newWorkspace` は既定で "local" とする (#148 整合: top-level / agent-scoped を問わず
- * --cwd の隔離を確実に効かせるため)。明示的に指定された場合はその値を使う。 */
+ * workspace は**先に明示生成したものを `--workspace` で渡す** (gh-157) — 起動時の暗黙生成
+ * だと、id を通知行のパースでしか得られない。 */
 export function buildPaseoRunArgs(params: {
   readonly id: string;
   readonly worktree: string;
@@ -404,7 +439,7 @@ export function buildPaseoRunArgs(params: {
   readonly model: string | null;
   readonly mode: string | undefined;
   readonly prompt: string;
-  readonly newWorkspace?: string;
+  readonly workspaceId: string;
 }): string[] {
   const args = [
     "run",
@@ -420,12 +455,32 @@ export function buildPaseoRunArgs(params: {
     params.worktree,
     "--provider",
     params.model ? `${params.provider}/${params.model}` : params.provider,
+    "--workspace",
+    params.workspaceId,
   ];
-  const newWorkspace = params.newWorkspace ?? "local";
-  if (newWorkspace) args.push("--new-workspace", newWorkspace);
   if (params.mode) args.push("--mode", params.mode);
   args.push(params.prompt);
   return args;
+}
+
+/** Task Cell の明示生成 (gh-157)。`--path` に渡した worktree が workspace の cwd になる
+ * (実測: `--workspace` を渡した `paseo run` は `--cwd` より workspace の cwd を優先する)。 */
+export function buildPaseoWorkspaceCreateArgs(params: {
+  readonly id: string;
+  readonly worktree: string;
+  readonly isolation: string;
+}): string[] {
+  return [
+    "workspace",
+    "create",
+    "--isolation",
+    params.isolation,
+    "--path",
+    params.worktree,
+    "--title",
+    `task-pipeline executor ${params.id}`,
+    "--json",
+  ];
 }
 
 /** agent-launch.md「takeover で差し替えるときの旧エージェント」— 旧 `run.executor` が
@@ -524,9 +579,9 @@ function parseJsonSafe(text: string): unknown {
 }
 
 /**
- * `paseo run -d --json` の stdout から agentId を取る。新規 workspace を作ったときは
- * 先頭に `Created workspace <id> - <name>` の通知行が混じるので、**最初の `{` から
- * 後ろ**を JSON として読む (agent-launch.md)。
+ * `paseo run -d --json` の stdout から agentId を取る。`--workspace` を渡した起動では
+ * `Using workspace <id>` の通知行が stderr に出る (実測 paseo 0.4.0) が、stdout 側にも
+ * 通知が混じる版があるため **最初の `{` から後ろ**を JSON として読む (agent-launch.md)。
  */
 export function extractAgentId(stdout: string): string {
   const idx = stdout.indexOf("{");
@@ -550,22 +605,34 @@ export function extractAgentId(stdout: string): string {
   return agentId;
 }
 
-const CREATED_WORKSPACE_RE = /^Created workspace (\S+)/;
-
 /**
- * `paseo run -d --json` の stdout の先頭に `Created workspace <id> - <name>` の行が
- * あれば、新規に owned workspace を作ったということ (無ければ非所有 = caller の
- * workspace を継承)。「所有 workspace の記録と安全な後始末」節。
+ * `paseo workspace create --json` の応答から workspace id を取る (gh-157)。**通知行の
+ * パースではなく応答そのもの**なので、取りこぼしようがないのがこの経路の要点である。
  */
-export function extractOwnedWorkspaceId(stdout: string): string | null {
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed === "") continue;
-    const match = trimmed.match(CREATED_WORKSPACE_RE);
-    if (match) return match[1];
-    if (trimmed.startsWith("{")) break;
+export function extractCreatedWorkspaceId(stdout: string): string {
+  const idx = stdout.indexOf("{");
+  if (idx === -1) {
+    throw new DriverError(
+      `paseo workspace create --json: no JSON object found: ${
+        JSON.stringify(stdout)
+      }`,
+    );
   }
-  return null;
+  const parsed = JSON.parse(stdout.slice(idx)) as Record<string, unknown>;
+  if ("error" in parsed) {
+    throw new DriverError(
+      `paseo workspace create failed: ${JSON.stringify(parsed.error)}`,
+    );
+  }
+  const workspaceId = parsed.workspaceId;
+  if (typeof workspaceId !== "string" || workspaceId === "") {
+    throw new DriverError(
+      `paseo workspace create --json: no workspaceId in response: ${
+        JSON.stringify(parsed)
+      }`,
+    );
+  }
+  return workspaceId;
 }
 
 export interface PaseoLsEntry {
@@ -853,10 +920,10 @@ export interface DriverContext {
   readonly launchArgs: LaunchArgs;
   readonly prefs: OrchestrationPrefs | null;
   readonly nextOpts: Omit<NextStateOpts, "session">;
-  /** `paseo run` の `--new-workspace` に渡す値。既定は "local" (#148 整合:
-   * agent-scoped / top-level セッションを問わず --cwd の隔離を確実に効かせるため)。
-   * CLI の `--paseo-new-workspace <val>` で上書き可能。 */
-  readonly paseoNewWorkspace?: string;
+  /** Task Cell として明示生成する workspace の `--isolation` (gh-157)。既定は "local"
+   * (#148 整合: agent-scoped / top-level セッションを問わず worktree の隔離を確実に
+   * 効かせるため)。CLI の `--paseo-workspace-isolation <val>` で上書き可能。 */
+  readonly paseoWorkspaceIsolation?: string;
   /** git rev-parse で求めるプロジェクトルート。takeover が worktree を新規に作る
    * ときだけ呼ぶ (claim/status-check/wait では git を一切呼ばない)。 */
   readonly resolveProjectRoot: () => Promise<string>;
@@ -974,6 +1041,17 @@ async function callPaseoCli(
   args: readonly string[],
 ): Promise<CommandResult> {
   return await ctx.runner.run(ctx.paseoBin, args);
+}
+
+/** `runs/<id>/paseo-workspace.json` へ 1 エントリを追記 (同じ workspace_id なら更新)。 */
+async function recordWorkspace(
+  ctx: DriverContext,
+  id: string,
+  entry: WorkspaceEntry,
+): Promise<void> {
+  const path = workspaceFilePathOf(ctx.stateDir, id);
+  const current = await readWorkspaceFile(path) ?? emptyWorkspaceFile();
+  await writeWorkspaceFile(path, upsertWorkspaceEntry(current, entry));
 }
 
 /**
@@ -1171,6 +1249,35 @@ async function handleTakeover(
   const mode = providerModeOf(resolved.provider);
   const prompt = buildExecutorPrompt(op);
 
+  // Task Cell の明示生成 → 記録 → 起動の順 (gh-157)。**記録を起動より先に置く**のは、
+  // `paseo run` が落ちても workspace が記録から漏れないようにするため — 漏れた
+  // workspace はスイープの対象にできず (安全規則: 記録された exact な id だけ)、
+  // 誰にも畳まれないまま残る。
+  const createResult = await callPaseoCli(
+    ctx,
+    buildPaseoWorkspaceCreateArgs({
+      id,
+      worktree,
+      isolation: ctx.paseoWorkspaceIsolation ?? "local",
+    }),
+  );
+  if (createResult.code !== 0) {
+    throw new DriverError(
+      `paseo workspace create failed (exit ${createResult.code}): ${
+        createResult.stderr.trim() || createResult.stdout.trim()
+      }`,
+    );
+  }
+  const workspaceId = extractCreatedWorkspaceId(createResult.stdout);
+  await recordWorkspace(ctx, id, {
+    workspace_id: workspaceId,
+    owned: true,
+    agent_id: null,
+    role: "executor",
+    recorded_at: new Date().toISOString(),
+    archived_at: null,
+  });
+
   const runResult = await callPaseoCli(
     ctx,
     buildPaseoRunArgs({
@@ -1180,7 +1287,7 @@ async function handleTakeover(
       model: resolved.model,
       mode,
       prompt,
-      newWorkspace: ctx.paseoNewWorkspace ?? "local",
+      workspaceId,
     }),
   );
   if (runResult.code !== 0) {
@@ -1191,12 +1298,14 @@ async function handleTakeover(
     );
   }
   const agentId = extractAgentId(runResult.stdout);
-  // 「Created workspace ...」通知行は agent-launch.md の記述では起動応答の先頭 (stdout)
-  // だが、実測 (paseo 0.4.0) では stderr に出ることを確認した。両方の版に対応するため
-  // 両ストリームを対象に探す。
-  const workspaceId = extractOwnedWorkspaceId(
-    `${runResult.stderr}\n${runResult.stdout}`,
-  );
+  await recordWorkspace(ctx, id, {
+    workspace_id: workspaceId,
+    owned: true,
+    agent_id: agentId,
+    role: "executor",
+    recorded_at: new Date().toISOString(),
+    archived_at: null,
+  });
 
   await callStateCli(
     ctx,
@@ -1303,6 +1412,107 @@ async function handleLiveness(
     buildTouchExecutorStateFlags(ctx.stateDir, id, ctx.session, executor),
   );
   return { op: opKind, id, outcome: "touched", detail: { executor } };
+}
+
+// Cleanup Outbox のスイープは、`state.ts retire` / `withdraw` が積んだ意思を読み、その
+// タスクが記録した owned workspace を畳んで意思を落とす。**誰が retire を呼んだかを
+// 問わない** (手動 CLI で回収された分もここに乗る) のが、取りこぼしなく収束する仕組み
+// そのものである。
+
+/** これを超えて失敗したエントリは触らない。**消さずに残す** — 消すと、archive されない
+ * まま忘れられた workspace が誰の視界からも消える (残っていれば `state.ts get` に出る)。 */
+export const CLEANUP_MAX_ATTEMPTS = 3;
+/** スイープを回す間隔 (サイクル数)。既定の 5 秒間隔なら約 60 秒に 1 回。 */
+export const CLEANUP_SWEEP_EVERY_CYCLES = 12;
+export const CLEANUP_SWEEP_DEADLINE_SEC = 120;
+
+export interface CleanupSweepEntryResult {
+  readonly id: string;
+  readonly outcome: "resolved" | "failed" | "skipped";
+  readonly archived: readonly string[];
+  readonly error?: string;
+}
+
+export interface CleanupSweepResult {
+  readonly op: "cleanup-sweep";
+  readonly entries: readonly CleanupSweepEntryResult[];
+}
+
+/** 1 タスク分の後始末。**archive 対象は記録された exact な workspace_id かつ
+ * `owned: true` かつ未 archive のものだけ** (agent-launch.md の安全規則。`cwd` 一致等の
+ * 代替判定は持ち込まない)。 */
+async function sweepOne(
+  ctx: DriverContext,
+  intent: CleanupIntent,
+): Promise<CleanupSweepEntryResult> {
+  const path = workspaceFilePathOf(ctx.stateDir, intent.id);
+  let file: WorkspaceFile | null;
+  try {
+    file = await readWorkspaceFile(path);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    await callStateCli(
+      ctx,
+      "cleanup-resolve",
+      buildCleanupResolveStateFlags(ctx.stateDir, intent.id, message),
+    );
+    return { id: intent.id, outcome: "failed", archived: [], error: message };
+  }
+
+  const archived: string[] = [];
+  let firstError: string | null = null;
+  if (file !== null) {
+    let current = file;
+    for (const entry of pendingArchives(file)) {
+      const result = await callPaseoCli(
+        ctx,
+        buildPaseoWorkspaceArchiveArgs(entry.workspace_id),
+      );
+      if (result.code !== 0) {
+        firstError ??=
+          `archive ${entry.workspace_id} failed (exit ${result.code}): ${
+            result.stderr.trim() || result.stdout.trim()
+          }`;
+        continue;
+      }
+      current = markArchived(
+        current,
+        entry.workspace_id,
+        new Date().toISOString(),
+      );
+      archived.push(entry.workspace_id);
+    }
+    if (archived.length > 0) await writeWorkspaceFile(path, current);
+  }
+
+  await callStateCli(
+    ctx,
+    "cleanup-resolve",
+    buildCleanupResolveStateFlags(ctx.stateDir, intent.id, firstError),
+  );
+  return firstError === null
+    ? { id: intent.id, outcome: "resolved", archived }
+    : { id: intent.id, outcome: "failed", archived, error: firstError };
+}
+
+export async function runCleanupSweep(
+  ctx: DriverContext,
+): Promise<CleanupSweepResult> {
+  const stateJson = await callStateCli(
+    ctx,
+    "get",
+    buildGetStateFlags(ctx.stateDir),
+  ) as V2State;
+  const outbox = stateJson.cleanup_outbox ?? [];
+  const entries: CleanupSweepEntryResult[] = [];
+  for (const intent of outbox) {
+    if (intent.attempts >= CLEANUP_MAX_ATTEMPTS) {
+      entries.push({ id: intent.id, outcome: "skipped", archived: [] });
+      continue;
+    }
+    entries.push(await sweepOne(ctx, intent));
+  }
+  return { op: "cleanup-sweep", entries };
 }
 
 // ---------------------------------------------------------------------------
@@ -1633,7 +1843,7 @@ export interface DispatchLoopParams {
   readonly launchArgs?: LaunchArgs;
   readonly prefs?: OrchestrationPrefs | null;
   readonly nextOpts?: Omit<NextStateOpts, "session">;
-  readonly paseoNewWorkspace?: string;
+  readonly paseoWorkspaceIsolation?: string;
   readonly resolveProjectRoot?: () => Promise<string>;
   readonly intervalSec?: number;
   readonly maxCycles?: number;
@@ -1642,6 +1852,10 @@ export interface DispatchLoopParams {
   /** 指定すると常駐ループが Controller Lease を取り、離脱時に解放する。 */
   readonly lease?: ControllerLease;
   readonly heartbeat?: HeartbeatWriter;
+  /** Cleanup Outbox のスイープ間隔 (サイクル数)。既定 CLEANUP_SWEEP_EVERY_CYCLES。 */
+  readonly cleanupSweepEveryCycles?: number;
+  /** スイープ 1 回分の結果 (`main` はここで console.log する)。 */
+  readonly onSweep?: (result: CleanupSweepResult) => void;
   /** ループを抜けた理由。`main` はこれで停止理由の 1 行を出す。 */
   readonly onStop?: (reason: DispatchStopReason) => void;
 }
@@ -1671,7 +1885,7 @@ function dispatchContextOf(params: DispatchLoopParams): DriverContext {
     launchArgs: params.launchArgs ?? {},
     prefs: params.prefs ?? null,
     nextOpts: params.nextOpts ?? {},
-    paseoNewWorkspace: params.paseoNewWorkspace ?? "local",
+    paseoWorkspaceIsolation: params.paseoWorkspaceIsolation ?? "local",
     resolveProjectRoot: params.resolveProjectRoot ??
       makeProjectRootResolver(runner, stateDir),
     lease: params.lease,
@@ -1688,6 +1902,8 @@ export async function runDispatchLoop(
   params: DispatchLoopParams,
 ): Promise<readonly CycleResult[]> {
   const ctx = dispatchContextOf(params);
+  const sweepEveryCycles = params.cleanupSweepEveryCycles ??
+    CLEANUP_SWEEP_EVERY_CYCLES;
   const intervalMs =
     (params.intervalSec ?? DEFAULT_DISPATCH_LOOP_INTERVAL_SEC) * 1000;
   const results: CycleResult[] = [];
@@ -1754,6 +1970,17 @@ export async function runDispatchLoop(
       if (params.signal.aborted) {
         params.onStop?.("signal");
         break;
+      }
+      // スイープは 1 サイクルの観測 (results / onResult / heartbeat の開始→終了) の外に
+      // 置く — 後始末はディスパッチの 1 手ではないので、CycleResult の列に混ぜない。
+      // abort より後・`--max-cycles` の判定より前に置くのは、停止シグナルには即応しつつ
+      // 回数を切った実行 (運用の点検・テスト) でも due なスイープは実行するため。
+      if (sequence % sweepEveryCycles === 0) {
+        await ctx.heartbeat?.operation(
+          "cleanup-sweep",
+          CLEANUP_SWEEP_DEADLINE_SEC,
+        );
+        params.onSweep?.(await runCleanupSweep(ctx));
       }
       if (params.maxCycles !== undefined && sequence >= params.maxCycles) {
         params.onStop?.("max-cycles");
@@ -1939,6 +2166,11 @@ export async function main(argv: string[]): Promise<number> {
     const maxCycles = flags.has("max-cycles")
       ? requireIntFlag(flags, "max-cycles")
       : undefined;
+    const cleanupSweepEveryCycles = intFlag(
+      flags,
+      "cleanup-sweep-every-cycles",
+      CLEANUP_SWEEP_EVERY_CYCLES,
+    );
 
     const runner = new SubprocessRunner();
     const prefs = await readOrchestrationPrefs(Deno.env.get("HOME") ?? "");
@@ -1971,7 +2203,8 @@ export async function main(argv: string[]): Promise<number> {
         config: nextStateOpts.config,
         deadTasks: nextStateOpts.deadTasks,
       },
-      paseoNewWorkspace: flags.get("paseo-new-workspace") ?? "local",
+      paseoWorkspaceIsolation: flags.get("paseo-workspace-isolation") ??
+        "local",
       resolveProjectRoot: makeProjectRootResolver(runner, stateDir),
       lease,
       heartbeat: lease === undefined
@@ -1989,6 +2222,8 @@ export async function main(argv: string[]): Promise<number> {
           intervalSec,
           maxCycles,
           signal: controller.signal,
+          cleanupSweepEveryCycles,
+          onSweep: (sweep) => console.log(JSON.stringify(sweep)),
           onResult: (cycleResult) => console.log(JSON.stringify(cycleResult)),
           onStop: (reason) => {
             // signal / max-cycles は「言われたとおり終わった」だけなので黙って抜ける。

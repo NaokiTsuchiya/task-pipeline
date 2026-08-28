@@ -411,6 +411,40 @@ const VALID_CASES: { label: string; value: unknown }[] = [
       },
     }),
   },
+  {
+    // gh-157: cleanup_outbox は任意キー (この機能導入前の state.json には無い)。
+    label: "gh-157: cleanup_outbox が無い state も合法 (任意キー)",
+    value: stateOf([]),
+  },
+  {
+    label: "gh-157: cleanup_outbox が空配列",
+    value: stateOf([], { cleanup_outbox: [] }),
+  },
+  {
+    label:
+      "gh-157: cleanup_outbox の正常な 1 件 (attempts 0 / last_error null)",
+    value: stateOf([], {
+      cleanup_outbox: [{
+        id: "gh-1",
+        reason: "retire",
+        requested_at: "2026-08-28T00:00:00Z",
+        attempts: 0,
+        last_error: null,
+      }],
+    }),
+  },
+  {
+    label: "gh-157: cleanup_outbox の reason は withdraw もとる",
+    value: stateOf([], {
+      cleanup_outbox: [{
+        id: "gh-1",
+        reason: "withdraw",
+        requested_at: "2026-08-28T00:00:00Z",
+        attempts: 2,
+        last_error: "archive failed",
+      }],
+    }),
+  },
 ];
 
 const INVALID_CASES: { label: string; value: unknown }[] = [
@@ -837,6 +871,97 @@ const INVALID_CASES: { label: string; value: unknown }[] = [
   {
     label: "gh-156: controller_lease が配列",
     value: stateOf([], { controller_lease: [] }),
+  },
+  // gh-157: cleanup_outbox — 変異 (誤実装) ごとに 1 ケース。
+  {
+    label: "gh-157: cleanup_outbox の reason が enum 外",
+    value: stateOf([], {
+      cleanup_outbox: [{
+        id: "gh-1",
+        reason: "dequeue",
+        requested_at: "2026-08-28T00:00:00Z",
+        attempts: 0,
+        last_error: null,
+      }],
+    }),
+  },
+  {
+    label: "gh-157: cleanup_outbox の attempts が負数",
+    value: stateOf([], {
+      cleanup_outbox: [{
+        id: "gh-1",
+        reason: "retire",
+        requested_at: "2026-08-28T00:00:00Z",
+        attempts: -1,
+        last_error: null,
+      }],
+    }),
+  },
+  {
+    label: "gh-157: cleanup_outbox の attempts が文字列",
+    value: stateOf([], {
+      cleanup_outbox: [{
+        id: "gh-1",
+        reason: "retire",
+        requested_at: "2026-08-28T00:00:00Z",
+        attempts: "1",
+        last_error: null,
+      }],
+    }),
+  },
+  {
+    label: "gh-157: cleanup_outbox の requested_at 欠落",
+    value: stateOf([], {
+      cleanup_outbox: [{
+        id: "gh-1",
+        reason: "retire",
+        attempts: 0,
+        last_error: null,
+      }],
+    }),
+  },
+  {
+    label: "gh-157: cleanup_outbox の id 欠落",
+    value: stateOf([], {
+      cleanup_outbox: [{
+        reason: "retire",
+        requested_at: "2026-08-28T00:00:00Z",
+        attempts: 0,
+        last_error: null,
+      }],
+    }),
+  },
+  {
+    label: "gh-157: cleanup_outbox の last_error 欠落",
+    value: stateOf([], {
+      cleanup_outbox: [{
+        id: "gh-1",
+        reason: "retire",
+        requested_at: "2026-08-28T00:00:00Z",
+        attempts: 0,
+      }],
+    }),
+  },
+  {
+    label: "gh-157: cleanup_outbox のエントリに余分なキー",
+    value: stateOf([], {
+      cleanup_outbox: [{
+        id: "gh-1",
+        reason: "retire",
+        requested_at: "2026-08-28T00:00:00Z",
+        attempts: 0,
+        last_error: null,
+        note: "x",
+      }],
+    }),
+  },
+  {
+    label: "gh-157: cleanup_outbox が配列でない",
+    value: stateOf([], { cleanup_outbox: {} }),
+  },
+  {
+    label: "gh-157: cleanup_outbox の要素が文字列",
+    value: stateOf([], { cleanup_outbox: ["gh-1"] }),
   },
 ];
 

@@ -2351,6 +2351,98 @@ Deno.test("T-V-withdraw: open → withdrawn(asked=false) with an optional note",
   );
 });
 
+Deno.test("T-V-cleanup-1: retire / withdraw が cleanup_outbox に intent を積む (CLI 経路)", async () => {
+  const retireDir = await tempDir();
+  await setupQueue(retireDir, [
+    queueItem({
+      progress: "resting",
+      artifact: {
+        state: "merged",
+        ref: "r",
+        branch: "b",
+        tip: "t",
+        base: "main",
+      },
+    }),
+  ]);
+  const retireOut = await expectOk(retireDir, [
+    "retire",
+    "--state-dir",
+    retireDir,
+    "--id",
+    "t-1",
+  ]);
+  assertEquals(retireOut.cleanup_outbox, 1);
+  const retireOutbox = (await readState(retireDir)).cleanup_outbox as Record<
+    string,
+    unknown
+  >[];
+  assertEquals(retireOutbox.length, 1);
+  assertEquals(retireOutbox[0].id, "t-1");
+  assertEquals(retireOutbox[0].reason, "retire");
+  assertEquals(retireOutbox[0].attempts, 0);
+  assertEquals(retireOutbox[0].last_error, null);
+
+  const withdrawDir = await tempDir();
+  await setupQueue(withdrawDir, [restingOpen({}, { session: "s" })]);
+  await expectOk(withdrawDir, [
+    "withdraw",
+    "--state-dir",
+    withdrawDir,
+    "--id",
+    "t-1",
+  ]);
+  const withdrawOutbox = (await readState(withdrawDir))
+    .cleanup_outbox as Record<string, unknown>[];
+  assertEquals(withdrawOutbox.length, 1);
+  assertEquals(withdrawOutbox[0].reason, "withdraw");
+});
+
+Deno.test("T-V-cleanup-2: cleanup-resolve は成功で消し、--error では残して attempts を進める", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [restingOpen({}, { session: "s" })]);
+  await expectOk(dir, ["withdraw", "--state-dir", dir, "--id", "t-1"]);
+
+  const failed = await expectOk(dir, [
+    "cleanup-resolve",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+    "--error",
+    "archive failed",
+  ]);
+  assertEquals(failed.resolved, false);
+  assertEquals(failed.attempts, 1);
+  const afterError = (await readState(dir)).cleanup_outbox as Record<
+    string,
+    unknown
+  >[];
+  assertEquals(afterError.length, 1, "失敗は消さない");
+  assertEquals(afterError[0].last_error, "archive failed");
+
+  const resolved = await expectOk(dir, [
+    "cleanup-resolve",
+    "--state-dir",
+    dir,
+    "--id",
+    "t-1",
+  ]);
+  assertEquals(resolved.resolved, true);
+  assertEquals(resolved.cleanup_outbox, 0);
+  assertEquals((await readState(dir)).cleanup_outbox, []);
+});
+
+Deno.test("T-V-cleanup-3: outbox に無い id の cleanup-resolve は missing で state.json を変えない", async () => {
+  const dir = await tempDir();
+  await setupQueue(dir, [queueItem()]);
+  await expectFailureUnchanged(
+    dir,
+    ["cleanup-resolve", "--state-dir", dir, "--id", "t-404"],
+    EXIT_CODES.missing,
+  );
+});
+
 Deno.test("T-V-withdraw-asked: sets asked; open is conflict", async () => {
   const dir = await tempDir();
   await setupQueue(dir, [
@@ -5456,7 +5548,7 @@ Deno.test("T-D2: verb headings match ALLOWED_FLAGS keys", async () => {
     [],
     `documented but unimplemented: ${missingInImpl}`,
   );
-  assertEquals(implVerbs.size, 49, "the dispatch set is 49 verbs");
+  assertEquals(implVerbs.size, 50, "the dispatch set is 50 verbs");
 });
 
 Deno.test("T-D3: the node tables match the v2 declarations", async () => {
@@ -5615,7 +5707,7 @@ Deno.test("T-D6: every dispatch verb is either a transition or a ledger verb", (
     [],
     "declared ledger verbs with no dispatch entry",
   );
-  assertEquals(transition.size + ledger.size, dispatch.size, "48 = 33 + 15");
+  assertEquals(transition.size + ledger.size, dispatch.size, "50 = 33 + 17");
 });
 
 // 受け入れ条件4 (gh-39): 「lock を取らない読み取り専用 verb」の一覧が、契約文書と

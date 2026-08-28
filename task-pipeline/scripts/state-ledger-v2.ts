@@ -61,6 +61,7 @@ export const LEDGER_VERBS = [
   "relisted-drop",
   "stalled-set",
   "controller-lease-set",
+  "cleanup-resolve",
 ] as const;
 export type LedgerVerb = (typeof LEDGER_VERBS)[number];
 
@@ -88,21 +89,23 @@ export function finalizeStateV2(state: V2State, nowIso: string): V2State {
 }
 
 // 読み込んだ生の JSON を V2State として扱う前の正規化。v2 スキーマ上 optional な
-// withdrawn_branches (v1 に無かったので移行後も欠けうる) を空配列で埋め、同じく
-// optional な history_archived (gh-58 導入前の state.json には無い) を 0 で埋める。
-// **他のキーには触れない** — 検証は checkStateV2 が済ませている。両方とも既に
+// withdrawn_branches (v1 に無かったので移行後も欠けうる)・history_archived (gh-58 導入前の
+// state.json には無い)・cleanup_outbox (gh-157 導入前の state.json には無い) を既定値で
+// 埋める。**他のキーには触れない** — 検証は checkStateV2 が済ませている。3 つとも既に
 // 正しい型で存在するときは入力をそのまま返す (新しいオブジェクトを作らない) — 呼び出し
 // 側が参照同一性に依存できる (L-NORM-1)。
 export function normalizeStateV2(parsed: Record<string, unknown>): V2State {
   const needsWithdrawnBranches = !Array.isArray(parsed.withdrawn_branches);
   const needsHistoryArchived = typeof parsed.history_archived !== "number";
-  if (!needsWithdrawnBranches && !needsHistoryArchived) {
+  const needsCleanupOutbox = !Array.isArray(parsed.cleanup_outbox);
+  if (!needsWithdrawnBranches && !needsHistoryArchived && !needsCleanupOutbox) {
     return parsed as unknown as V2State;
   }
   return {
     ...parsed,
     withdrawn_branches: needsWithdrawnBranches ? [] : parsed.withdrawn_branches,
     history_archived: needsHistoryArchived ? 0 : parsed.history_archived,
+    cleanup_outbox: needsCleanupOutbox ? [] : parsed.cleanup_outbox,
   } as unknown as V2State;
 }
 
@@ -125,6 +128,7 @@ export function buildFreshStateV2(
     relisted: [],
     promoted: [],
     withdrawn_branches: [],
+    cleanup_outbox: [],
     history: [],
     history_archived: 0,
     schema_version: V2_SCHEMA_VERSION,
@@ -373,4 +377,33 @@ export function applyControllerLeaseSetV2(
       acquired_at: nowIso,
     },
   };
+}
+
+/**
+ * Cleanup Intent 1 件の決着 (gh-157)。**成功なら消し、失敗なら残す** — 消えたことが
+ * 「後始末が終わった」の唯一の表現であり、失敗を消すと archive されないまま忘れられた
+ * workspace が誰の視界にも入らなくなる。`error` 付きの呼びは試行回数を進めるだけで、
+ * 上限に達したエントリをスイープが飛ばすようになる (残置して人が気づく)。
+ */
+export function applyCleanupResolveV2(
+  state: V2State,
+  id: string,
+  error: string | null,
+): V2State {
+  const index = state.cleanup_outbox.findIndex((e) => e.id === id);
+  if (index === -1) {
+    throw new CliErrorV2("missing", `id not found in cleanup_outbox: ${id}`);
+  }
+  const outbox = state.cleanup_outbox.slice();
+  if (error === null) {
+    outbox.splice(index, 1);
+  } else {
+    const current = outbox[index];
+    outbox[index] = {
+      ...current,
+      attempts: current.attempts + 1,
+      last_error: error,
+    };
+  }
+  return { ...state, cleanup_outbox: outbox };
 }

@@ -21,6 +21,7 @@ import { checkStateV2 } from "./state-schema-v2.ts";
 import {
   applyCandidatesDropV2,
   applyCandidatesSetV2,
+  applyCleanupResolveV2,
   applyControllerLeaseSetV2,
   applyHistoryAppendV2,
   applyInitV2,
@@ -597,4 +598,27 @@ export async function cmdControllerLeaseSet(
     (current) => applyControllerLeaseSetV2(current, arg, nowIso()),
   );
   return { ok: true, controller_lease: next.controller_lease ?? null };
+}
+
+// cleanup-resolve — Driver のスイープが Cleanup Intent 1 件に決着をつける入口 (gh-157)。
+// `--error` の有無だけが分岐で、付いていれば「まだ終わっていない」として残す。
+export async function cmdCleanupResolve(
+  stateDir: string,
+  flags: Map<string, string>,
+): Promise<Record<string, unknown>> {
+  const id = requireFlag(flags, "id");
+  const error = flags.get("error") ?? null;
+  const next = await withExistingStateLock(
+    stateDir,
+    lockOpts(flags),
+    (current) => applyCleanupResolveV2(current, id, error),
+  );
+  const remaining = next.cleanup_outbox.find((e) => e.id === id) ?? null;
+  return {
+    ok: true,
+    id,
+    resolved: remaining === null,
+    attempts: remaining?.attempts ?? 0,
+    cleanup_outbox: next.cleanup_outbox.length,
+  };
 }

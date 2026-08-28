@@ -141,8 +141,9 @@ compile(class, gate, finish) → runs/<id>/plan.json
 - **効果**: オーケストレーターのコンテキスト肥大化と費用 (24〜32%) を完全に $0 化。
 
 ### 【Phase 3: Task Cell カプセル化と動的 DAG (Risk Tiering)】
-- [ ] **Task 3-1: Paseo Workspace による Task Cell 隔離の標準化**
-  - タスク着手時の Workspace 自動生成と、マージ/withdraw 時の自動アーカイブ・クリーンアップの完全自動化。
+- [x] **Task 3-1: Paseo Workspace による Task Cell 隔離の標準化** (gh-157)
+  - takeover が `paseo workspace create --json` で Task Cell を明示生成し、exact な id を `runs/<id>/paseo-workspace.json` に記録してから `paseo run --workspace <id>` で起こす。
+  - `state.ts retire` / `withdraw` が台帳 (`cleanup_outbox`) に Cleanup Intent を同じ書き込みで積み (Durable Cleanup Outbox — 台帳は外部 RPC を呼ばない)、Driver の低頻度・冪等なスイープが記録された owned workspace を archive して `cleanup-resolve` で意思を落とす。手動 CLI で retire された分も同じ経路で回収される。
 - [ ] **Task 3-2: Trivial タスク向け Shell-Check ゲートの実装**
   - 機械検証可能な受け入れ条件に対する高速・無料のコマンド実行ゲートの導入。
 - [ ] **Task 3-3: High タスク向け 異種モデル合議ゲート (Dual-Verifier) の実装**

@@ -218,10 +218,10 @@ state を人が読むための入口」である以上ファイルを増やす�
 
 ## verb 一覧
 
-49 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
+50 verb。出所は 2 つで、どちらにも属さない verb は存在しない (`state.test.ts` の T-D6):
 
 - **遷移 33** — `VERB_SPEC` のキー。上の遷移表に載る。
-- **帳簿 16** — `state-ledger-v2.ts` の `LEDGER_VERBS`。queue エントリの座標を持たない。
+- **帳簿 17** — `state-ledger-v2.ts` の `LEDGER_VERBS`。queue エントリの座標を持たない。
 
 ### 帳簿系
 
@@ -574,6 +574,23 @@ state.ts controller-lease-set --state-dir <dir> \
 `session-touch` で生存を主張し、クラッシュして解放できなかったときは台帳の失効とともに
 `next` の抑制も解ける (新しい閾値をここに置かない理由)。
 
+### `cleanup-resolve`
+
+```
+state.ts cleanup-resolve --state-dir <dir> --id <id> [--error <s>] [lock flags]
+```
+
+Cleanup Outbox (`cleanup_outbox`) のエントリ 1 件に決着をつける (gh-157)。エントリを積むのは
+`retire` / `withdraw` で、畳むのは Driver (`scripts/pipeline-driver.ts`) の冪等スイープである。
+**この CLI は台帳しか触らない** — `paseo workspace archive` を呼ぶのはスイープ側で、台帳に
+外部 RPC を持ち込まないための分割である。
+
+前提: `id` が `cleanup_outbox` に存在する (無ければ `missing`)。
+効果: `--error` 無しなら該当エントリを削除する (後始末が終わった)。`--error` 付きなら削除せず
+`attempts` を 1 増やし `last_error` を置き換える (スイープが失敗した記録。試行が上限に達した
+エントリはスイープが飛ばし、残置されて人の目に入る)。
+成功: `{"ok": true, "id": "<id>", "resolved": <bool>, "attempts": <n>, "cleanup_outbox": <残り件数>}`。
+
 ### 進行系
 
 ### `approve`
@@ -680,8 +697,10 @@ state.ts retire --state-dir <dir> --id <id> [lock flags]
 
 前提: P が `resting`、A が `merged`、`session` が null (揮発資源ゼロ)。
 効果: queue からエントリを外し、`completed` に `{id, done_at}` を控える。同じ書き込みで
-24 時間超の控えを掃除する (設計2.5)。
-成功: `{"ok": true, "id": "<id>", "completed": <n>}`。
+24 時間超の控えを掃除する (設計2.5)。**同じ書き込みで `cleanup_outbox` に
+`{id, reason: "retire", requested_at, attempts: 0, last_error: null}` を積む** (gh-157。同じ id が
+既に積まれていれば増やさない)。
+成功: `{"ok": true, "id": "<id>", "completed": <n>, "cleanup_outbox": <件数>}`。
 
 ### 完了系
 
@@ -722,7 +741,9 @@ state.ts withdraw --state-dir <dir> --id <id> [--note <s>] [lock flags]
 
 前提: P が `resting`、A が `open`。
 効果: A → `withdrawn(asked=false)` (follow は破棄、`note` を控える)、`session → null`。
-成功: `{"ok": true, "id": "<id>", "artifact": "withdrawn"}`。
+**同じ書き込みで `cleanup_outbox` に `reason: "withdraw"` の意思を積む** (gh-157。`retire` と
+同じ規則で、同じ id が既に積まれていれば増やさない)。
+成功: `{"ok": true, "id": "<id>", "artifact": "withdrawn", "cleanup_outbox": <件数>}`。
 
 ### `withdraw-asked`
 
