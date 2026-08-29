@@ -28,11 +28,18 @@ const AUDIT_MODE_STRENGTH: Record<AuditMode, number> = {
   dual: 2,
 };
 
-/** class ごとの検証強度の床。 */
+/**
+ * class ごとの検証強度の床。
+ *
+ * `high` が `dual` なのは、単一モデルの誤 PASS が沈黙する故障だからである — 公開 API・スキーマ
+ * 移行・並行性のような取り返しの付かない変更で、盲点の重なりを 1 体分に留めない
+ * (`docs/dual-verifier-2026-08.md`)。合議の 2 体を構成できない環境ではゲートが成立せず
+ * blocked になる (単一へは降格しない)。
+ */
 export const CLASS_AUDIT_FLOOR: Record<TaskClass, AuditMode> = {
   trivial: "shell",
   standard: "single",
-  high: "single",
+  high: "dual",
 };
 
 /**

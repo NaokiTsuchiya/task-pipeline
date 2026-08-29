@@ -53,6 +53,7 @@ Pause for the user only when the work genuinely requires them: a destructive or 
 | 到達条件 | 読むファイル |
 |---|---|
 | サブエージェントを起動または再開する直前 — provider・model・mode と経路を決める | `playbooks/agent-launch.md` |
+| シェル判定の応答が `{"route": "llm", "audit_mode": "dual"}` を返した — 異種モデル 2 体の合議ゲート | `playbooks/dual-verifier.md` |
 | タスク実行 手順 2 — タスク専用の worktree を作る / 作れなかった | `playbooks/worktree.md` |
 | `next` が非除外の `running` タスクに `wait` / `status-check` / `set-takeover` / `clear-takeover` / `takeover` を返した | `playbooks/inflight.md` |
 | `finish=pr` の PR を追従する — `ship` の直後、観測プロセスの終了通知、`next` の `probe-run` / `fix-start` / `fix-ci-rerun` / `fix-give-up` / `release {defer: "fix-start"}` | `playbooks/pr-follow.md` |
@@ -254,6 +255,7 @@ Return only what the adapter file specifies for this operation.
    phase: <phase> / task: <tasks/<id>.md の絶対パス> / run dir: <runs/<id> の絶対パス> / target project: <worktree の絶対パス> / verdict path: <verdict-path が返した path> / review file: <レビュー観点ファイルの絶対パス>
    Write the full verdict JSON to verdict path, then return only the minimal verdict JSON.
    ```
+   - **`audit_mode` が `dual` のときだけは、この手順の代わりに `playbooks/dual-verifier.md` に従う** (異種モデル 2 体を逐次に起こして両 PASS を要求する合議ゲート。プロンプト文面・起動経路・行動境界はここと同じで、変わるのは verifier の体数と判定の受け取り方だけである)。`audit_mode` はシェル判定の応答が返す (下記「シェル判定 (Shell-Check ゲート)」) — `risk: high` は床が `dual` なので常に合議、`single` はこの手順のまま 1 体で回す。
    - **起動の経路は 3 段で、上から順に試す** (どの段でも上のプロンプト文面は変えない。provider・model・mode の解決と、落ちてよい失敗の定義は `playbooks/agent-launch.md` の経路節):
      1. **Paseo 経路** — 解決した provider・model・mode で `paseo run` を**1 回だけ**起動し、`--output-schema` で最小 verdict JSON を stdout で受ける。**起動前に事前チェック** (解決した provider が無人実行できる mode を持つか) を通し、通らなければこの段を飛ばして 2 へ。**エージェントが生まれなかったと言い切れる失敗** (起動コマンドが非ゼロ終了 / agentId が返らない) のときだけ、history に 1 行 (`agent-launch: paseo 経路が失敗 (<理由>) — 現行経路で verifier を起動`) を残して 2 へ落ちる。**生まれた後でも permission 待ちで停止したときだけは例外で 2 へ落ちる** (残ったエージェントの扱いと history の文言も同じ節)。
      2. **現行ハーネス経路** — `subagent_type: task-pipeline-verifier` で Agent tool 起動する。agent type が未インストールなら 3 へ落ちる (下記「未インストール環境のフォールバック」に history の 1 行も含めた規定がある)。
@@ -304,7 +306,8 @@ Return only what the adapter file specifies for this operation.
 deno run --no-prompt --allow-read=<state dir>,<worktree の絶対パス> --allow-write=<state dir> --allow-run ~/.claude/skills/task-pipeline/scripts/shell-check.ts --state-dir <.task-pipeline の絶対パス> --id <id> --verdict-path <verdict-path が返した path>
 ```
 応答の `route` で分岐する:
-- **`{"route": "llm", "audit_mode": "single"|"dual", "reason": ...}`** → 機械判定の対象ではない (散文の成果物を判定するフェーズ、`standard`/`high` の class、`audit_mode` 宣言、信頼済みマニフェストが無い等)。**手順 6 の残りをそのまま行う** (検証エージェントを起動・再開する)。`reason` は history に 1 行残す。
+- **`{"route": "llm", "audit_mode": "single", "reason": ...}`** → 機械判定の対象ではない (散文の成果物を判定するフェーズ、`standard` の class、`audit_mode` 宣言、信頼済みマニフェストが無い等)。**手順 6 の残りをそのまま行う** (検証エージェントを 1 体起動・再開する)。`reason` は history に 1 行残す。
+- **`{"route": "llm", "audit_mode": "dual", "reason": ...}`** → **異種モデル 2 体の合議ゲートである** (`risk: high` の床、または `audit_mode: dual` の宣言)。`playbooks/dual-verifier.md` に従う — 手順 6 の残り (1 体の起動・再開) は行わない。`reason` は同じく history に 1 行残す。
 - **`{"route": "shell", "verdict": "PASS", ...}`** → 判定はこれで確定。**上の PASS 分岐と同じ処理をする** (`advance` → 実行エージェントへ「`<phase>` verified PASS. Proceed to phase `<next>`.」→ 列末なら finalize / `ship`)。判定 JSON は CLI が verdict path へ既に書いている。
 - **`{"route": "shell", "verdict": "FAIL", ...}`** → **上の FAIL 分岐と同じ処理をするが、`--verifier` と `--session` は渡さない** (`state.ts phase-fail --id <id> --phase <phase> --expect-attempts <n>` だけ)。検証エージェントが存在しないので `reuse_verifier` を立ててはならない — 立てると次の再検証が「居ないエージェントの再開」を試みる。実行エージェントへ送る文面は現行と同一 (「Fix required. Read required_fixes from `<verdict path の絶対パス>` and address them in phase `<phase>`.」)。
 - **`{"route": "shell", "verdict": "UNAVAILABLE", ...}`** → **PASS でも FAIL でもない。** チェックが実行できていない (git が起動できない、コマンドが spawn できない等) ので、`advance` も `phase-fail` も呼ばない。`state.ts block --id <id> --reason <判定 JSON の reasons の 1 行>` を呼び、アダプタで `mark <id> blocked <理由>`、`PushNotification` を 1 本送る (`playbooks/agent-launch.md`「どちらの経路も使えないとき」と同じ扱い。ループは止めない)。**代わりに検証エージェントを起動して埋め合わせてはならない** — 実行されていないチェックを別の判断で PASS にすることになる。

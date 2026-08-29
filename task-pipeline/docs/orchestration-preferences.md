@@ -51,7 +51,7 @@ Paseo 標準のカテゴリは `impl` / `ui` / `research` / `planning` / `audit`
   "providers_by_class": {
     "high": {
       "impl": "claude/claude-opus-4-1",
-      "audit": "omp/anthropic/claude-sonnet-4-5"
+      "audit": ["claude/claude-opus-4-1", "omp/openai/gpt-5"]
     },
     "trivial": {
       "impl": "claude/claude-haiku-4-5"
@@ -64,5 +64,26 @@ Paseo 標準のカテゴリは `impl` / `ui` / `research` / `planning` / `audit`
 - この例で `trivial` に `impl` だけを置き、`standard` の行を省いているのはそのためである (行を省けばその class は `providers` をそのまま使う)。
 - **provider 名とモデル id は環境ごとに違う。** 実在するものは MCP の `list_providers` / `list_models` で確かめる (**この例の値もそのまま信じない**)。値の読み方 (`<provider>/<model>`、最初の `/` までが provider) と、`status: available` が無人実行の可否を意味しないことは上の例と同じである。
 - **どの class にどのモデルを割り当てるか (政策値) はこのファイルの領分で、床・段の順序・mode の規則 (不変条件) は `playbooks/agent-launch.md` にある。** このファイルに何を書いても不変条件は上書きできない。
+
+## `high` の `audit` は配列 (異種モデル合議)
+
+`risk: high` の検証は**異種モデル 2 体の合議** (`playbooks/dual-verifier.md`) なので、`providers_by_class.high.audit` は
+**JSON 配列で 2 件**を書く。上の例がその形である。起動引数から渡すときはカンマ区切り
+(`verify_provider=claude/claude-opus-4-1,omp/openai/gpt-5`) で、意味は同じである。
+合議に入るかどうかを決めるのは `audit_mode` (`scripts/task-policy.ts`。`risk: high` の床が `dual`) で、
+**`audit_mode: dual` を宣言したタスクは class が `high` でなくても同じ `high` の行を引く**。
+
+- **満たすべき条件は 4 つ** (`playbooks/agent-launch.md`「合議の不変条件」): 2 件ちょうど / provider が違う /
+  モデルファミリー (系統) が違う / 双方の系統が値から確かめられる。**1 つでも欠けると、そのタスクの検証ゲートは
+  成立せず blocked になる** — 単一の verifier で代替はしない (誤 PASS は沈黙するので、弱い合議は合議が無いより危険である)。
+- **系統は provider 名では決まらない。** `claude/claude-opus-4-1` と `omp/anthropic/claude-sonnet-4-5` は provider が
+  違っても**どちらも anthropic 系**なので合議にならない。系統は ① `omp` のように model id が `<vendor>/<model>` 形なら
+  その vendor ② `claude` / `gemini` のように provider で決まるならそれ ③ `grok-4.5` のような既知の model 名の接頭辞、の順で決まる。
+  **`"omp"` のように model を省略した spec は系統を確かめられないので違反になる** — 複数系統を載せる provider では model を明示する。
+- **配列を書けるのは `providers_by_class.high.audit` だけである。** `providers.audit` や `impl` に配列を書いても
+  単一の spec としては読まれず、その段を素通りする (合議が黙って単一検証へ降格しないため)。3 件以上も黙って 2 件に削らない。
+- **この例の provider・モデル id もそのまま信じない** — 実在するものは `list_providers` / `list_models` (CLI なら
+  `paseo provider ls`) で確かめる。合議に載せる 2 体は、どちらも無人実行できる mode を持つ必要がある
+  (`junie` は持たないので合議には使えない)。
 
 ファイルが無いときの扱い (既定の組で進め、ユーザーに一度だけ伝える) は `playbooks/agent-launch.md` の解決手順にある。

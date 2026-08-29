@@ -36,8 +36,6 @@ import {
   buildTouchExecutorStateFlags,
   CLEANUP_MAX_ATTEMPTS,
   type CleanupSweepResult,
-  type CommandResult,
-  type CommandRunner,
   type ControllerLease,
   DEFAULT_DISPATCH_LOOP_INTERVAL_SEC,
   type DispatchLoopParams,
@@ -58,19 +56,20 @@ import {
   parentDir,
   parsePaseoLs,
   planObserveTasks,
-  providerModeOf,
   readDesired,
   readOrCreateDriverSession,
-  resolveProviderModel,
   runCleanupSweep,
   runCycle,
   runDispatchLoop,
   runObserveCycle,
   runObserveLoop,
   selectObserveOperation,
-  splitProviderModel,
-  SubprocessRunner,
 } from "./pipeline-driver.ts";
+import {
+  type CommandResult,
+  type CommandRunner,
+  SubprocessRunner,
+} from "./command-runner.ts";
 import {
   emptyWorkspaceFile,
   markArchived,
@@ -95,121 +94,6 @@ function assertEquals(actual: unknown, expected: unknown, msg?: string): void {
     throw new Error(`${msg ?? "assertEquals failed"}: ${a} !== ${e}`);
   }
 }
-
-// ---------------------------------------------------------------------------
-// U: provider・model の 4段解決
-// ---------------------------------------------------------------------------
-
-Deno.test("resolveProviderModel: 段1 起動引数が最優先", () => {
-  const resolved = resolveProviderModel(
-    "executor",
-    "standard",
-    { impl_provider: "claude/claude-opus-4-1" },
-    { providers: { impl: "omp/anthropic/claude-sonnet-5" } },
-  );
-  assertEquals(resolved, {
-    provider: "claude",
-    model: "claude-opus-4-1",
-    source: "launch-args",
-  });
-});
-
-Deno.test("resolveProviderModel: 段2 providers_by_class[class].impl", () => {
-  const resolved = resolveProviderModel(
-    "executor",
-    "high",
-    {},
-    {
-      providers: { impl: "claude/claude-sonnet-4-5" },
-      providers_by_class: { high: { impl: "claude/claude-opus-4-1" } },
-    },
-  );
-  assertEquals(resolved, {
-    provider: "claude",
-    model: "claude-opus-4-1",
-    source: "providers_by_class",
-  });
-});
-
-Deno.test("resolveProviderModel: class 行の床 — standard/trivial の audit は無視して段3へ", () => {
-  const resolved = resolveProviderModel(
-    "verifier",
-    "standard",
-    {},
-    {
-      providers: { audit: "omp/anthropic/claude-haiku-4-5" },
-      providers_by_class: {
-        standard: { audit: "omp/anthropic/claude-opus-4-1" },
-      },
-    },
-  );
-  assertEquals(resolved, {
-    provider: "omp",
-    model: "anthropic/claude-haiku-4-5",
-    source: "providers",
-  });
-});
-
-Deno.test("resolveProviderModel: high の audit は providers_by_class を使ってよい", () => {
-  const resolved = resolveProviderModel(
-    "verifier",
-    "high",
-    {},
-    {
-      providers: { audit: "omp/anthropic/claude-haiku-4-5" },
-      providers_by_class: { high: { audit: "omp/anthropic/claude-sonnet-5" } },
-    },
-  );
-  assertEquals(resolved, {
-    provider: "omp",
-    model: "anthropic/claude-sonnet-5",
-    source: "providers_by_class",
-  });
-});
-
-Deno.test("resolveProviderModel: 段3 providers[category]", () => {
-  const resolved = resolveProviderModel(
-    "executor",
-    "standard",
-    {},
-    { providers: { impl: "claude/claude-sonnet-4-5" } },
-  );
-  assertEquals(resolved, {
-    provider: "claude",
-    model: "claude-sonnet-4-5",
-    source: "providers",
-  });
-});
-
-Deno.test("resolveProviderModel: 段4 既定の組 (prefs 無し)", () => {
-  assertEquals(resolveProviderModel("executor", "standard", {}, null), {
-    provider: "claude",
-    model: null,
-    source: "default",
-  });
-  assertEquals(resolveProviderModel("verifier", "standard", {}, null), {
-    provider: "omp",
-    model: null,
-    source: "default",
-  });
-});
-
-Deno.test("splitProviderModel: 最初の / までが provider, 残り全部が model", () => {
-  assertEquals(splitProviderModel("omp/anthropic/claude-haiku-4-5"), {
-    provider: "omp",
-    model: "anthropic/claude-haiku-4-5",
-  });
-  assertEquals(splitProviderModel("claude"), {
-    provider: "claude",
-    model: null,
-  });
-});
-
-Deno.test("providerModeOf: claude -> bypassPermissions, omp -> full, 未知は undefined", () => {
-  assertEquals(providerModeOf("claude"), "bypassPermissions");
-  assertEquals(providerModeOf("omp"), "full");
-  assertEquals(providerModeOf("junie"), undefined);
-});
 
 // ---------------------------------------------------------------------------
 // U: 引数の組み立て (4 kind それぞれの「正しいコマンド・引数」)
